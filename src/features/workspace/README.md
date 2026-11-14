@@ -39,15 +39,29 @@ export function parseFanOutBranch(branch?: string): { slug: string; variant: str
 
 // Templates (Settings.templates): picker + "Save as template" live inside AgentFields (New worktree / New agent);
 // helpers in workspace/shared/templates.tsx (applyTemplate, matchingTemplate, saveDraftAsTemplate).
-// Agent options (workspace/shared/AgentOptions.tsx): <AgentOptions summary={chips} defaultOpen?>{<AgentOptionsSection title note?>…}</AgentOptions>,
+// Agent options (workspace/shared/AgentOptions.tsx): <AgentOptions summary={chips} defaultOpen?>{<AgentOptionsSection title note? action?>…}</AgentOptions>,
 // a collapsed "Agent options" box whose header shows each section's chip; in AgentFields (New worktree / New agent),
-// each Fan out variant and the automation editor (Dispatch: "More agent options" dialog). Sections: the agent's own
+// each Fan out variant and the automation editor (Dispatch: "More agent options" dialog). Sections: model presets
+// (features/agentRoles ModelPresetsSection, below); the agent's own
 // model roles + fallback chains (features/agentRoles AgentRolesSection → AgentSpec.roleModels / fallbackChains; the
 // launch preview then adds `--config <tf-hostd home>/agent-config/<this agent>.yml`, and an own `default` role replaces
 // `--model` / `--thinking`); decide for me (features/autoAnswer AutoAnswerSection: Host default · Off · On with the wait
 // and "only while no app is connected" → AgentSpec.autoAnswer / AutomationDraft.autoAnswer; `toAgentSpec(draft, decides)`
 // sends it only when set and the host has decide for me (`HostInfo.autoAnswer`), an older tf-hostd's section says to update).
 // Templates carry neither roles nor decide for me: applying one keeps them, Save as template leaves them out.
+// Model presets (Settings.modelPresets, saved on this device; features/agentRoles presets.ts + ModelPresets.tsx): the main
+// model, thinking, own roles and fallback chains under a name. ModelPresetsSection {hostId, value, onApply, session?}: the
+// saved presets as chips (click applies all four through `withPreset`, which also clears a selected template; ⋯ Rename… /
+// Delete with Undo), "Save as preset…" (name prefilled by `suggestPresetName`, e.g. "opus-5 everywhere"; off at 32 presets,
+// with nothing set, when the fields already are a preset, or while a role or chain is invalid), "One model for every
+// role…" (a model + level: the main model and every chat role the host or the launch names, `everyRole`; model kinds and
+// chains stay) and, beside the heading, "Reset all" (the empty preset plus the host's decide for me; plan mode stays). A
+// change that replaced something of the user's toasts with Undo. The AgentFields header chip names the matching preset
+// instead of the roles count. Settings → Model presets (features/settings/ModelPresets.tsx) lists them with what they set
+// (roles grouped by model, chains), Rename and Delete. Tests: `bun test src/features/agentRoles` (presets.test.ts).
+// Demo (`src/core/demo/engine.ts` settings): "Opus everywhere" (opus-5 · high for the main model and every chat role, no
+// fallback away from Anthropic: the one-model cyber review) and "Cheap subagents" (task / smol on luna, Anthropic falls
+// back to GPT-5.5).
 // Branch/agent slugs from free text: workspace/shared/slug.ts (slugify, slugFromPrompt), used by Fan out and Dispatch.
 // AI naming (omp's tiny model via @/core ai.ts; marks/buttons in workspace/shared/ai.tsx), each with its deterministic fallback:
 //   New worktree: "Name it from the task" (new branch, empty name) → suggestBranch at Create (worktree/autoName.ts dedupes

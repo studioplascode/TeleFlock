@@ -43,6 +43,7 @@ export function AgentSection({
   onClean,
   progress,
   disabled,
+  wait,
 }: {
   hostId: string;
   group: AgentGroup;
@@ -60,6 +61,8 @@ export function AgentSection({
   progress: string | null;
   /** A scan or another bulk removal runs. */
   disabled: boolean;
+  /** Why its rows' Delete waits (the report is from before this visit, or the host is offline). */
+  wait?: string;
 }) {
   const [shown, setShown] = useState(GROUP_PAGE);
   const owner = group.owner;
@@ -174,6 +177,7 @@ export function AgentSection({
                   inGroup
                   repo={multiRepo ? repo : undefined}
                   onDelete={() => onDelete(w)}
+                  wait={wait}
                 />
               ))}
             </ol>

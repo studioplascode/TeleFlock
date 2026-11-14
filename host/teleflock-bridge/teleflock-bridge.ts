@@ -94,8 +94,14 @@ import type {
  *           `$$ code`) through omp's TUI composer, and every run the user starts (from TeleFlock or
  *           the TUI) goes out at once as a live `message_end` of omp's `bashExecution` /
  *           `pythonExecution` message.
+ *  2.6.0: the main agent's progress, for a hostd whose `welcome` says `caps.progress` (no hello
+ *         flag): while a run of the main agent lasts, the agent is asked how far along the user's
+ *         request is the way omp asks a subagent (its completion probe: an ephemeral side turn on the
+ *         2/5/10/30/60-minute backoff, billed to the session as a `model_usage` entry, off with omp's
+ *         `task.completionProbe`), and `state.progress {pct, stage?, at, since}` carries the answer
+ *         until the run ends.
  */
-const BRIDGE_VERSION = "2.5.0";
+const BRIDGE_VERSION = "2.6.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -570,6 +576,9 @@ interface CtlState {
 	/** 2.3.0 (`caps.userWaits`): omp waits for the user and no dialog offered to hostd covers it; `text`
 	 *  is what the TUI shows in the composer's place (dialogText). */
 	userWait?: { since: number; text?: string };
+	/** 2.6.0 (hostd's `welcome.caps.progress`): the main agent's latest answer to the progress question
+	 *  of its current run (ProgressProbe); absent before the first one and once the run ended. */
+	progress?: MainProgress;
 }
 
 interface ReviewInfo {
@@ -2777,6 +2786,402 @@ export function installUserRunTap(proto: object, notify: (message: Json, session
 	return tapped;
 }
 
+// ─── 2.6.0: the main agent's progress (`welcome.caps.progress`) ────────────────────────────────
+// omp asks a running subagent how far along its task is (task/completion-probe.ts: an ephemeral
+// side turn, the one /btw uses, on a 2/5/10/30/60-minute backoff) and shows the answer on its task
+// row. omp asks the main agent nothing of the kind: the bridge asks it the same way while its run
+// lasts and reports the answer to a hostd that reads it, as `state.progress`
+// (docs/bridge-protocol.md "Main-agent progress").
+
+/** omp's probe schedule (`PROBE_DELAYS_MS`): the wait before each question; the last repeats. */
+export const PROGRESS_DELAYS_MS: readonly number[] = [2, 5, 10, 30, 60].map(minutes => minutes * 60_000);
+/** How long omp may stay quiet after it settled a run it said it goes on with (`agent_end` with
+ *  `willContinue`) before that run counts as over: a retry, a compaction's continuation or a
+ *  background result that wakes the agent starts its run within that (tf-hostd: `JOBS_SETTLE_MS`). */
+export const PROGRESS_SETTLE_MS = 5_000;
+/** `purpose` of the `model_usage` entries the questions bill to the session (omp's own probe:
+ *  `task-completion-probe`). */
+export const PROGRESS_USAGE_PURPOSE = "teleflock-progress-probe";
+/** omp's cap on the reply's stage line (`MAX_STAGE_CHARS`). */
+const MAX_STAGE_CHARS = 80;
+const CONTROL_CHARS = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/g;
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** The schedule: `TF_BRIDGE_PROGRESS_DELAYS` (comma-separated milliseconds; tests only, a lab cannot
+ *  wait two minutes) when it names a positive delay, else omp's. */
+export function progressDelays(spec = process.env.TF_BRIDGE_PROGRESS_DELAYS): readonly number[] {
+	const delays = (spec ?? "")
+		.split(",")
+		.map(s => Number(s.trim()))
+		.filter(n => Number.isSafeInteger(n) && n > 0);
+	return delays.length > 0 ? delays : PROGRESS_DELAYS_MS;
+}
+
+/** The main agent's latest estimate (`state.progress`; epoch milliseconds of this host). */
+export interface MainProgress {
+	/** Whole-number completion, 0–100. */
+	pct: number;
+	/** The agent's current step in its own words: one line, at most 80 characters. */
+	stage?: string;
+	/** When the agent answered. */
+	at: number;
+	/** When the run it estimates began (`agent_start`). */
+	since: number;
+}
+
+/** A tool call the agent is still writing when the question goes out (omp's `InflightToolCall`). */
+export interface InflightCall {
+	name: string;
+	path?: string;
+	chars: number;
+}
+
+const clampPct = (value: number): number => Math.min(100, Math.max(0, Math.round(value)));
+
+/** A reply field as omp keeps it (`replyLine`): one line without control characters, ANSI or half
+ *  surrogate pairs, cut to `max` characters with an ellipsis; `undefined` when empty. */
+function replyLine(value: unknown, max: number): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const line = value.replace(LONE_SURROGATE, "").replace(ANSI, "").replace(CONTROL_CHARS, "").replace(/\s+/g, " ").trim();
+	if (!line) return undefined;
+	const chars = Array.from(line);
+	return chars.length > max ? `${chars.slice(0, max - 1).join("").trimEnd()}…` : line;
+}
+
+/** `pct` as omp reads it (`replyPercent`): a number, or a numeric string with an optional `%`. */
+function replyPct(value: unknown): number | undefined {
+	if (typeof value === "number") return Number.isFinite(value) ? clampPct(value) : undefined;
+	if (typeof value !== "string") return undefined;
+	const match = /^\s*(\d{1,3}(?:\.\d+)?)\s*%?\s*$/.exec(value);
+	return match ? clampPct(Number(match[1])) : undefined;
+}
+
+/** omp's `jsonContainerEnd`: where the balanced `{…}` / `[…]` starting at `start` ends (exclusive),
+ *  string literals skipped; -1 when it never closes. */
+function jsonContainerEnd(text: string, start: number): number {
+	let depth = 0;
+	for (let i = start; i < text.length; i++) {
+		const c = text.charCodeAt(i);
+		if (c === 0x22) {
+			for (i++; i < text.length; i++) {
+				const inner = text.charCodeAt(i);
+				if (inner === 0x5c) i++;
+				else if (inner === 0x22) break;
+			}
+		} else if (c === 0x7b || c === 0x5b) {
+			depth++;
+		} else if ((c === 0x7d || c === 0x5d) && --depth === 0) {
+			return i + 1;
+		}
+	}
+	return -1;
+}
+
+/**
+ * A progress reply read by omp's rules (`parseCompletionEstimate`): the balanced JSON objects in
+ * reading order (also inside a code fence or prose), the first whose `pct` (or `percent`) reads as a
+ * number wins, clamped to 0–100 and rounded; `stage` comes from the first object that has one. A
+ * reply without a usable JSON `pct` falls back to a plain percentage (`Roughly 70%.`). `undefined`
+ * when no percentage can be read.
+ */
+export function parseProgressReply(reply: string): { pct: number; stage?: string } | undefined {
+	let stage: string | undefined;
+	let pct: number | undefined;
+	for (let start = reply.indexOf("{"); start !== -1 && pct === undefined; ) {
+		const end = jsonContainerEnd(reply, start);
+		if (end === -1) break;
+		const span = reply.slice(start, end);
+		start = reply.indexOf("{", end);
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(span);
+		} catch {
+			continue;
+		}
+		if (!isObj(parsed)) continue;
+		stage ??= replyLine(parsed.stage, MAX_STAGE_CHARS);
+		pct = replyPct(parsed.pct ?? parsed.percent);
+	}
+	if (pct === undefined) {
+		const value = Number(/(\d{1,3}(?:\.\d+)?)\s*%/.exec(reply)?.[1]);
+		if (!Number.isFinite(value)) return undefined;
+		pct = clampPct(value);
+	}
+	return stage === undefined ? { pct } : { pct, stage };
+}
+
+/** omp's `formatDuration` (`850ms`, `42.5s`, `5m`, `5m30s`, `1h5m`, `2d3h`): how long ago the previous
+ *  estimate was, as omp's question says it. */
+export function agoText(ms: number): string {
+	const SEC = 1_000;
+	const MIN = 60 * SEC;
+	const HOUR = 60 * MIN;
+	const DAY = 24 * HOUR;
+	if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+	if (ms < SEC) return `${Math.floor(ms)}ms`;
+	if (ms < MIN) {
+		const tenths = Math.round(ms / 100);
+		return tenths < 600 ? `${(tenths / 10).toFixed(1)}s` : "1m";
+	}
+	const pair = (big: number, bigUnit: string, small: number, smallUnit: string) => (small > 0 ? `${big}${bigUnit}${small}${smallUnit}` : `${big}${bigUnit}`);
+	if (ms < HOUR) return pair(Math.floor(ms / MIN), "m", Math.floor((ms % MIN) / SEC), "s");
+	if (ms < DAY) return pair(Math.floor(ms / HOUR), "h", Math.floor((ms % HOUR) / MIN), "m");
+	return pair(Math.floor(ms / DAY), "d", Math.floor((ms % DAY) / HOUR), "h");
+}
+
+/**
+ * The question: omp's `subagent-completion-probe.md` for the main agent. The user's current request
+ * stands where omp says "your assigned task", with the same phase anchors; the tool calls still
+ * being written come first (the side turn's snapshot drops them, so a long `write` would read as no
+ * work done) and the previous estimate last, as in omp's.
+ */
+export function progressPrompt(inflight: readonly InflightCall[], previous?: { pct: number; stage?: string; ago: string }): string {
+	const lines = ["<progress-check>", "Side question from TeleFlock, the app your user follows this session in; your work continues after this reply."];
+	if (inflight.length > 0) {
+		lines.push("You were interrupted mid-response; these tool calls were still being written and are not in the transcript above:");
+		for (const call of inflight) lines.push(`- \`${call.name}\`${call.path ? ` (${call.path})` : ""}: ${call.chars} characters of arguments so far`);
+		lines.push("Count that work as done so far.");
+	}
+	lines.push(
+		"Estimate how much of the user's current request is complete: their latest request in this conversation, with anything they added while you worked. Work your subagents or background jobs have yet to finish is not done. Anchor on the phase you are in:",
+		"- 0–15%: reading the request and exploring code",
+		"- 15–30%: plan settled, first edits starting",
+		"- 30–75%: implementing; scale by deliverables finished vs. remaining",
+		"- 75–90%: all deliverables written; running tests, fixing failures",
+		"- 90–99%: tests pass; final review and summary left",
+	);
+	if (previous) {
+		const stage = previous.stage ? ` at stage "${previous.stage}"` : "";
+		lines.push(`Your previous estimate, ${previous.ago} ago, was ${previous.pct}%${stage}. Update it from what happened since; lower it if you uncovered more work.`);
+	}
+	lines.push(
+		"Reply with ONLY one line of JSON, no code fence, no other text:",
+		'{"pct": 40, "stage": "wiring the settings page to the new endpoint"}',
+		"- `pct`: whole-number completion, 0–100.",
+		"- `stage`: your current step in a few words (≤ 80 chars).",
+		"NEVER use tools.",
+		"</progress-check>",
+	);
+	return lines.join("\n");
+}
+
+/** pi-ai keeps a streaming tool call's raw argument JSON under a symbol of its own
+ *  (`utils/block-symbols` `kStreamingPartialJson`, not a registered symbol): found by its description. */
+function partialArguments(block: object): string | undefined {
+	for (const key of Object.getOwnPropertySymbols(block)) {
+		if (key.description !== "provider.block.partialJson") continue;
+		const value: unknown = (block as Record<symbol, unknown>)[key];
+		return typeof value === "string" ? value : undefined;
+	}
+	return undefined;
+}
+
+/** The tool calls in the assistant message the agent is still streaming (omp's `inflightToolCalls`):
+ *  name, `path` argument, and how much of their arguments is written. */
+export function inflightCalls(streamMessage: unknown): InflightCall[] {
+	if (!isObj(streamMessage) || streamMessage.role !== "assistant" || !Array.isArray(streamMessage.content)) return [];
+	const calls: InflightCall[] = [];
+	for (const block of streamMessage.content) {
+		if (!isObj(block) || block.type !== "toolCall") continue;
+		const args = block.arguments;
+		let chars = partialArguments(block)?.length;
+		if (chars === undefined) {
+			try {
+				chars = JSON.stringify(args ?? {}).length;
+			} catch {
+				chars = 0;
+			}
+		}
+		const path = isObj(args) && typeof args.path === "string" ? args.path : undefined;
+		calls.push({ name: typeof block.name === "string" ? block.name : "tool", ...(path ? { path } : {}), chars });
+	}
+	return calls;
+}
+
+/** What a {@link ProgressProbe} asks through and reports to (the bridge; tests). */
+export interface ProgressHooks {
+	/** Whether to ask now; when not, the question is skipped and the schedule goes on, as omp skips an
+	 *  idle subagent. */
+	ready(): boolean;
+	/** One side turn with `prompt`; resolves to its reply. */
+	ask(prompt: string, signal: AbortSignal): Promise<string>;
+	/** The tool calls the agent is still writing. */
+	inflight(): InflightCall[];
+	/** A new estimate. */
+	estimated(progress: MainProgress): void;
+	log(message: string): void;
+}
+
+/** The time a {@link ProgressProbe} runs on: this host's clock and timers (tests drive their own). */
+export interface ProbeClock {
+	now(): number;
+	setTimer(fn: () => void, ms: number): unknown;
+	clearTimer(timer: unknown): void;
+}
+
+const HOST_CLOCK: ProbeClock = {
+	now: Date.now,
+	setTimer: (fn, ms) => {
+		const timer = setTimeout(fn, ms);
+		timer.unref?.();
+		return timer;
+	},
+	clearTimer: timer => clearTimeout(timer as Timer),
+};
+
+interface ProgressRun {
+	since: number;
+	step: number;
+	timer?: unknown;
+	ac: AbortController;
+	progress?: MainProgress;
+	/** omp settled the run and said it goes on with it by itself (`agent_end` with `willContinue`). */
+	kept: boolean;
+	/** Since when a kept run saw omp neither working nor about to. */
+	quietSince?: number;
+}
+
+/**
+ * The progress questions over one run of the main agent (omp's `startCompletionProbe`): the first
+ * wait of the schedule counts from the run's start, each next one from the end of the previous
+ * question, so two never overlap; one that finds the agent not working (or nobody to tell) is
+ * skipped and the schedule goes on. The run ends with omp's (`stop`): the timer stops, a question in
+ * flight is aborted, the estimate goes. omp settling a run it goes on with by itself (`keep`: a
+ * retry, a compaction's continuation, background jobs that wake the agent) keeps the run, its
+ * estimate and schedule for its next `start`, unless omp then stays quiet ({@link settle}).
+ */
+export class ProgressProbe {
+	#run: ProgressRun | undefined;
+	readonly #hooks: ProgressHooks;
+	readonly #delays: readonly number[];
+	readonly #clock: ProbeClock;
+
+	constructor(hooks: ProgressHooks, delays: readonly number[] = PROGRESS_DELAYS_MS, clock: ProbeClock = HOST_CLOCK) {
+		this.#hooks = hooks;
+		this.#delays = delays.length > 0 ? delays : PROGRESS_DELAYS_MS;
+		this.#clock = clock;
+	}
+
+	/** The run's latest estimate: none before its first answer, nor once it ended. */
+	get progress(): MainProgress | undefined {
+		return this.#run?.progress;
+	}
+
+	/** The run waits for omp to go on with it ({@link keep}). */
+	get kept(): boolean {
+		return this.#run?.kept === true;
+	}
+
+	/** omp started a run of the main agent (`agent_start`); a kept run goes on instead. */
+	start(since = this.#clock.now()): void {
+		const run = this.#run;
+		if (run) {
+			run.kept = false;
+			run.quietSince = undefined;
+			return;
+		}
+		const fresh: ProgressRun = { since, step: 0, ac: new AbortController(), kept: false };
+		this.#run = fresh;
+		this.#schedule(fresh);
+	}
+
+	/** omp settled the run and goes on with it by itself (`agent_end` with `willContinue`). */
+	keep(): void {
+		if (!this.#run) return;
+		this.#run.kept = true;
+		this.#run.quietSince = undefined;
+	}
+
+	/** The run is over: its terminal `agent_end`, a session switch, the bridge's end. */
+	stop(): void {
+		const run = this.#run;
+		if (!run) return;
+		this.#run = undefined;
+		this.#clock.clearTimer(run.timer);
+		run.ac.abort(new Error("the agent's run ended"));
+	}
+
+	/** A kept run while omp `goesOn` (works, retries, compacts, waits for background work that wakes
+	 *  the agent) waits for it; once omp was quiet for {@link PROGRESS_SETTLE_MS} the run is over (the
+	 *  user ended a background wait, an auto-retry was cancelled). */
+	settle(goesOn: boolean): void {
+		const run = this.#run;
+		if (!run?.kept) return;
+		if (goesOn) {
+			run.quietSince = undefined;
+			return;
+		}
+		const now = this.#clock.now();
+		run.quietSince ??= now;
+		if (now - run.quietSince >= PROGRESS_SETTLE_MS) this.stop();
+	}
+
+	#schedule(run: ProgressRun): void {
+		const delay = this.#delays[Math.min(run.step++, this.#delays.length - 1)]!;
+		run.timer = this.#clock.setTimer(() => {
+			void this.#ask(run)
+				.finally(() => {
+					if (this.#run === run) this.#schedule(run);
+				})
+				.catch(() => {});
+		}, delay);
+	}
+
+	async #ask(run: ProgressRun): Promise<void> {
+		const { signal } = run.ac;
+		try {
+			if (signal.aborted || !this.#hooks.ready()) return;
+			const last = run.progress;
+			const previous = last && { pct: last.pct, stage: last.stage, ago: agoText(this.#clock.now() - last.at) };
+			const reply = await this.#hooks.ask(progressPrompt(this.#hooks.inflight(), previous), signal);
+			if (signal.aborted || this.#run !== run) return;
+			const estimate = parseProgressReply(reply);
+			if (!estimate) {
+				this.#hooks.log(`progress reply without a percentage: ${JSON.stringify(reply.slice(0, 200))}`);
+				return;
+			}
+			run.progress = { ...estimate, at: this.#clock.now(), since: run.since };
+			this.#hooks.estimated(run.progress);
+		} catch (err) {
+			if (!signal.aborted) this.#hooks.log(`progress question: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+}
+
+/** Journals a progress question's billed provider message to the session as omp journals its own
+ *  probe's (`SessionManager.appendModelUsage`: the `model_usage` entry omp's `/usage` and TeleFlock's
+ *  spend count), on the branch it was asked from. */
+export function journalProgressUsage(ledger: unknown, owner: { sessionId: string; parentId: string | null } | undefined, message: unknown): void {
+	if (!owner || !isObj(ledger) || typeof ledger.appendModelUsage !== "function" || !isObj(message) || !isObj(message.usage)) return;
+	const entry: Json = { purpose: PROGRESS_USAGE_PURPOSE, api: message.api, provider: message.provider, model: message.model, usage: message.usage, stopReason: message.stopReason };
+	if (typeof message.errorMessage === "string") entry.errorMessage = message.errorMessage;
+	ledger.appendModelUsage(entry, owner);
+}
+
+/** Where omp's usage ledger files a side call asked now (`appendModelUsage`'s owner): the session and
+ *  its current leaf. */
+export function usageOwner(ledger: unknown): { sessionId: string; parentId: string | null } | undefined {
+	if (!isObj(ledger) || typeof ledger.getSessionId !== "function") return undefined;
+	const sessionId: unknown = ledger.getSessionId();
+	const leaf: unknown = typeof ledger.getLeafId === "function" ? ledger.getLeafId() : null;
+	return typeof sessionId === "string" ? { sessionId, parentId: typeof leaf === "string" ? leaf : null } : undefined;
+}
+
+/** omp's `task.completionProbe` setting handle (`task/settings` `cfgTaskCompletionProbe`), read
+ *  against a settings scope (an AgentSession, omp's Settings). */
+export interface CompletionProbeSetting {
+	get(scope: object): unknown;
+}
+
+/** omp's `task.completionProbe` handle: a root export of that name, else `task/settings` (the module
+ *  instance omp runs: a handle reads its value through the slot its own module numbered). */
+async function probeCompletionSetting(ns: Record<string, unknown>, load: (mod: Promise<unknown>) => Promise<Json | undefined>): Promise<CompletionProbeSetting | undefined> {
+	const isSetting = (v: unknown): v is CompletionProbeSetting => isObj(v) && typeof v.get === "function";
+	if (isSetting(ns.cfgTaskCompletionProbe)) return ns.cfgTaskCompletionProbe;
+	const handle: unknown = (await load(import("@oh-my-pi/pi-coding-agent/task/settings")))?.cfgTaskCompletionProbe;
+	return isSetting(handle) ? handle : undefined;
+}
+
 // ─── protocol v2: omp internals ────────────────────────────────────────────────────────────────
 // The data plane reads a few omp internals, each feature-detected: without one, the feature it
 // serves is off (`hello.caps`) or falls back to the public extension API.
@@ -2838,6 +3243,8 @@ interface Internals {
 	steering?: SteeringSetting;
 	/** 2.5.0: omp's html-form functions (omp ≥ 18.18): its ask tool's forms reach hostd. */
 	form?: FormKit;
+	/** 2.6.0: omp's `task.completionProbe` handle (off: the main agent is not asked its progress either). */
+	completionProbe?: CompletionProbeSetting;
 }
 
 const isSession = (s: unknown): s is AgentSessionLike => !!s && typeof s === "object" && "subscribe" in s && typeof s.subscribe === "function";
@@ -5645,6 +6052,7 @@ function bridge(pi: ExtensionAPI) {
 		internals.ircTap = await probeIrcTap(ns, load);
 		internals.steering = await probeSteeringSetting(ns, load);
 		internals.form = await probeFormKit(load);
+		internals.completionProbe = await probeCompletionSetting(ns, load);
 		await uiControllerReady;
 	})().catch((err: unknown) => bridgeLog(`omp internals: ${String(err)}`));
 
@@ -5836,6 +6244,7 @@ function bridge(pi: ExtensionAPI) {
 			planReview: pendingReview,
 			attached: bridgeSlot().cmdCtx !== undefined,
 			userWait: userWaitInfo(),
+			progress: progressProbe.progress,
 		};
 	};
 
@@ -5902,6 +6311,8 @@ function bridge(pi: ExtensionAPI) {
 				stopFeed();
 				tracker.reset();
 				endedTools.clear();
+				// So did the run the progress question was about.
+				progressProbe.stop();
 			}
 			const hello = helloPayload(ctx, reason, previous);
 			helloSessionId = hello.sessionId;
@@ -6160,7 +6571,8 @@ function bridge(pi: ExtensionAPI) {
 		}
 	};
 
-	/** This copy stops bridging: let go of omp's session, registry and the pending dialogs (they go on locally). */
+	/** This copy stops bridging: let go of omp's session, registry and the pending dialogs (they go on
+	 *  locally), and of the progress question (none is asked without a bridging copy). */
 	const detachLive = (): void => {
 		for (const off of [unsubscribeSession, unsubscribeRegistry]) {
 			try {
@@ -6178,6 +6590,7 @@ function bridge(pi: ExtensionAPI) {
 		agentsTimer = undefined;
 		throttle.clear();
 		hub.close();
+		progressProbe.stop();
 	};
 
 	/** Ends the live feed (queued live frames dropped; the connection stays). */
@@ -6493,6 +6906,8 @@ function bridge(pi: ExtensionAPI) {
 		for (const th of sideThreads.values()) th.ac?.abort(new Error("bridge disconnected"));
 		// hostd ended the agent's browser attachment with the connection (a pending request waits).
 		browserLink.unlinked();
+		// The next hostd says in its own `welcome` whether it reads the agent's progress.
+		hostdReadsProgress = false;
 		if (s) {
 			try {
 				s.destroy();
@@ -6641,12 +7056,14 @@ function bridge(pi: ExtensionAPI) {
 		try {
 			if (!active) return;
 			// Independent of hostd: the session stream and the dialog wrappers (re-wrapped after a mode
-			// re-init replaced omp's UI context) are in place before it subscribes, and a session omp
-			// wrote since is known as written (a stat per tick until then).
+			// re-init replaced omp's UI context) are in place before it subscribes, a session omp
+			// wrote since is known as written (a stat per tick until then), and a run omp said it goes
+			// on with is over once omp stays quiet (2.6.0, the progress question).
 			if (ctxRef) {
 				attachSession(ctxRef);
 				ensureDialogs(ctxRef);
 				noteWritten(ctxRef);
+				if (progressProbe.kept) progressProbe.settle(runGoesOn());
 			}
 			if (connecting && Date.now() - connectStartedAt > AUTH_TIMEOUT_MS) {
 				bridgeLog("hostd did not authenticate in time; reconnecting");
@@ -6833,6 +7250,74 @@ function bridge(pi: ExtensionAPI) {
 		return view;
 	};
 
+	// ─── the main agent's progress (2.6.0, `welcome.caps.progress`) ────────────────────────────
+	/** hostd reads `state.progress` (its `welcome` says `caps.progress`): only then is the agent asked. */
+	let hostdReadsProgress = false;
+	/** omp's `task.completionProbe` (on unless the user turned omp's subagent probe off): off, the main
+	 *  agent is not asked either. Read against the main AgentSession (a settings scope), else omp's
+	 *  Settings; omp's default when neither can be read. */
+	const progressAllowed = (): boolean => {
+		const setting = internals.completionProbe;
+		if (!setting) return true;
+		try {
+			let scope: unknown = agentSession;
+			if (!isObj(scope) || !isObj(scope.settings)) {
+				const ns: Record<string, unknown> = pi.pi ?? {};
+				const settings = ns.Settings;
+				scope = (isObj(settings) || typeof settings === "function") && "instance" in settings ? settings.instance : undefined;
+			}
+			return !isObj(scope) || setting.get(scope) !== false;
+		} catch {
+			return true;
+		}
+	};
+	/** Whether the progress question goes out now: this copy bridges the process, a hostd that reads the
+	 *  answer is connected, the agent works, omp can run a side turn and its setting allows it. */
+	const progressReady = (): boolean =>
+		hostdReadsProgress && connected && ownsSlot() && isStreaming() && typeof ctxRef?.runEphemeralTurn === "function" && ctxRef.model !== undefined && progressAllowed();
+	/** One progress question as a side turn of the main session: `ctx.runEphemeralTurn`, the one omp's
+	 *  /btw and its own probe use (the session's system prompt, tools and history, its prompt cache,
+	 *  nothing in the transcript). Billed to the session as omp bills its probe: through `onUsage` as
+	 *  the provider settles the request (omp ≥ 18.20, failed requests too), else from the reply. */
+	const askProgress = async (promptText: string, signal: AbortSignal): Promise<string> => {
+		const ctx = ctxRef ?? fail("not_ready", "no session");
+		const run = ctx.runEphemeralTurn ?? fail("unsupported", "this omp has no ephemeral side turns");
+		const ledger: unknown = agentSession?.sessionManager ?? ctx.sessionManager;
+		const owner = usageOwner(ledger);
+		let billed = false;
+		const bill = (message: unknown): void => {
+			billed = true;
+			try {
+				journalProgressUsage(ledger, owner, message);
+			} catch (err) {
+				bridgeLog(`progress usage: ${String(err)}`);
+			}
+		};
+		const options = { promptText, signal, onUsage: bill };
+		const res = await run.call(ctx, options);
+		if (!billed) bill(res.assistantMessage);
+		return res.replyText;
+	};
+	/** omp works on the main agent's run or goes on with it by itself: it streams, retries a provider
+	 *  error, compacts, or waits for background work that wakes the agent (its async wait). */
+	const runGoesOn = (): boolean => {
+		if (isStreaming()) return true;
+		const s: unknown = agentSession;
+		if (isObj(s) && (s.isRetrying === true || s.isCompacting === true)) return true;
+		const list = listJobs(jobsSession(), publicJobs());
+		return list !== undefined && jobsWaiting(list);
+	};
+	const progressProbe = new ProgressProbe(
+		{
+			ready: progressReady,
+			ask: askProgress,
+			inflight: () => inflightCalls(agentSession?.agent?.state?.streamMessage),
+			estimated: safeSync,
+			log: bridgeLog,
+		},
+		progressDelays(),
+	);
+
 	// ─── requests ─────────────────────────────────────────────────────────────────────────────
 	const onLine = (line: string): void => {
 		let raw: unknown;
@@ -6842,7 +7327,12 @@ function bridge(pi: ExtensionAPI) {
 			bridgeLog("bad json from hostd");
 			return;
 		}
-		// `welcome`, non-objects and unknown frame types are ignored.
+		// 2.6.0: `welcome` says what hostd reads (`caps.progress`: `state.progress`, worth asking the agent).
+		if (isObj(raw) && raw.t === "welcome") {
+			hostdReadsProgress = isObj(raw.caps) && raw.caps.progress === true;
+			return;
+		}
+		// Non-objects and unknown frame types are ignored.
 		if (!raw || typeof raw !== "object" || !("t" in raw) || raw.t !== "req") return;
 		const id = "id" in raw ? raw.id : undefined;
 		const op = "op" in raw && typeof raw.op === "string" ? raw.op : "";
@@ -8597,6 +9087,28 @@ function bridge(pi: ExtensionAPI) {
 			}
 		});
 	}
+
+	// 2.6.0: the progress question follows omp's runs of the main agent. One starts with `agent_start`
+	// (its first question two minutes in) and ends with an `agent_end` that settles it, or goes on
+	// through one that says omp goes on with it by itself (`willContinue`: a retry, a compaction's
+	// continuation, background jobs that wake the agent).
+	pi.on("agent_start", (_event, ctx) => {
+		try {
+			if (adopt(ctx) && ownsSlot()) progressProbe.start();
+		} catch (err) {
+			bridgeLog(`progress start: ${String(err)}`);
+		}
+	});
+	pi.on("agent_end", (event, ctx) => {
+		try {
+			if (!adopt(ctx)) return;
+			const end: unknown = event;
+			if (isObj(end) && end.willContinue === true) progressProbe.keep();
+			else progressProbe.stop();
+		} catch (err) {
+			bridgeLog(`progress end: ${String(err)}`);
+		}
+	});
 
 	// Live events come from omp's AgentSession stream (attachSession); these extension events stand
 	// in while it cannot be reached. With omp's agent registry present the per-delta ones stay

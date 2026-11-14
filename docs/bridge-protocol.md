@@ -122,7 +122,7 @@ hostd attributes events to the connection's current session (from its last `hell
 `{"t":"auth","v":1,"secret":"<64 lowercase hex>"}`: always the first frame on a connection, sent before the extension says anything. The extension must verify `secret` against `<home>/run/bridge.secret` before it serves any request or sends `hello`. It does not check `v`.
 
 ### `welcome`
-`{"t":"welcome","v":1,"hostd":"0.1.0"}`: sent after every `hello`. It is informational; the extension ignores it.
+`{"t":"welcome","v":2,"hostd":"0.9.5","caps":{"progress":true}}`: sent after every `hello`. Until bridge 2.6.0 the extension ignored it (hostd before 0.9.5 sends `{"t":"welcome","v":1,"hostd":"…"}`). Bridge ≥ 2.6.0 reads `caps`: `progress` means hostd reads `state.progress` ([Main-agent progress](#main-agent-progress-welcomecapsprogress)), and only then does the bridge ask the agent for estimates, so an older hostd costs the session nothing.
 
 ### `req`
 ```json
@@ -569,6 +569,21 @@ omp's TUI runs a line `!<cmd>` as a shell command whose output goes into the con
 
 - **Flag.** `caps.shell` is `tui` (the op needs the composer).
 - **Every run on the live feed.** omp records each run as a session message (`{role:"bashExecution", command, output, exitCode?, cancelled, truncated, images?, meta?, timestamp, excludeFromContext?}` or `{role:"pythonExecution", code, …}`) without an event, and while the agent works only once the turn ends. The bridge wraps `executeBash` / `executePython` on omp's AgentSession prototype (one wrapper per process, its `onRecorded` after omp's own) and sends every run of the session it serves, typed in the TUI or submitted by `shell`, at once as a live `{type:"message_end", message}` event; the session file later has the identical message (same `timestamp`).
+
+## Bridge 2.6.0
+
+TeleFlock 0.9.5. hostd keeps serving 2.5.0 and older bridges; a session keeps the bridge its omp process loaded, so a session started before the update shows no main-agent progress until the agent restarts (Mark done, then Resume).
+
+### Main-agent progress (`welcome.caps.progress`)
+
+omp's completion probe (`task/completion-probe.ts`) asks a running subagent how far along it is; the main agent gets no such question. The bridge asks the main agent the same way, while a run lasts:
+
+- **The run.** It starts at `agent_start` and ends at an `agent_end` without `willContinue`; an end with `willContinue` (a retry, a compaction that goes on, a wait for background jobs) keeps it, unless omp then stays idle for 5 s with no retry, compaction or pending job.
+- **The question.** Through `ctx.runEphemeralTurn`, the side turn `/btw` uses (the session's system prompt, tools and history, its prompt cache; the transcript is never touched), on omp's schedule counted from the run's start: 2, 5, 10, 30 and 60 minutes, the last repeating. Questions never overlap and are skipped while the agent is idle. The prompt is omp's subagent prompt (`prompts/system/subagent-completion-probe.md`) with "the user's current request" instead of the assigned task: the same phase anchors (0–15 % exploring … 90–99 % final review), the previous estimate and how long ago, and the tool calls the agent is still writing. A question in flight is aborted when the run ends, the session switches, the bridge shuts down or another copy takes over. `TF_BRIDGE_PROGRESS_DELAYS=<ms,…>` replaces the schedule (tests only).
+- **The reply** is parsed by omp's rules (`parseCompletionEstimate`): `{"pct": 40, "stage": "…"}` (`pct` or `percent`, a number or a numeric string, clamped to 0–100 and rounded; `stage` one line of at most 80 characters), also inside a code fence or prose, else a plain `NN%`.
+- **Billing.** Each side turn is journaled as `appendModelUsage({purpose: "teleflock-progress-probe", …})`, so session spend and omp's `/usage` count it (omp ≥ 18.20 reports it through `onUsage`; older omp from the reply's message).
+- **Off.** No question while omp's `task.completionProbe` is off, nor without `welcome.caps.progress`.
+- **To hostd.** `CtlState.progress?: {pct: number, stage?: string, at: number, since: number}` in `hello.state` and `state` events: `at` when the agent answered, `since` the run's `agent_start` (epoch ms on the omp host); absent before the first answer and after the run ends. hostd exposes it as `OmpInfo.progress` while the board's turn runs (docs/architecture.md §4) and drops it when the turn ends, a background wait nobody resumed ends, or the bridge goes away.
 
 ## TUI mechanics (why some ops need the TUI)
 

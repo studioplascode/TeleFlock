@@ -43,7 +43,9 @@ wakeRelay: boolean,
 progress: boolean, 
 /**
  * Per recipient: `pending` (in flight), `injected` / `woken` / `revived` (omp's delivery
- * outcomes), `received` (the recipient's transcript has it), `failed` (with `error`).
+ * outcomes; `injected`: queued for a busy recipient, which takes it in when its current
+ * step ends), `received` (the recipient's transcript has it; tf-hostd ≥ 0.9.5 also turns
+ * `injected` into it), `failed` (with `error`).
  */
 receipts: Array<IrcReceipt>, 
 /**

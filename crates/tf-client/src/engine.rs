@@ -1782,6 +1782,7 @@ mod tests {
             disk_free: 1,
             disk_total: 2,
             uptime_s: 9,
+            agents: Vec::new(),
         };
         i.apply_patch(&rt, 2, vec![StatePatch::Health { health }]);
         i.flush_cache(&rt).await;

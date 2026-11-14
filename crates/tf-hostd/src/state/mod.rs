@@ -8,6 +8,7 @@
 //! `state.json`; done agents park and prune per [`parked`].
 
 pub mod build;
+pub mod loads;
 pub mod parked;
 pub mod persist;
 pub mod procs;
@@ -351,7 +352,8 @@ impl StateHandle {
     }
 
     /// Replaces the host facts; `tools` stays as [`set_tools`](Self::set_tools) left it,
-    /// `pruned` as the prune loop left it and `decisions` as decide for me published them.
+    /// `pruned` as the prune loop left it, `decisions` as decide for me published them and
+    /// `priority` as [`set_priority`](Self::set_priority) left it.
     pub fn set_info(&self, mut info: HostInfo) {
         let mut m = self.lock();
         info.tools = m.published.info.tools.clone();
@@ -360,6 +362,7 @@ impl StateHandle {
         info.herdr_health = m.published.info.herdr_health.clone();
         info.idle_shells = m.published.info.idle_shells.clone();
         info.decisions = m.published.info.decisions.clone();
+        info.priority = m.published.info.priority.clone();
         if m.published.info != info {
             m.published.info = info.clone();
             broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
@@ -394,6 +397,29 @@ impl StateHandle {
             let info = m.published.info.clone();
             broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
         }
+    }
+
+    /// Publishes what runs above the agents' work (`HostInfo.priority`, `crate::priority`).
+    pub fn set_priority(&self, priority: Option<tf_proto::PriorityStatus>) {
+        let mut m = self.lock();
+        if m.published.info.priority != priority {
+            m.published.info.priority = priority;
+            let info = m.published.info.clone();
+            broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
+        }
+    }
+
+    /// The context's first host facts (`start`; no client yet, nothing is broadcast): what the
+    /// workers published before them carries over (`tools`, `herdrHealth`, `idleShells`,
+    /// `decisions`, `priority`).
+    pub(crate) fn adopt_first_info(&self, mut info: HostInfo) {
+        let mut m = self.lock();
+        info.tools = m.published.info.tools.take();
+        info.herdr_health = m.published.info.herdr_health.take();
+        info.idle_shells = m.published.info.idle_shells.take();
+        info.decisions = std::mem::take(&mut m.published.info.decisions);
+        info.priority = m.published.info.priority.take();
+        m.published.info = info;
     }
 
     /// Decide for me's review items changed: publishes the unreviewed ones (`HostInfo.decisions`,
@@ -432,6 +458,24 @@ impl StateHandle {
     /// Pane → the newest command seen running in front of its shell (`ops::cleanup::shells`).
     pub fn pane_last_jobs(&self) -> HashMap<String, String> {
         self.lock().pane_procs.last_jobs()
+    }
+
+    /// Where each agent's process tree starts ([`loads`]): its omp process and its pane's shell.
+    /// Parked agents have neither.
+    fn load_roots(&self) -> Vec<loads::Root> {
+        let m = self.lock();
+        let shells = m.pane_procs.shells();
+        m.published
+            .agents
+            .iter()
+            .filter(|a| a.parked.is_none() && !a.pane_id.is_empty())
+            .map(|a| loads::Root { agent_id: a.id.clone(), omp: a.omp.as_ref().and_then(|o| o.pid), shell: shells.get(&a.pane_id).copied() })
+            .collect()
+    }
+
+    /// The agents' loads of the latest health tick (`host.health` answers with them).
+    pub fn agent_loads(&self) -> Vec<tf_proto::model::AgentLoad> {
+        self.lock().health.as_ref().map(|h| h.agents.clone()).unwrap_or_default()
     }
 
     fn set_health(&self, health: HostHealth) {
@@ -1126,6 +1170,7 @@ fn initial_info(session: &str, relay_port: u16, relay: bool) -> HostInfo {
         idle_shells: None,
         pruned: Vec::new(),
         decisions: Vec::new(),
+        priority: None,
     }
 }
 
@@ -1149,14 +1194,7 @@ fn hostname() -> String {
 pub async fn start(ctx: &Arc<Ctx>) {
     let h = ctx.state.clone();
     match tokio::time::timeout(Duration::from_secs(3), crate::ops::host::probe_info(ctx)).await {
-        Ok(mut info) => {
-            let mut m = h.lock();
-            info.tools = m.published.info.tools.take();
-            info.herdr_health = m.published.info.herdr_health.take();
-            info.idle_shells = m.published.info.idle_shells.take();
-            info.decisions = std::mem::take(&mut m.published.info.decisions);
-            m.published.info = info;
-        }
+        Ok(info) => h.adopt_first_info(info),
         Err(_) => warn!(session = %ctx.herdr_session, "host info probe timed out"),
     }
     if let Ok(Ok(snap)) = tokio::time::timeout(Duration::from_secs(3), ctx.herdr.snapshot()).await {
@@ -1701,6 +1739,8 @@ async fn host_loop(ctx: Arc<Ctx>) {
     let h = ctx.state.clone();
     // `start` probed just before this loop started.
     let mut last_info = Instant::now();
+    // Each agent's share of the host, measured between this board's health ticks.
+    let sampler = Arc::new(Mutex::new(loads::Sampler::default()));
     loop {
         let connected = tokio::select! {
             _ = ctx.cancel.cancelled() => return,
@@ -1710,8 +1750,19 @@ async fn host_loop(ctx: Arc<Ctx>) {
         if !h.has_clients() {
             continue;
         }
-        if !connected {
-            let health = tokio::task::spawn_blocking(crate::ops::host::health).await;
+        let roots = h.load_roots();
+        let sampler = sampler.clone();
+        if connected {
+            // A fresh baseline: the next tick measures its own interval, not the time since the
+            // last client left.
+            let _ = tokio::task::spawn_blocking(move || sampler.lock().unwrap_or_else(|p| p.into_inner()).sample(&roots)).await;
+        } else {
+            let health = tokio::task::spawn_blocking(move || {
+                let mut health = crate::ops::host::health();
+                health.agents = sampler.lock().unwrap_or_else(|p| p.into_inner()).sample(&roots);
+                health
+            })
+            .await;
             if let Ok(health) = health {
                 h.set_health(health);
             }

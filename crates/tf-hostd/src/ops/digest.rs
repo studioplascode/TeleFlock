@@ -298,6 +298,7 @@ mod tests {
                 model: None,
                 line: None,
                 completion_pct: None,
+                completion_at: None,
                 context: None,
                 tool_count: None,
                 parent_id: None,

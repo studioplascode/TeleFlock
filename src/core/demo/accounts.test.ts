@@ -127,6 +127,18 @@ describe("demo accounts", () => {
     expect(report.map((a) => [a.disabled, a.windows.length > 0])).toEqual([[false, true]]);
   });
 
+  test("an expired login can be unlinked: gone from Accounts and from Usage", async () => {
+    const r = rig();
+    const old = (await r.call<AccountsSnapshot>("forge", "accounts.list", {})).accounts.find((a) => a.label === "old@flock.dev");
+    expect(old?.disabled).toBe(true);
+    const s = await r.call<AccountsSnapshot>("forge", "accounts.unlink", { provider: "anthropic", credentialId: old?.credentialId });
+    expect(s.accounts.filter((a) => a.disabled)).toEqual([]);
+    expect(s.accounts.some((a) => a.provider === "anthropic" && !a.disabled)).toBe(true);
+    const limits = await r.call<AccountLimits>("forge", "host.limits", {});
+    expect(limits.accounts.filter((a) => a.disabled || a.label === "old@flock.dev")).toEqual([]);
+    await expect(r.call("forge", "accounts.unlink", { provider: "anthropic", credentialId: old?.credentialId })).rejects.toMatchObject({ code: "not_found" });
+  });
+
   test("sign-in pages are the providers' own", async () => {
     const r = rig();
     const host = async (provider: string) => {

@@ -19,11 +19,13 @@ import { tallySubagents } from "../subagents/grouping";
 import { SubagentList } from "../subagents/SubagentList";
 import { DiffStatText } from "../tools/DiffBody";
 import { TodoPhases, todoCounts } from "../tools/TodoList";
-import { SPENDERS, SpendTile } from "../spend";
+import { formatTps, sharesOf, SPENDERS, SpenderRow, SpendTile } from "../spend";
 import { repoFiles } from "./changedFiles";
 import { type CardId, marksOf, sessionScope, useInspectorCards, visibleBtw } from "./cards";
 import { CollapsibleTile, InspectorCard } from "./InspectorCard";
 import { LimitsMeter, Meter, useSessionLimits } from "./LimitsTile";
+import { ProgressSummary, ProgressTile } from "./ProgressTile";
+import { ResourcesTile } from "./ResourcesTile";
 import { btwSummary, filesSummary, overviewSummary, subagentsSummary, todosSummary, treeSummary } from "./summaries";
 
 function Pane({ id, ...rest }: { id: CardId; title: ReactNode; label?: string; aside?: ReactNode; summary?: ReactNode; children: ReactNode; className?: string }) {
@@ -58,8 +60,9 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
   const peak = Math.max(0, ...hist);
   const limitLeft = useSessionLimits(agentKey).tight?.pace.remaining;
   return (
-    <Pane id="overview" title="Session" summary={overviewSummary({ ctxPct: ctx?.pct, limitLeft, usd: cost?.usd, tps })}>
+    <Pane id="overview" title="Session" summary={<ProgressSummary agentKey={agentKey} rest={overviewSummary({ ctxPct: ctx?.pct, limitLeft, usd: cost?.usd, tps })} />}>
       <div className="flex flex-col gap-2">
+        <ProgressTile agentKey={agentKey} className={TILE} />
         {/* Can it keep going: context used and subscription left, as bars that say which way they count. */}
         <div className={cn(TILE, "flex flex-wrap gap-x-4 gap-y-2.5")} aria-label="Can it keep going">
           <button
@@ -106,16 +109,20 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
           </div>
           {split && (
             <div className="flex flex-wrap gap-x-3 text-[10.5px] font-semibold text-mute-2 tabular" aria-label="Throughput by source">
-              {SPENDERS.map((s) => (
-                <span key={s.key} className="flex items-center gap-1">
-                  <span className={cn("size-1.5 rounded-full", s.dot)} />
-                  {s.term}
-                  <span className={split[s.key] > 0 ? "text-accent-hi" : undefined}>{split[s.key] > 0 ? Math.round(split[s.key]) : "—"}</span>
-                </span>
-              ))}
+              {SPENDERS.map((s) => {
+                const shares = sharesOf(split.models, s.key);
+                return (
+                  <SpenderRow key={s.key} spender={s} shares={shares} figure={split[s.key]} format={formatTps} side="bottom" className="flex items-center gap-1">
+                    <span className={cn("size-1.5 rounded-full", s.dot)} />
+                    {shares.length ? s.label : s.term}
+                    <span className={split[s.key] > 0 ? "text-accent-hi" : undefined}>{split[s.key] > 0 ? Math.round(split[s.key]) : "—"}</span>
+                  </SpenderRow>
+                );
+              })}
             </div>
           )}
         </CollapsibleTile>
+        <ResourcesTile agentKey={agentKey} />
       </div>
     </Pane>
   );

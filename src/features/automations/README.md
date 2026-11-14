@@ -59,7 +59,8 @@ export function describeCron(expr: string): string | null;
 - Editor: name; worktree vs in place (worktree = a fresh `automation/<slug>-<date>` branch forked
   from the remote's default branch per run); repository / folder (typed, or the FolderBrowser in
   repo mode for worktrees, folder mode otherwise, shown in place of the form; Esc goes back); prompt (required unless plan mode, as in hostd);
-  schedule; model / thinking (host catalog) / plan; Agent options (each run's agent's own model roles and fallback
+  schedule; model / thinking (host catalog) / plan; Agent options (model presets, `features/agentRoles`
+  `ModelPresetsSection`, which set model, thinking, roles and chains in one pick; each run's agent's own model roles and fallback
   chains, `features/agentRoles`; hostd's role/chain errors show under them; its decide for me, `features/autoAnswer`,
   loaded from `Automation.autoAnswer` and saved as `AutomationDraft.autoAnswer` only when set and the host has
   decide for me: `automationDraft`); catch-up; enabled. Presets: every N minutes

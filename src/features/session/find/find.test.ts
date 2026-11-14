@@ -45,6 +45,22 @@ describe("rowText", () => {
   test("a partial view (still arriving) is read, not thrown on", () => {
     expect(rowCount(tool({ status: "running", view: { type: "bash" } as never }), n("x"))).toBe(0);
   });
+
+  test("an eval call is searched in its code as written, not in its arguments' JSON", () => {
+    const code = 'name = "panic"\nprint(f"{name}!")';
+    const single = tool({ tool: "eval", title: "Say it", args: { language: "py", code, title: "Say it" }, output: "\x1b[1mpanic!\x1b[0m" });
+    expect(rowTexts(single)).toEqual(["Say it", code, "panic!"]);
+    // the JSON escaped the quotes and the line break
+    expect(rowCount(single, n('"panic"'))).toBe(1);
+    expect(rowCount(single, n("panic"))).toBe(2);
+    // several cells, each under its title; a screenshot keeps the code and the output, and adds its caption
+    const cells = tool({ tool: "eval", title: "eval", args: { cells: [{ language: "py", code: "a = 1", title: "Load" }, { language: "js", code: "b()" }] } });
+    expect(rowTexts(cells)).toEqual(["eval", "Load", "a = 1", "b()"]);
+    const shot = tool({ tool: "eval", title: "Shot", args: { language: "js", code: "await tab.goto(url)" }, view: { type: "image", image: { mime: "image/png" }, alt: "Shot", url: "https://x.dev" }, output: "saved" });
+    expect(rowTexts(shot)).toEqual(["Shot", "await tab.goto(url)", "saved", "Shot", "https://x.dev"]);
+    // no code yet (the model is still writing the call): its arguments, as any call's
+    expect(rowTexts(tool({ id: "t:2", tool: "eval", title: "eval", args: { language: "py" }, status: "pending" }))).toEqual(["eval", '{\n  "language": "py"\n}']);
+  });
 });
 
 describe("model", () => {

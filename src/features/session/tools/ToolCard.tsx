@@ -21,10 +21,11 @@ import {
   Wrench,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { type ReactNode, useContext, useMemo, useState } from "react";
+import { type ReactNode, type RefObject, useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { linkProps, useAgent, useCore, useSession } from "@/core";
 import type { BashView, ImageView, Subagent, ToolItem, ToolView } from "@/core/gen";
-import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, spring, Spinner } from "@/design";
+import { subagentEstimate, TIME_LEFT_TICK_MS, timeLeftOfAll, timeLeftText } from "@/core/progress";
+import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, spring, Spinner, useNow } from "@/design";
 import { useHerdrFreeze } from "@/features/hosts/HerdrControls";
 import { languageFor } from "../lib/highlight";
 import { ImagePlaceholder, useImageSources } from "../lib/images";
@@ -35,6 +36,8 @@ import { withRoster } from "../subagents/roster";
 import { SubagentCard } from "../subagents/Subagents";
 import { SessionCtx, useSessionRef } from "../context";
 import { AnsiText } from "./AnsiText";
+import { CodeCard, EvalBody } from "./CodeCard";
+import { shownEvalCells } from "./evalArgs";
 import { useOpenOnFind } from "../find/reveal";
 import { DiffStatText, FileDiffView } from "./DiffBody";
 import { TodoPhases, todoCounts } from "./TodoList";
@@ -236,6 +239,25 @@ function headTitle(item: ToolItem): ReactNode {
   return item.title;
 }
 
+/**
+ * Whether the one-line text in `ref` is cut off with an ellipsis, measured while `on`: a bash card's
+ * header, whose command then shows whole in the body. `text` re-measures a box that keeps its size
+ * while its text changes.
+ */
+function useClipped(ref: RefObject<HTMLElement | null>, on: boolean, text: string): boolean {
+  const [clipped, setClipped] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!on || !el) return;
+    const check = () => setClipped(el.scrollWidth > el.clientWidth + 1);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref, on, text]);
+  return on && clipped;
+}
+
 /** One tool call: the document a `present` call showed as its card, else the call's own card. */
 export function ToolCard({ item }: { item: ToolItem }) {
   return item.artifact ? <PresentedCard item={item} artifact={item.artifact} /> : <ToolCallCard item={item} />;
@@ -258,7 +280,13 @@ function ToolCallCard({ item }: { item: ToolItem }) {
   }
   // Find's current match is in this call: open it (it stays open afterwards, like any card opened).
   useOpenOnFind(item.id, () => setOpen(true));
-  const open = openState ?? (OPEN_BY_DEFAULT[type] || failed);
+  // An eval call opens on its code (`EvalBody`), as a bash call opens on its output.
+  const evalCall = item.tool === "eval" && (type === "generic" || type === "image");
+  const open = openState ?? (OPEN_BY_DEFAULT[type] || failed || evalCall);
+  // A one-line command the header cuts off shows whole in the body, where Find then counts it.
+  const head = useRef<HTMLSpanElement>(null);
+  const command = item.view?.type === "bash" ? item.view.command : "";
+  const clipped = useClipped(head, command !== "" && !command.includes("\n"), command);
   const Icon = ICON[kind];
   const hasBody = item.view != null || item.output != null || item.args != null || item.error != null;
   // While the pinned ask card under the transcript is open, its tool call is one line pointing there.
@@ -314,7 +342,12 @@ function ToolCallCard({ item }: { item: ToolItem }) {
           <Icon className="size-3" />
         </span>
         <span data-find-skip className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{label(item)}</span>
-        <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-2" title={typeof item.title === "string" ? item.title : undefined}>
+        <span
+          ref={head}
+          data-find-skip={open && clipped ? true : undefined}
+          className="min-w-0 truncate font-mono text-[11.5px] text-ink-2"
+          title={typeof item.title === "string" ? item.title : undefined}
+        >
           {live && type === "generic" ? <Shimmer>{item.title}</Shimmer> : headTitle(item)}
         </span>
         <StatusMeta item={item} extra={summary(item)} settled={settled} />
@@ -323,7 +356,7 @@ function ToolCallCard({ item }: { item: ToolItem }) {
       {item.intent && open && <div className="-mt-1 px-3 pb-1.5 pl-[46px] text-xs text-mute italic max-md:-mt-0.5 max-md:pl-10">{item.intent}</div>}
       {open && hasBody && (
         <div className="border-t border-line">
-          <ToolBody item={item} />
+          <ToolBody item={item} clipped={clipped} />
           {item.error && <div className="border-t border-error/20 bg-error/[0.06] px-3 py-2 font-mono text-[11.5px] whitespace-pre-wrap text-error-ink">{item.error}</div>}
           {item.truncated && <div data-find-skip className="border-t border-line px-3 py-1 text-2xs font-semibold text-mute-2">Output truncated by omp</div>}
         </div>
@@ -332,9 +365,13 @@ function ToolCallCard({ item }: { item: ToolItem }) {
   );
 }
 
-function ToolBody({ item }: { item: ToolItem }) {
+function ToolBody({ item, clipped }: { item: ToolItem; clipped: boolean }) {
   const v = item.view;
   const live = item.status === "running";
+  const cells = shownEvalCells(item);
+  // An eval call's code, also while the model is still writing it (pending, no code yet).
+  if (cells.length > 0 || (item.tool === "eval" && !v && item.status === "pending"))
+    return <EvalBody item={item} cells={cells} image={v?.type === "image" ? <ImageBody view={v} title={item.title} /> : undefined} />;
   if (!v) return <GenericBody item={item} />;
   switch (v.type) {
     case "diff":
@@ -347,28 +384,28 @@ function ToolBody({ item }: { item: ToolItem }) {
       );
     case "bash": {
       const out = bashOutput(item, v);
+      // The command shows whole when the header shows only its first line or cuts it off.
+      const whole = v.command.includes("\n") || clipped;
+      const cwd = v.cwd ? (
+        <>
+          <span data-find-skip>in </span>
+          {v.cwd}
+        </>
+      ) : null;
       return (
         <div>
-          {(v.command.includes("\n") || v.cwd) && (
-            <div className="border-b border-line px-3 py-1.5 font-mono text-[11px] text-ink-2">
-              {v.cwd && (
-                <div className="mb-0.5 text-2xs text-mute-2">
-                  <span data-find-skip>in </span>
-                  {v.cwd}
-                </div>
-              )}
-              {v.command.includes("\n") && (
-                <pre className="whitespace-pre-wrap">
-                  <Highlighted code={v.command} lang={item.userRun?.python ? "python" : "sh"} />
-                </pre>
-              )}
-            </div>
-          )}
-          {out ? (
-            <AnsiText text={out} follow={live} />
+          {whole ? (
+            <CodeCard code={v.command} lang={item.userRun?.python ? "python" : "bash"} title={cwd && <span className="font-mono font-normal">{cwd}</span>} findRow={item.id} />
           ) : (
-            <div className="px-3 py-2 font-mono text-[11px] text-mute-2">{live ? <Shimmer>waiting for output…</Shimmer> : "(no output)"}</div>
+            cwd && <div className="border-b border-line px-3 py-1.5 font-mono text-2xs text-mute-2">{cwd}</div>
           )}
+          <div className={cn(whole && "border-t border-line")}>
+            {out ? (
+              <AnsiText text={out} follow={live} />
+            ) : (
+              <div className="px-3 py-2 font-mono text-[11px] text-mute-2">{live ? <Shimmer>waiting for output…</Shimmer> : "(no output)"}</div>
+            )}
+          </div>
         </div>
       );
     }
@@ -581,13 +618,26 @@ function useRosterAgents(agents: Subagent[]): Subagent[] {
 
 function TaskSummary({ agents: card }: { agents: Subagent[] }) {
   const agents = useRosterAgents(card);
-  const live = agents.filter((a) => a.status === "running").length;
+  const running = agents.filter((a) => a.status === "running");
+  const live = running.length;
   const failed = agents.filter((a) => a.status === "failed").length;
-  const estimates = agents.flatMap((a) => (a.status === "running" && a.completionPct != null ? [a.completionPct] : []));
+  const estimates = running.flatMap((a) => (a.completionPct != null ? [a.completionPct] : []));
   const done = estimates.length > 0 ? Math.round(estimates.reduce((s, p) => s + p, 0) / estimates.length) : undefined;
+  // Time until the last running one is done: only once every one of them has a pace to tell (`timeLeftOfAll`).
+  const paces = running.map(subagentEstimate);
+  const now = useNow(live > 0 && paces.every((p) => p !== undefined) ? TIME_LEFT_TICK_MS : null);
+  const left = timeLeftOfAll(paces, now);
   return live > 0 ? (
-    <span className="text-accent-hi" title={done != null ? "The running subagents' own estimate of how far along their task is (omp asks every few minutes)" : undefined}>
+    <span
+      className="text-accent-hi"
+      title={
+        done != null
+          ? `The running subagents' own estimate of how far along their task is (omp asks every few minutes)${left ? ", and the time until the last of them is done at the pace so far" : ""}`
+          : undefined
+      }
+    >
       {live} live{done != null && ` · ${estimates.length > 1 ? "~" : ""}${done}% done`}
+      {left && ` · ${timeLeftText(left)}`}
     </span>
   ) : failed > 0 ? (
     <span className="text-error">{failed} failed</span>

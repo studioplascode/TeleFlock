@@ -23,6 +23,7 @@ import { Appearance } from "./Appearance";
 import { MutedAgents } from "./MutedAgents";
 import { AutoResumeSettings } from "./AutoResume";
 import { IdleShellsSettings } from "./IdleShells";
+import { ModelPresets } from "./ModelPresets";
 import { CommitInput, Row, Section, THINKING, useModels } from "./parts";
 import { PresenceRows } from "./PresenceRows";
 import { Templates } from "./Templates";
@@ -270,6 +271,8 @@ export function SettingsView() {
         </Section>
 
         <Templates index={3} />
+
+        <ModelPresets index={3} />
 
         <Section
           index={3}

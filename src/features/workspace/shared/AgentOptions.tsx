@@ -64,13 +64,16 @@ export function AgentOptions({ summary = [], defaultOpen = false, className, chi
   );
 }
 
-/** One section of `AgentOptions`: a small heading, an optional note, its controls. */
-export function AgentOptionsSection({ title, note, children }: { title: ReactNode; note?: ReactNode; children: ReactNode }) {
+/** One section of `AgentOptions`: a small heading, an optional note and action (beside the heading), its controls. */
+export function AgentOptionsSection({ title, note, action, children }: { title: ReactNode; note?: ReactNode; action?: ReactNode; children: ReactNode }) {
   return (
     <section className="flex min-w-0 flex-col gap-2">
-      <div>
-        <h4 className="kicker">{title}</h4>
-        {note && <p className="mt-0.5 text-xs text-mute">{note}</p>}
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h4 className="kicker">{title}</h4>
+          {note && <p className="mt-0.5 text-xs text-mute">{note}</p>}
+        </div>
+        {action && <div className="-my-0.5 shrink-0">{action}</div>}
       </div>
       {children}
     </section>

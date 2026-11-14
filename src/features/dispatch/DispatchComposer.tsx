@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Mic, MicOff, Paperclip, Slash, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { ArrowUp, Check, ClipboardList, Cpu, Layers, LayoutTemplate, Lock, Mic, MicOff, Paperclip, Slash, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { type DraftImage, useAiNaming, useAiSuggestion, useDraft, useDraftImages, useSettings } from "@/core";
 import { attachImages, dragHasFiles, isVideoFile, mediaFiles } from "@/core/clipboardImages";
@@ -9,6 +9,8 @@ import { expandPastes } from "@/core/pastes";
 import { Button, IconButton, Kbd, Lightbox, LightboxTrigger, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn, spring, toast } from "@/design";
 import { AgentRolesSection, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
 import { launchMainText, overridesSummary } from "@/features/agentRoles/roles";
+import { ModelPresetsSection, PresetRows, useMatchingPreset } from "@/features/agentRoles/ModelPresets";
+import { type PresetPatch, withPreset } from "@/features/agentRoles/presets";
 import { policyChipText } from "@/features/autoAnswer/format";
 import { useHostAutoAnswer } from "@/features/autoAnswer/hooks";
 import { AutoAnswerSection } from "@/features/autoAnswer/PolicyEditor";
@@ -20,6 +22,7 @@ import { PasteChips, PasteMenu } from "@/features/session/composer/PasteChips";
 import { isSlashDraft } from "@/features/session/composer/slash";
 import { useSlashPalette } from "@/features/session/composer/SlashPalette";
 import { usePasteAttach } from "@/features/session/composer/usePasteAttach";
+import { useUndoHistory } from "@/features/session/composer/useUndoHistory";
 import { VideoChips } from "@/features/session/composer/VideoChips";
 import { type FirstCommand, firstCommand, NEW_AGENT_OFFER, useNewAgentCommands } from "./commands";
 import { MAX_TASK_IMAGES } from "./images";
@@ -97,6 +100,17 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   // The `/` palette: omp's commands a new agent can run, and the folder's skills, prompt templates and extension commands.
   const known = useNewAgentCommands(hostId, repo);
   const palette = useSlashPalette({ custom: known.commands, setText, ta, mobile, offer: NEW_AGENT_OFFER, badge: (c) => (c.source === "omp" || c.source === "teleflock" ? null : c.source) });
+  // Ctrl+Z / Ctrl+Shift+Z over every edit, the palette's and paste chips' included; the palette follows an undo, a paste's menu closes.
+  const undo = useUndoHistory({
+    key: draftKey,
+    text,
+    setText,
+    ta,
+    onRestore: (value, caret) => {
+      paste.close();
+      palette.update(value, caret);
+    },
+  });
   // Judged on what was typed, as the session composer judges it; a message with attachments is a prompt.
   const asCommand = isSlashDraft(text) && images.length === 0 && videos.length === 0;
   const routed = asCommand ? firstCommand(expanded, known) : null;
@@ -133,6 +147,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
     }
     if (!onSend(prepared.text.trim(), sent, sentVideos, command?.command)) return;
     clearText();
+    undo.reset("");
     paste.sent(prepared.carried);
     // Only what was sent: an image or video attached meanwhile stays.
     setImages((cur) => cur.filter((i) => !sent.includes(i)));
@@ -174,7 +189,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing || paste.onKeyDown(e) || palette.onKeyDown(e) || e.key !== "Enter") return;
+    if (e.nativeEvent.isComposing || undo.onKeyDown(e) || paste.onKeyDown(e) || palette.onKeyDown(e) || e.key !== "Enter") return;
     if ((!mobile && !e.shiftKey && !e.altKey) || e.ctrlKey || e.metaKey) {
       e.preventDefault();
       void send();
@@ -240,7 +255,10 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
           const r = paste.change(e.target.value, e.target.selectionStart ?? e.target.value.length, (e.nativeEvent as InputEvent).isComposing === true);
           palette.update(r.text, r.caret);
         }}
-        onSelect={(e) => paste.onSelect(e.currentTarget)}
+        onSelect={(e) => {
+          undo.onSelect(e.currentTarget);
+          paste.onSelect(e.currentTarget);
+        }}
         onCopy={(e) => paste.onCopy(e)}
         onCut={(e) => paste.onCopy(e, true)}
         onBlur={() =>
@@ -344,12 +362,16 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
   const templates = useSettings((s) => s.templates);
   const catalog = useModelCatalog(hostId);
   const template = templates.find((t) => t.id === options.templateId);
+  // A saved model preset these options are (not over a template, whose model wins).
+  const fields = { model: options.model, thinking: options.thinking, roleModels: options.roleModels ?? {}, fallbackChains: options.fallbackChains ?? {} };
+  const matched = useMatchingPreset(fields);
+  const preset = template ? undefined : matched;
   const modelLabel = (id: string) => {
     if (id === DEFAULT) return "Default model";
     const m = catalog?.models.find((x) => `${x.provider}/${x.id}` === id);
     return m?.label ?? id.split("/").pop() ?? id;
   };
-  const label = template ? template.name : [modelLabel(options.model), options.thinking !== DEFAULT && options.thinking].filter(Boolean).join(" · ");
+  const label = template ? template.name : preset ? preset.name : [modelLabel(options.model), options.thinking !== DEFAULT && options.thinking].filter(Boolean).join(" · ");
 
   const modelOptions = useMemo<SelectOption[]>(() => {
     const opts: SelectOption[] = [{ value: DEFAULT, label: "Host default", icon: <Sparkles /> }];
@@ -369,7 +391,7 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
         )}
         aria-label="Agent options"
       >
-        {template ? <LayoutTemplate /> : <Cpu />}
+        {template ? <LayoutTemplate /> : preset ? <Layers /> : <Cpu />}
         <span className="truncate">{label}</span>
       </PopoverTrigger>
       <PopoverContent side="top" align="start" className="flex w-[min(340px,calc(100vw-24px))] flex-col gap-3">
@@ -391,13 +413,14 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
                 {t.id === options.templateId && <Check className="size-4 shrink-0 text-accent-hi" />}
               </button>
             ))}
-            <button type="button" className={cn(row, !template && "bg-accent/14 text-ink")} onClick={() => onChange({ ...options, templateId: null })}>
+            <button type="button" className={cn(row, !template && !preset && "bg-accent/14 text-ink")} onClick={() => onChange({ ...options, templateId: null })}>
               <Cpu className="size-4 shrink-0 text-mute" />
               <span className="flex-1">Custom model</span>
-              {!template && <Check className="size-4 shrink-0 text-accent-hi" />}
+              {!template && !preset && <Check className="size-4 shrink-0 text-accent-hi" />}
             </button>
           </div>
         )}
+        <PresetRows hostId={hostId} value={fields} onApply={(patch) => onChange(withPreset(options, patch))} rowClassName={row} />
         {!template && (
           <div className="grid grid-cols-[minmax(0,1fr)_112px] gap-2">
             <Select value={options.model} onValueChange={(model) => onChange({ ...options, model })} options={modelOptions} className="w-full min-w-0" aria-label="Model" />
@@ -420,8 +443,9 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
 }
 
 /**
- * More options of the agents dispatched from here: their own model roles and fallback chains, and
- * decide for me. A footer chip with what is set opens them in a dialog (a sheet on phones).
+ * More options of the agents dispatched from here: model presets (and Reset all), their own model
+ * roles and fallback chains, and decide for me. A footer chip with what is set opens them in a
+ * dialog (a sheet on phones).
  */
 function DispatchAgentOptions({ hostId, options, onChange, mobile }: { hostId?: string; options: DispatchOptions; onChange(o: DispatchOptions): void; mobile: boolean }) {
   const [open, setOpen] = useState(false);
@@ -433,11 +457,12 @@ function DispatchAgentOptions({ hostId, options, onChange, mobile }: { hostId?: 
   const decides = !!useHostAutoAnswer(hostId);
   const takesRoles = useHostTakesRoles(hostId);
   const summary = [takesRoles ? overridesSummary(roles, chains) : null, policyChipText(decides ? options.autoAnswer : undefined)].filter(Boolean).join(" · ");
-  const what = "Model roles, fallback chains and decide for me of the dispatched agents";
+  const what = "Model presets, roles, fallback chains and decide for me of the dispatched agents";
   // The main model is the template's, else the model menu's.
   const template = templates.find((t) => t.id === options.templateId);
   const model = template ? (template.model ?? DEFAULT) : options.model;
   const thinking = template ? (template.thinking ?? DEFAULT) : options.thinking;
+  const value: PresetPatch = { model, thinking, roleModels: roles, fallbackChains: chains, autoAnswer: options.autoAnswer };
   return (
     <>
       <button
@@ -471,6 +496,16 @@ function DispatchAgentOptions({ hostId, options, onChange, mobile }: { hostId?: 
           }
         >
           <div className="flex min-w-0 flex-col gap-5 pb-1">
+            <ModelPresetsSection
+              hostId={hostId}
+              value={value}
+              onApply={(patch) => {
+                // Undo puts the options back as they were, the template the preset cleared included.
+                const before = options;
+                onChange(withPreset(options, patch));
+                return () => onChange(before);
+              }}
+            />
             <AgentRolesSection
               hostId={hostId}
               roles={roles}

@@ -50,7 +50,7 @@ use serde_json::Value;
 use tf_proto::{
     ActiveTool, AppendField, AssistantItem, Capabilities, ChangedFile, CompactionItem, ContextUsage, CostInfo, CostSplit, FileStatus,
     HistoryPage, ImageRef, Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
-    SessionEvent, SessionMeta, SessionSnapshot, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase, TpsSplit,
+    SessionEvent, SessionMeta, SessionSnapshot, Spender, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase, TpsSplit,
     TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem, GoalInfo, IrcItem, Refusal,
 };
 
@@ -60,10 +60,10 @@ use util::{arr, b, clip, content_images, content_text, f, first_line, is_session
 
 pub use irc::{may_hold_irc, IrcFileScan, IrcRecord, IRC_USER};
 pub use live_rows::{LiveRow, MAX_LIVE_ROWS};
-pub use spend::{ArtifactCall, ArtifactKind, ArtifactLedger, Spend};
+pub use spend::{ArtifactCall, ArtifactKind, ArtifactLedger, ModelKey, Spend};
 pub use ui::UiReply;
 use failure::{error_row_id, visible_text, Ending};
-use spend::Playback;
+use spend::{ByModel, Playback};
 
 /// Rows carried by the `reset` event; older rows page through [`Replica::history`].
 pub const RESET_LIMIT: usize = 300;
@@ -286,6 +286,9 @@ struct Journal {
     todo_edit: Option<Vec<TodoPhase>>,
     /// The main agent's side calls (`model_usage`: judges, title, compaction helpers…).
     side: Spend,
+    /// The same by model (kept apart from the turns': the journal is read before, between and
+    /// after the entries, and each part must add up the same way every time).
+    side_models: ByModel,
     /// User rows' images as the journal keeps them (omp blobs), by row id (`u<ts>`). They stand in
     /// for payloads collab cut from entries over 1 MiB, whichever of the two arrives first.
     images: HashMap<String, Vec<ImageRef>>,
@@ -293,15 +296,28 @@ struct Journal {
 
 impl Default for Journal {
     fn default() -> Self {
-        Journal { offset: 0, goal: None, mode: OmpMode::Normal, todo_edit: None, side: Spend::default(), images: HashMap::new() }
+        Journal { offset: 0, goal: None, mode: OmpMode::Normal, todo_edit: None, side: Spend::default(), side_models: ByModel::default(), images: HashMap::new() }
     }
 }
 
 /// Spend tf-hostd read from the session's artifacts dir ([`ArtifactLedger`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct Artifacts {
     subagents: Spend,
     advisor: Spend,
+    subagent_models: ByModel,
+    advisor_models: ByModel,
+}
+
+impl Artifacts {
+    fn of(ledger: &ArtifactLedger) -> Artifacts {
+        Artifacts {
+            subagents: ledger.subagents(),
+            advisor: ledger.advisor(),
+            subagent_models: ledger.models(ArtifactKind::Subagent),
+            advisor_models: ledger.models(ArtifactKind::Advisor),
+        }
+    }
 }
 
 /// omp `Goal` (`mode_change.data.goal`) → `GoalInfo`; `None` once complete.
@@ -383,8 +399,14 @@ pub struct Replica {
     recent_entries: VecDeque<String>,
     /// The main agent's assistant turns (`None` until the first usage record).
     main_spend: Option<Spend>,
+    /// The same by model.
+    main_models: ByModel,
+    /// The model of the main agent's latest assistant message: whom its streamed deltas go to.
+    main_model: Option<ModelKey>,
     /// Completed `task` results (`details.usage`): the floor of the subagent spend.
     task_spend: Spend,
+    /// The same by the model each subagent ran on (`details.results[]`).
+    task_models: ByModel,
     /// How finished subagents ended, as the session file recorded it (agent id → outcome); see
     /// `subagents.rs`. Rebuilt with the replica from the same entries.
     outcomes: BTreeMap<String, subagents::Outcome>,
@@ -421,6 +443,10 @@ pub struct Replica {
     expected_originals: VecDeque<(String, Vec<KeptOriginal>)>,
     /// State read from the main session journal (entries collab does not mirror).
     journal: Journal,
+    /// Each subagent's completion estimate (omp `completionPercent`) as last seen, with the host time
+    /// it took that value (`Subagent.completion_at`). Kept across snapshot reloads of the session, so
+    /// a resync replaying the same estimate keeps its time.
+    completion: HashMap<String, (f32, Millis)>,
 }
 
 impl Replica {
@@ -461,7 +487,10 @@ impl Replica {
             counted: HashSet::new(),
             recent_entries: VecDeque::new(),
             main_spend: None,
+            main_models: ByModel::default(),
+            main_model: None,
             task_spend: Spend::default(),
+            task_models: ByModel::default(),
             outcomes: BTreeMap::new(),
             artifact_outcomes: BTreeMap::new(),
             interrupted: std::collections::BTreeSet::new(),
@@ -478,6 +507,7 @@ impl Replica {
             originals: HashMap::new(),
             expected_originals: VecDeque::new(),
             journal: Journal::default(),
+            completion: HashMap::new(),
         }
     }
 
@@ -732,25 +762,31 @@ impl Replica {
 
     /// Session spend as omp's status line totals it: main (assistant turns + journal
     /// `model_usage`) + subagents (`max` of task results, artifact tree, live progress) +
-    /// advisor. `None` until anything was billed. See [`spend`] for the sources.
+    /// advisor, each also by model. `None` until anything was billed. See [`spend`] for the
+    /// sources.
     pub fn usage(&self) -> Option<CostInfo> {
         let mut main = self.main_spend.unwrap_or_default();
         main.add(&self.journal.side);
-        let subagents = self.subagent_spend();
-        let advisor = self.artifacts.map(|a| a.advisor).unwrap_or_default();
+        let (subagents, subagent_models) = self.subagent_spend();
+        let advisor = self.artifacts.as_ref().map(|a| a.advisor).unwrap_or_default();
         if self.main_spend.is_none() && main.is_empty() && subagents.is_empty() && advisor.is_empty() {
             return None;
         }
         let mut total = main;
         total.add(&subagents);
         total.add(&advisor);
+        let mut main_models = self.main_models.clone();
+        main_models.merge(&self.journal.side_models);
+        let mut models = main_models.shares(Spender::Main, main.usd);
+        models.extend(subagent_models.shares(Spender::Subagents, subagents.usd));
+        models.extend(self.artifacts.as_ref().map(|a| a.advisor_models.shares(Spender::Advisor, advisor.usd)).unwrap_or_default());
         Some(CostInfo {
             usd: total.usd,
             input: total.input,
             output: total.output,
             cache_read: total.cache_read,
             cache_write: total.cache_write,
-            split: Some(CostSplit { main: main.usd, subagents: subagents.usd, advisor: advisor.usd }),
+            split: Some(CostSplit { main: main.usd, subagents: subagents.usd, advisor: advisor.usd, models }),
         })
     }
 
@@ -758,11 +794,25 @@ impl Replica {
     /// remote omp) the live `progress.cost` sum stands in for the tree; with it, progress still
     /// covers a subagent whose transcript is not on disk yet. Progress has no token split. Every
     /// sum is added up in a fixed order (progress by agent id: `subs` is ordered; the tree: see
-    /// [`ArtifactLedger`]), so a rebuilt replica bills exactly what the live one did.
-    fn subagent_spend(&self) -> Spend {
-        let progress = Spend { usd: self.subs.values().filter_map(|s| s.progress.as_ref().and_then(|p| f(p, "cost"))).filter(|c| c.is_finite()).sum(), ..Spend::default() };
-        let tree = self.artifacts.map(|a| a.subagents).unwrap_or_default();
-        [self.task_spend, tree, progress].into_iter().fold(Spend::default(), |best, s| if s.usd > best.usd { s } else { best })
+    /// [`ArtifactLedger`]), so a rebuilt replica bills exactly what the live one did. The split by
+    /// model is the winning source's, else the first other one's that has a split (the tree's, the
+    /// task results', progress'): [`ByModel::shares`] scales it to the figure.
+    fn subagent_spend(&self) -> (Spend, ByModel) {
+        let (mut progress, mut progress_models) = (Spend::default(), ByModel::default());
+        for p in self.subs.values().filter_map(|s| s.progress.as_ref()) {
+            if let Some(cost) = f(p, "cost").filter(|c| c.is_finite()) {
+                progress.usd += cost;
+                progress_models.add(ModelKey::of_subagent(p).as_ref(), cost);
+            }
+        }
+        let no_tree = Artifacts::default();
+        let tree = self.artifacts.as_ref().unwrap_or(&no_tree);
+        let sources = [(self.task_spend, &self.task_models), (tree.subagents, &tree.subagent_models), (progress, &progress_models)];
+        let (spend, models) = sources.iter().fold((Spend::default(), None), |best, &(s, m)| if s.usd > best.0.usd { (s, Some(m)) } else { best });
+        let models = models
+            .filter(|m| !m.is_empty())
+            .or_else(|| [&tree.subagent_models, &self.task_models, &progress_models].into_iter().find(|m| !m.is_empty()));
+        (spend, models.cloned().unwrap_or_default())
     }
 
     /// Folds what tf-hostd read from the session's artifacts dir: the ledger's running totals and
@@ -770,7 +820,7 @@ impl Replica {
     pub fn apply_artifacts(&mut self, ledger: &ArtifactLedger, calls: &[ArtifactCall], now: Millis) -> Update {
         let mut out = Update::default();
         let before = self.meta.clone();
-        self.artifacts = Some(Artifacts { subagents: ledger.subagents(), advisor: ledger.advisor() });
+        self.artifacts = Some(Artifacts::of(ledger));
         self.set_artifact_outcomes(ledger.outcomes(), ledger.interrupted());
         self.playback.retain(|p| p.end > now);
         self.playback.extend(calls.iter().filter_map(|c| Playback::of(c, now)));
@@ -785,7 +835,7 @@ impl Replica {
     /// The replica's artifact totals differ from `ledger`'s (first scan, a resync of another
     /// session, a rewritten transcript).
     pub fn artifacts_stale(&self, ledger: &ArtifactLedger) -> bool {
-        self.artifacts != Some(Artifacts { subagents: ledger.subagents(), advisor: ledger.advisor() }) || self.artifact_outcomes != ledger.outcomes() || self.interrupted != ledger.interrupted()
+        self.artifacts.as_ref() != Some(&Artifacts::of(ledger)) || self.artifact_outcomes != ledger.outcomes() || self.interrupted != ledger.interrupted()
     }
 
     /// A subagent/advisor reply is still being replayed into `Liveness.tps` at `now`.
@@ -836,7 +886,8 @@ impl Replica {
     }
 
     /// Output tok/s per spender at `now`: the main agent's streamed deltas over the last 3 s
-    /// (chars / 4), plus every subagent/advisor reply being replayed.
+    /// (chars / 4), plus every subagent/advisor reply being replayed. Each also by model: the
+    /// replayed reply's, and for the main agent the model of the message it streams.
     fn tps_split(&self, now: Millis) -> TpsSplit {
         let main = if self.running {
             let chars: u32 = self.rate.iter().filter(|(t, _)| now - t <= TPS_WINDOW_MS).map(|(_, n)| n).sum();
@@ -844,13 +895,23 @@ impl Replica {
         } else {
             0.0
         };
-        let mut split = TpsSplit { main, subagents: 0.0, advisor: 0.0 };
+        let mut split = TpsSplit { main, subagents: 0.0, advisor: 0.0, models: Vec::new() };
+        let (mut mains, mut subagents, mut advisors) = (ByModel::default(), ByModel::default(), ByModel::default());
         for p in self.playback.iter().filter(|p| p.start <= now && now < p.end) {
-            match p.kind {
-                ArtifactKind::Subagent => split.subagents += p.rate,
-                ArtifactKind::Advisor => split.advisor += p.rate,
-            }
+            let (figure, models) = match p.kind {
+                ArtifactKind::Subagent => (&mut split.subagents, &mut subagents),
+                ArtifactKind::Advisor => (&mut split.advisor, &mut advisors),
+            };
+            *figure += p.rate;
+            models.add(p.model.as_ref(), p.rate.into());
         }
+        if main > 0.0 {
+            let session = || self.state.model.as_ref().and_then(ModelKey::of_session);
+            mains.add(self.main_model.clone().or_else(session).as_ref(), main.into());
+        }
+        split.models = mains.shares(Spender::Main, main.into());
+        split.models.extend(subagents.shares(Spender::Subagents, split.subagents.into()));
+        split.models.extend(advisors.shares(Spender::Advisor, split.advisor.into()));
         split
     }
 
@@ -953,6 +1014,8 @@ impl Replica {
         let artifacts = if keep_artifacts { self.artifacts.take() } else { None };
         let playback = if keep_artifacts { std::mem::take(&mut self.playback) } else { Vec::new() };
         let queued_sent = if same_session { std::mem::take(&mut self.queued_sent) } else { VecDeque::new() };
+        // Subagent ids are the session's own: when their estimates changed goes with it.
+        let completion = if same_session { std::mem::take(&mut self.completion) } else { HashMap::new() };
         // Rows only seen live go back into this session's transcript (also the ones tf-hostd handed
         // back before the first snapshot).
         let live_rows = if keep_artifacts { std::mem::take(&mut self.live_rows) } else { Vec::new() };
@@ -971,6 +1034,7 @@ impl Replica {
         self.journal = journal;
         self.artifacts = artifacts;
         self.playback = playback;
+        self.completion = completion;
         self.meta.goal = self.journal.goal.clone();
         self.meta.mode = self.journal.mode;
         self.now = out_now(self.now, snap);
@@ -1370,6 +1434,9 @@ impl Replica {
             state.blocks.resize(content.len(), None);
         }
         let model = s(msg, "model").map(str::to_owned);
+        if let Some(key) = ModelKey::of_call(msg) {
+            self.main_model = Some(key);
+        }
         let usage = msg.get("usage").map(token_usage);
         // How it ended goes on its last text row, else on an error row of its own (`a<ts>.e`).
         let ending = if fin { Ending::of(msg) } else { Ending::default() };
@@ -1738,6 +1805,30 @@ impl Replica {
         }
     }
 
+    /// [`tools::view`] with the time each subagent's completion estimate on a task card took its
+    /// value ([`Self::completion_stamp`]).
+    fn tool_view(&mut self, name: &str, args: &Value, result: Option<&Value>, is_error: Option<bool>) -> Option<tf_proto::ToolView> {
+        let mut view = tools::view(name, args, result, is_error);
+        if let Some(tf_proto::ToolView::Task(task)) = &mut view {
+            for agent in &mut task.agents {
+                agent.completion_at = agent.completion_pct.map(|pct| self.completion_stamp(&agent.id, pct));
+            }
+        }
+        view
+    }
+
+    /// When subagent `id`'s completion estimate took the value `pct`: kept while the estimate stays
+    /// (any number of progress frames and rebuilds), now when it changed.
+    fn completion_stamp(&mut self, id: &str, pct: f32) -> Millis {
+        match self.completion.get(id) {
+            Some(&(seen, at)) if seen == pct => at,
+            _ => {
+                self.completion.insert(id.to_owned(), (pct, self.now));
+                self.now
+            }
+        }
+    }
+
     fn tool_start(&mut self, ev: &Value, out: &mut Update) {
         let call_id = s(ev, "toolCallId").unwrap_or("").to_owned();
         let name = s(ev, "toolName").unwrap_or("").to_owned();
@@ -1780,12 +1871,12 @@ impl Replica {
             let mut t = self.ensure_tool(call_id, &name, ev.get("args"), None);
             t.status = ToolStatus::Running;
             t.output = Some(cap_output(&content_text(partial.get("content"))).0);
-            t.view = tools::view(&name, &t.args, Some(partial), None);
+            t.view = self.tool_view(&name, &t.args, Some(partial), None);
             return self.upsert(TranscriptItem::Tool(t), out);
         };
         let text = content_text(partial.get("content"));
         let shown = current.output.clone().unwrap_or_default();
-        let new_view = tools::view(&name, &current.args, Some(partial), None);
+        let new_view = self.tool_view(&name, &current.args, Some(partial), None);
         let view_changed = new_view.is_some() && new_view != current.view && !tools::streams_output(&name);
         if !view_changed && text.len() > shown.len() && text.starts_with(&shown) && text.len() <= OUTPUT_CAP {
             let delta = text[shown.len()..].to_owned();
@@ -1825,7 +1916,7 @@ impl Replica {
         t.status = tools::status(&name, &text, details, is_error);
         t.output = (!o.is_empty()).then_some(o);
         t.truncated = trunc;
-        t.view = tools::view(&name, &t.args, Some(result), Some(is_error));
+        t.view = self.tool_view(&name, &t.args, Some(result), Some(is_error));
         t.error = is_error.then(|| clip(first_line(&text), 300)).filter(|e| !e.is_empty());
         t.artifact = if is_error { None } else { tools::presented(&name, details) };
         // From omp's own records, so a rebuild finds the same: the tool's wall time (bash), else
@@ -2086,7 +2177,9 @@ impl Replica {
                 // Side calls billed to the main agent (omp `entryUsage`); collab never mirrors them.
                 Some("model_usage") => {
                     if let Some(usage) = entry.get("usage") {
-                        self.journal.side.add_usage(usage);
+                        let call = Spend::of_usage(usage);
+                        self.journal.side.add(&call);
+                        self.journal.side_models.add(ModelKey::of_call(entry).as_ref(), call.usd);
                     }
                 }
                 // Same timestamps as `entry` uses for the row id.
@@ -2182,17 +2275,26 @@ impl Replica {
             return;
         }
         let Some(usage) = msg.get("usage") else { return };
-        self.main_spend.get_or_insert_default().add_usage(usage);
+        let call = Spend::of_usage(usage);
+        self.main_spend.get_or_insert_default().add(&call);
+        self.main_models.add(ModelKey::of_call(msg).as_ref(), call.usd);
     }
 
     /// A completed `task` result carries its children's spend (`details.usage`; absent for async
-    /// spawns, whose children only show up in the artifact tree and `progress`).
+    /// spawns, whose children only show up in the artifact tree and `progress`). omp sums it from
+    /// each child's own (`results[].usage`), next to the model the child ran on.
     fn count_task_cost(&mut self, entry_id: &str, msg: &Value) {
-        let Some(usage) = msg.get("details").and_then(|d| d.get("usage")).filter(|u| u.is_object()) else { return };
+        let Some(details) = msg.get("details") else { return };
+        let Some(usage) = details.get("usage").filter(|u| u.is_object()) else { return };
         if entry_id.is_empty() || !self.counted.insert(entry_id.to_owned()) {
             return;
         }
         self.task_spend.add_usage(usage);
+        for r in arr(details, "results") {
+            if let Some(usage) = r.get("usage").filter(|u| u.is_object()) {
+                self.task_models.add(ModelKey::of_subagent(r).as_ref(), Spend::of_usage(usage).usd);
+            }
+        }
     }
 
     // ── subagents ──────────────────────────────────────────────────────
@@ -2202,6 +2304,14 @@ impl Replica {
             "task:subagent:progress" => {
                 let Some(progress) = data.get("progress") else { return };
                 let Some(id) = s(progress, "id") else { return };
+                match tools::completion_estimate(progress) {
+                    Some(pct) => {
+                        self.completion_stamp(id, pct);
+                    }
+                    None => {
+                        self.completion.remove(id);
+                    }
+                }
                 let sub = self.subs.entry(id.to_owned()).or_default();
                 if s(progress, "status") == Some("running") {
                     sub.restarted();
@@ -2233,7 +2343,7 @@ impl Replica {
         self.subs
             .iter()
             .filter(|(_, s)| s.snapshot.as_ref().is_none_or(|a| a.kind != "main"))
-            .map(|(id, st)| subagent_view(id, st, self.outcome_of(id), self.interrupted.contains(id), main))
+            .map(|(id, st)| subagent_view(id, st, self.outcome_of(id), self.interrupted.contains(id), main, self.completion.get(id).copied()))
             .collect()
     }
 
@@ -2475,7 +2585,8 @@ fn last_sentence(text: &str) -> Option<String> {
     Some(if n > 80 { format!("…{}", frag.chars().skip(n - 79).collect::<String>()) } else { frag.to_owned() })
 }
 
-fn subagent_view(id: &str, st: &SubState, outcome: Option<subagents::Outcome>, interrupted: bool, main: Option<&str>) -> Subagent {
+/// One subagent of `meta.subagents`; `completion`: its completion estimate as last seen, and since when.
+fn subagent_view(id: &str, st: &SubState, outcome: Option<subagents::Outcome>, interrupted: bool, main: Option<&str>, completion: Option<(f32, Millis)>) -> Subagent {
     let p = st.progress.as_ref();
     let snap = st.snapshot.as_ref();
     let status = subagents::status(st, outcome.map(|o| o.status), interrupted);
@@ -2513,6 +2624,7 @@ fn subagent_view(id: &str, st: &SubState, outcome: Option<subagents::Outcome>, i
         model: p.and_then(|p| non_empty(p, "resolvedModel")).map(str::to_owned),
         line,
         completion_pct: p.and_then(|p| tools::completion_pct(p, status)),
+        completion_at: p.and_then(|p| tools::completion_pct(p, status)).and_then(|pct| completion.filter(|&(seen, _)| seen == pct)).map(|(_, at)| at),
         context: p.and_then(tools::subagent_context),
         tool_count: p.and_then(|p| u(p, "toolCount")).map(|n| n as u32),
         parent_id: subagents::parent(id, st, main),

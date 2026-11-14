@@ -12,7 +12,7 @@ The home of the app: the "is everything alive?" surface.
 // Hosts (one row per host: orb, name + hostAccent swatch, latency/phase, cpu, ram bar, load → Hosts) · live terminal.
 // Windows ≤ 820 px tall (`short:`) get the same facts in one ~72 px strip (BentoStrip).
 // Lanes (vocab LANE_ORDER/LANE_TITLE/LANE_LEGEND): Needs you (header links to Inbox; top card gets the sunset
-// hero treatment) · Running · Review · Done (footer: Older → Activity, Closed panes → Past sessions).
+// hero treatment) · Running (header: "Queue for all", see below) · Review · Done (footer: Older → Activity, Closed panes → Past sessions).
 export function BoardView(): JSX.Element;
 // src/features/board/FlockHome.tsx — mobile home (same routes on mobile). Mounts <WhileAwayToast/> itself.
 // Header: repo chip (FlockActions.tsx `RepoChip`: shown once the agents in view span 2+ repos, or while one is picked;
@@ -23,7 +23,7 @@ export function BoardView(): JSX.Element;
 // no events for QUIET_AFTER_MS), "$ … today ›" opens Usage. Above them <PhoneNotices/> (Notices.tsx): every notice folded
 // into one line until expanded. Rows: name · RepoTag, ⋯ (CardMenuButton mobile; Review/Done rows add "Delete worktree…" once the PR
 // is merged or closed), Review rows with Mark done + Review, ctx/subs/diff/Connect/model meta, swipe Stop turn on
-// running rows. Needs cards show the RepoTag under the agent pill.
+// running rows. Needs cards show the RepoTag under the agent pill. Running section header: "Queue for all" (as on the desktop lane).
 export function FlockHome(): JSX.Element;
 // src/features/inbox/InboxView.tsx — #/inbox (desktop + mobile): "Needs you" (today's needs cards, oldest first), "Decided for you"
 // (autoAnswer/DecidedForYou.tsx, while decisions await review) then "Updates"
@@ -92,6 +92,15 @@ export function PhoneNotices(): JSX.Element; // phone: NoticeTray, the most urge
 // AgentOrb, AgentHeartbeat ("last event 4s ago"), useQuiet, QuietChip, ToolChip, LiveLine, TpsSparkline ("tok/s"),
 // ContextMeter ("ctx 61%", neutral until 80 %), SubagentsDone ("subs 59%"), ConnectLinkButton (not-shared → /collab)
 
+// src/features/board/ProgressChip.tsx — the main agent's own estimate of its turn (`OmpInfo.progress`, bridge ≥ 2.6.0)
+// ProgressChip (card meter and phone row fact: ring, "64% done · ~7m left"; its step and the pace in the tooltip; its own
+// 15 s clock), useTurnProgress(key) (only while running on an online host with herdr up), turnProgressHint, madeAgo;
+// the session header line and the inspector tile use them too. Time left: `@/core/progress` (see features/session).
+
+// src/features/board/LoadChip.tsx — card meter and phone row fact "cpu 38% · ram 2.4 GB" (only the resource near its threshold), mounted
+// while useNotableLoad(key) (features/hosts/agentLoad.ts: hosts ≥ 0.9.5 `HostHealth.agents`); the tooltip has cores,
+// memory share and process count.
+
 // src/features/board/RecapLine.tsx (+ pure recap.ts, tested) — omp's idle recap (`OmpInfo.recap`, hostd sends it only while
 // current): RestingLine (Review/Done cards: recap with a scroll mark and its age in the tooltip, else `live.line`),
 // RecapLine (recap only: phone Review/Done rows, desktop session header, phone session under the chips), RecapText.
@@ -110,6 +119,13 @@ export function rememberShip(hostId: string, workspaceId: string, memo: { stage:
 
 // src/features/board/firstSteps.ts — First steps checklist (demo: 6 steps; fresh real host: setup → first agent → first answer),
 // ticked by state changes (activity "You answered…", steer queue, Review/palette opened, a Dispatch task started on a demo host), persisted in tf.firstSteps.
+
+// src/features/board/QueueAllDialog.tsx — "Queue a message for all running agents" (section below); the dialog is mounted once by app/App.tsx
+export function openQueueAll(): void; // also the palette action "Queue a message for all running agents" (any page, while any agent runs)
+export function QueueAllButton(props: { min?: number; mobile?: boolean }): JSX.Element | null; // "Queue for all": Running lane header, phone Running section
+// src/features/board/queueAll.ts (tested) — runningKeys(state, scope): the recipients; queueBlock(state, key): why an agent can't
+// take the message (null when it can); queueSummary(results, delivery): the toast's title and who failed; settleSend(sent, now,
+// failed): what a finished send may still do to the dialog (elsewhere | done | retry | keep)
 ```
 
 Everything is re-exported from `src/features/board/index.ts`.
@@ -118,10 +134,21 @@ Everything is re-exported from `src/features/board/index.ts`.
 
 Five fixed zones on every lane: (1) state strip (`agentStateWord` + tool, `stateTime` top-right), (2) identity (todo
 ring/glyph · name · host chip when > 1 host · repo chip · branch), (3) title, (4) lane body, (5) meters in one order that
-wraps (`ctx` · `subs` · diff · ✦ model · 🧠 thinking). Motion budget: in Calm (default) running cards keep only the
+wraps (progress · `ctx` · `subs` · jobs · `cpu`/`ram` · diff · ✦ model · 🧠 thinking). Progress (`ProgressChip`, desktop card and phone row
+facts) is there only while the agent runs and has answered TeleFlock's bridge: "◔ 64% done · ~7m left" ("any minute",
+"over estimate" past its estimate; just the % while too early to tell), the agent's step in its words and the pace in the
+tooltip. Motion budget: in Calm (default) running cards keep only the
 heartbeat trace and a standing tool ring; needs-you glow/pulse play three cycles on arrival, then the 20 s nudge repeats;
 Lively restores looping glow/breath/orbits. Per-second work stays out of the card: `useQuiet` is a threshold timer,
-`QuietChip`/the heartbeat age own their 1 s clock, and `TpsSparkline` stops sampling a flat zero line.
+`QuietChip`/the heartbeat age own their 1 s clock, `ProgressChip` its 15 s one, and `TpsSparkline` stops sampling a flat
+zero line.
+
+**Load** (`LoadChip`): `cpu 38% · ram 2.4 GB` with the figure in warn, on any lane, while the agent's process tree
+(its omp and everything it started, tf-hostd ≥ 0.9.5) takes a quarter of the host's CPU (when that is at least a core)
+or 2 GB of memory (a quarter of a host with less than 8 GB), and until it falls below 70 % of that, so it does not
+flicker at the edge. CPU is a share of the whole host, like the host's own `cpu` figure. `useNotableLoad` re-renders
+a card only when that flips (one recorder per app follows every host's health); the chip itself follows the 5 s
+health ticks. Demo: prompt a forge agent with "fix the flaky test": the chip shows during its `bun test` runs.
 
 **Repo chip** (`RepoTag`, also on phone rows, phone needs cards and the Inbox/HUD needs header): FolderGit2 + repo name
 on a soft tint of the repo's accent (`repoAccent`, so a repo has the same hue as its Repo-grouping glyph and its
@@ -206,6 +233,38 @@ without the field (older hosts, approvals, plan reviews) they show nothing. Expa
 ## Board keyboard (desktop, only while the board is mounted and focus is not in a text field)
 `J`/`K` (or arrows) move selection (`useUi().select`), `H`/`L` jump lanes, `Enter` open session, `A` answer (opens the
 HUD at the selected card), `T` terminal split, `X` select, `/` focus search, `Esc` clear selection.
+
+## Queue a message for all running agents (`QueueAllDialog.tsx`, pure `queueAll.ts`)
+
+"Queue for all" in the Running lane header (desktop: while 2+ agents run in the board's filters and one of them can take
+a message), the same in the phone Running section header, and the palette action "Queue a message for all running
+agents" (any page, while any agent runs) open one dialog (`ResponsiveDialog`: a bottom sheet on phones). Its text box is
+a draft (`board.queueAll`), cleared once a send reaches every picked agent.
+
+**Recipients**: the running agents of the board's host filter (title-bar pill) and repo filter (not the search text), in
+the Running lane's order, each with a checkbox, all ticked. An agent that can't take a message is listed unticked and
+disabled with why (`queueBlock`, the session composer's rules on what the board knows without a session): its host isn't
+online ("studio-pc is offline"), herdr isn't running there, it isn't an omp agent ("claude agent: only its terminal takes
+input"), its link isn't live (not shared: "Connect it first"; connecting; an omp it can't drive; link lost; relay down), or an open
+session says it is read-only. Rows stay put while the dialog is open, so none moves under the pointer: an agent whose turn
+ends keeps its row ("Its turn ended: it starts on this right away"; one that starts asking or gets closed is disabled, as a
+prompt would wait on its question or resume it), agents that start running join at the end, ticked. A row shows how many
+follow-ups already wait in its queue.
+
+**Queue for N** (Ctrl/⌘+Enter) sends `agent.prompt {delivery: "followUp"}` to every picked agent at once, each through its
+own host: omp runs it after the current turn, and it shows in that session's Queued strip meanwhile (the host's queue,
+`OmpInfo.queue`); an agent idle by then starts on it at once. **Steer now** sends `delivery: "auto"` (a steer mid-turn, a
+prompt when idle). Then one toast: "Queued for 5 agents" ("Sent to …" for a steer), or "Queued for 3 of 5 agents" listing
+who failed with the host's message and hint ("Couldn't queue the message" when none went through). After a failure the
+dialog stays open: the agents it reached are unticked with "✓ Queued", the failed ones stay ticked with "Not queued: …",
+so Queue for N tries them again. The box is read-only while it sends, and what a send does once every host has answered
+is judged against the dialog as it is then (`settleSend`): a dialog closed and opened again meanwhile is left alone (only
+the toast shows), and a draft edited meanwhile stays, with the dialog open over it showing who got the earlier message.
+No new host or bridge version: it is the composer's follow-up.
+
+Demo: on forge `kanban`, `pool`, `ci` and `quota` take it, `copy` (kind claude) and studio-pc's `render` (host not online)
+are listed disabled; each queued agent shows the message in its Queued strip and runs it when its turn ends.
+`bun test src/features/board/queueAll.test.ts`.
 
 ## herdr not up (`features/hosts/HerdrNotice.tsx`, `herdrHealth.ts`)
 

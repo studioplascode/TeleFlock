@@ -15,6 +15,7 @@ import { HostBadge, HostName, useMultiHost } from "@/features/hosts/HostBadge";
 import { herdrAgentWord, herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { agentStatus, useBeat } from "../api";
 import { ActionsMenu, FastToggle, GoalChip, ModelThinkingChip, PlanToggle } from "../header/Controls";
+import { ProgressLine } from "../header/ProgressLine";
 import { InspectorTabs } from "../inspector/Inspector";
 import { AutoResumeStrip } from "../resume/AutoResumeStrip";
 import { RetryStrip } from "../resume/RetryStrip";
@@ -353,6 +354,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
         </div>
       )}
       {agent && <RecapLine agent={agent} lines={2} className="mx-3 mb-1.5 shrink-0" />}
+      <ProgressLine agentKey={key} className="mx-3 mb-1.5 shrink-0" />
       {terminal && <PagerDots keys={keys} current={key} inline onList={() => setList(true)} hintDone={hintDone} />}
       <div
         ref={(el) => {

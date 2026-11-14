@@ -107,6 +107,7 @@ import { DemoTerm } from "./term";
 import { DemoQuickRuns, type ShellContext } from "./quickRuns";
 import { DemoHerdr } from "./herdrHealth";
 import { DemoTools } from "./tools";
+import { DemoAgentLoads } from "./agentLoads";
 import { DemoUploads } from "./uploads";
 import { DemoJobs } from "./jobs";
 import { demoUsageReport } from "./usage";
@@ -193,6 +194,9 @@ export class DemoHost implements SimHost {
   private parkedPrs = new Map<string, DemoPr>();
   private info: HostInfo;
   private health: HostHealth;
+  /** Each live agent's share of the host (`HostHealth.agents`), on a random stream of its own. */
+  private readonly loads = new DemoAgentLoads();
+  private loadRng!: Rng;
   private usageTotals: UsageTotals;
   private usageDirty = false;
   private setup: SetupStatus;
@@ -517,6 +521,9 @@ export class DemoHost implements SimHost {
       herdrHealth: this.herdr.status(),
       autoAnswer: this.decide.hostDefault(),
       ...(this.chats ? { chats: CHATS } : {}),
+      // forge's tf-hostd (root, systemd) runs itself, sshd and tailscaled above the agents (§3.36);
+      // studio-pc plays a tf-hostd before 0.9.5, which does not report it.
+      ...(variant === "forge" ? { priority: { raised: ["TeleFlock", "SSH server", "Tailscale"], checkedAt: now - 2 * 60_000 } } : {}),
     };
     // studio-pc's disk is nearly full: once it is online the board warns (low-disk notice → Cleanup).
     const disk = variant === "forge" ? { diskFree: 412e9, diskTotal: 1000e9 } : { diskFree: 6.4e9, diskTotal: 512e9 };
@@ -524,6 +531,8 @@ export class DemoHost implements SimHost {
     this.usageTotals = { costUsd: 0, tokens: 0, input: 0, output: 0 };
     this.status = { phase: "idle", since: now, attempt: 0 };
     this.build();
+    this.loadRng = new Rng(env.seed ^ hash(`${profile.id}:loads`));
+    this.health = { ...this.health, agents: this.loads.next(this.agentsList(), this.health.cores, this.loadRng) };
     const idleShells = this.idleShells.status();
     if (idleShells) this.info = { ...this.info, idleShells };
   }
@@ -1026,16 +1035,20 @@ export class DemoHost implements SimHost {
   private jitterHealth(): void {
     const h = this.health;
     const working = [...this.sims.values()].filter((s) => s.agent.state === "working").length;
-    const target = 18 + working * 11;
-    const cpu = Math.max(3, Math.min(97, h.cpuPct + (target - h.cpuPct) * 0.3 + this.rng.range(-6, 6)));
+    const agents = this.loads.next(this.agentsList(), h.cores, this.loadRng);
+    const agentsCpu = agents.reduce((n, a) => n + a.cpuPct, 0);
+    const target = Math.max(18 + working * 11, agentsCpu + 8);
+    // The agents run on the host: it is never less busy, nor uses less memory, than they do.
+    const cpu = Math.max(agentsCpu + 2, Math.min(97, h.cpuPct + (target - h.cpuPct) * 0.3 + this.rng.range(-6, 6)), 3);
     this.health = {
       ...h,
       at: this.now(),
-      cpuPct: Math.round(cpu * 10) / 10,
+      cpuPct: Math.round(Math.min(100, cpu) * 10) / 10,
       load1: Math.round(Math.max(0.1, (cpu / 100) * h.cores * 0.6 + this.rng.range(-0.3, 0.3)) * 100) / 100,
-      memUsed: Math.round(Math.max(8e9, Math.min(h.memTotal * 0.9, h.memUsed + this.rng.range(-4e8, 4e8)))),
+      memUsed: Math.round(Math.max(8e9, agents.reduce((n, a) => n + a.mem, 6e9), Math.min(h.memTotal * 0.9, h.memUsed + this.rng.range(-4e8, 4e8)))),
       diskFree: h.diskFree - this.rng.int(0, 2_000_000),
       uptimeS: h.uptimeS + 2,
+      agents,
     };
     this.rev += 1;
     this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "health", health: this.health }] });
@@ -1755,10 +1768,10 @@ export class DemoHost implements SimHost {
     const action = this.str(p, "action");
     if (action === "kill") sim.subagents[i] = { ...sub, status: "aborted", endedAt: this.now() };
     else if (action === "revive") {
-      sim.subagents[i] = { ...sub, status: "running", endedAt: undefined, completionPct: undefined, line: "revived" };
+      sim.subagents[i] = { ...sub, status: "running", endedAt: undefined, completionPct: undefined, completionAt: undefined, line: "revived" };
       this.env.clock.after(20_000, () => {
         const j = sim.subagents.findIndex((s) => s.id === id);
-        if (j >= 0) sim.subagents[j] = { ...(sim.subagents[j] as typeof sub), status: "done", endedAt: this.now(), completionPct: undefined, line: "done" };
+        if (j >= 0) sim.subagents[j] = { ...(sim.subagents[j] as typeof sub), status: "done", endedAt: this.now(), completionPct: undefined, completionAt: undefined, line: "done" };
         sim.refreshDerived();
         this.agentChanged(sim.agent.id);
         this.metaChanged(sim.agent.id);
@@ -1816,7 +1829,8 @@ export class DemoHost implements SimHost {
       const id = `${subagentId}-irc-${row.id}`;
       const text = e.message.text;
       if (e.message.direction === "out") {
-        items.push({ kind: "irc", id, at: e.at, message: { ...e.message, direction: "in", peer: "Main", fromParent: true, receipts: [] } });
+        // omp writes Main's message into the subagent's transcript when the subagent takes it in.
+        if (this.agentChat.reached(sim, sub.name, e.at)) items.push({ kind: "irc", id, at: e.at, message: { ...e.message, direction: "in", peer: "Main", fromParent: true, receipts: [] } });
       } else {
         // Its broadcast reached Main as one of its legs: it sent it to everyone.
         const to = e.message.broadcast ? "all" : "Main";

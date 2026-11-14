@@ -5,6 +5,7 @@ import { QuickCaptureBridge } from "@/features/capture/QuickCaptureBridge";
 import { NewAgentDialog } from "@/features/workspace/NewAgentDialog";
 import { MoveDialog } from "@/features/move/MoveDialog";
 import { DecideDialog } from "@/features/autoAnswer/DecideDialog";
+import { QueueAllDialog } from "@/features/board/QueueAllDialog";
 import { NewWorktreeDialog } from "@/features/worktree/NewWorktreeDialog";
 import { PastSessionsDialog } from "@/features/history/PastSessionsDialog";
 import { FanOutDialog } from "@/features/worktree/FanOutDialog";
@@ -38,6 +39,7 @@ function GlobalOverlays() {
       <NewAgentDialog />
       <MoveDialog />
       <DecideDialog />
+      <QueueAllDialog />
       <PastSessionsDialog />
       <FanOutDialog />
       <HostEditor />

@@ -48,7 +48,9 @@ export function QuickCaptureSettings({ index });         // Settings → Quick c
   monitor under the pointer; its height follows the content (`capture_resize`, 150–640 px).
 - Box: Enter dispatches the task to Dispatch's current target + repo (the chip switches to a recent
   one for this capture; it becomes Dispatch's current one after a send), Shift+Enter is a newline,
-  Ctrl/⌘+Enter opens it in Dispatch prefilled instead (the main window comes forward), Esc hides.
+  Ctrl/⌘+Enter opens it in Dispatch prefilled instead (the main window comes forward), Esc hides. Ctrl/⌘+Z and
+  Ctrl/⌘+Shift+Z (Ctrl+Y) undo and redo as in the composers (`@/features/session/composer/useUndoHistory`; a send
+  starts the history over).
   Pasted or dropped screenshots come along (scaled > 3 MB, ≤ 8 images, the prompt cap). The typed
   text and the images survive hiding, restarts and kills (text: `localStorage tf.capture.text`
   mirrored to IndexedDB, `@/core/mirrored`; images: the draft-image store under `draftKey("capture")`;

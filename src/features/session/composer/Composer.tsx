@@ -25,6 +25,7 @@ import { ComposerPopup, useSlashPalette } from "./SlashPalette";
 import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { PasteChips, PasteMenu } from "./PasteChips";
 import { usePasteAttach } from "./usePasteAttach";
+import { useUndoHistory } from "./useUndoHistory";
 import { VideoChips } from "./VideoChips";
 
 /**
@@ -101,6 +102,7 @@ const MENTION_RE = /(^|\s)@([^\s@]*)$/;
  * Composer: Enter sends (steer while the agent works, prompt when idle), Alt+Enter queues a
  * follow-up, Esc stops. `/` opens the command palette, `@` searches files in the agent's cwd,
  * images paste/drop in as attachments, and so do videos (uploaded to the host as files the agent reads).
+ * Ctrl+Z / Ctrl+Shift+Z undo and redo every edit of the text, the app's own included (`useUndoHistory`).
  */
 export function Composer({ agentKey, mobile = false, className, autoFocus = false }: ComposerProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
@@ -278,6 +280,17 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     searchSeq.current++;
     setPopup(null);
   };
+  // After an undo or redo the palette or file search follows the text put back; a paste's menu closes.
+  const undo = useUndoHistory({
+    key: draftKey,
+    text,
+    setText,
+    ta,
+    onRestore: (value, caret) => {
+      paste.close();
+      updatePopup(value, caret);
+    },
+  });
 
   const pickMention = (path: string) => {
     if (popup?.kind !== "mention") return;
@@ -292,6 +305,15 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       el?.focus();
       el?.setSelectionRange(pos, pos);
     });
+  };
+
+  /** Takes the sent text off the draft (what was typed meanwhile stays); undo starts over from there. */
+  const takeSent = () => {
+    const cur = drafts.get(draftKey);
+    if (!cur.startsWith(text)) return;
+    const rest = cur.slice(text.length).trimStart();
+    drafts.set(draftKey, rest);
+    undo.reset(rest);
   };
 
   const send = async (followUp: boolean) => {
@@ -311,6 +333,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       const okRun = await run(runSlash(slashCtx, body));
       if (okRun) {
         setText("");
+        undo.reset("");
         paste.sent(prepared.carried);
       }
       return;
@@ -332,8 +355,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       }
       usePendingRuns.getState().sent(agentKey, runId);
       // Only what was sent: anything typed while it started stays in the draft.
-      const cur = drafts.get(draftKey);
-      drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
+      takeSent();
       paste.sent(prepared.carried);
       setPopup(null);
       if (!res.value.settled) toast({ title: "Still running", description: "Its output joins the transcript when omp finishes it.", status: "running", duration: 3200 });
@@ -394,8 +416,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       // the host resumes a parked agent with this prompt; the view follows it to its new id
       if (agent?.parked) markResuming(agentKey, true);
       // Only what was sent: anything typed or attached while sending stays in the draft.
-      const cur = drafts.get(draftKey);
-      drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
+      takeSent();
       setImages((cur) => cur.filter((i) => !sentImages.includes(i)));
       // Sent: off the draft, their files stay on the host for the agent.
       detachDraftVideos(draftKey, sentVideos);
@@ -429,6 +450,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
+    if (undo.onKeyDown(e)) return;
     if (paste.onKeyDown(e)) return;
     if (palette.onKeyDown(e)) return;
     const items = popup?.items ?? [];
@@ -641,6 +663,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           }}
           onSelect={(e) => {
             const el = e.currentTarget;
+            undo.onSelect(el);
             paste.onSelect(el);
             if (popup?.kind === "mention" || el.value.includes("@")) updatePopup(el.value, el.selectionStart ?? el.value.length);
           }}

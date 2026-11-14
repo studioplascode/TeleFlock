@@ -67,6 +67,18 @@ feature off in the main window (`webkit_settings_set_feature_enabled`, looked up
 WebKitGTK 2.42+; an older one keeps preconnecting and logs a warning). `cargo test -p teleflock
 --lib frames` checks the switch exists, and under a display (`xvfb-run`) that it turns off.
 
+## Editing keys on Linux (`src/edit_keys.rs`)
+
+WebKitGTK turns keys into editing commands through GTK 3's key bindings, and some keys bind to
+nothing there: undo and redo never do (GTK 3's text widgets have no undo, WebKitGTK lists no Undo
+command), so Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y did nothing in any field; the paste chords and
+Backspace a wtype-style virtual keyboard sends (a dictation tool on a wlroots desktop) don't when
+its keymap puts them on its highest keycode, which GTK 3's Wayland backend never lists. In the main
+and Quick capture webviews a key WebKit hands back unhandled (no command ran, the page didn't
+prevent it) runs its command (`Undo`, `Redo`, `Paste`, `DeleteBackward`, `DeleteForward`); a key
+the page took never comes back, so the composers' own undo history (`useUndoHistory`) runs once.
+`cargo test -p teleflock --lib edit_keys`.
+
 ## Quick capture (`src/capture.rs`, desktop)
 
 A second webview window, label `capture` (`capture.html` → `src/capture/main.tsx`, capability

@@ -15,6 +15,9 @@
 //! place (same pid), so callers keep their own `setsid`, stdio and environment handling. When it
 //! cannot create the unit (no bus, permission) it exits with status 1 before exec'ing; callers
 //! then retry with a plain spawn.
+//!
+//! A child that does the agents' work also leaves a raised priority behind
+//! (`drop_raised_nice`, Unix): tf-hostd may run above normal priority, and children inherit it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -167,6 +170,24 @@ pub fn user_name(uid: u32) -> Option<String> {
     }
     // SAFETY: on success pw_name points to a NUL-terminated string inside `buf`.
     Some(unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned())
+}
+
+/// Drops a raised scheduling priority (a nice value below 0) back to normal; for a child between
+/// fork and exec. tf-hostd may run above normal priority so the host stays responsive while
+/// agents load it, and children inherit it (on Linux the nice value of the thread that forked):
+/// a child that does the agents' work (a herdr server and its panes, a command another host
+/// forwards here) must not. A priority someone lowered on purpose (nice above 0) stays. Call it
+/// after `setsid`: the new session's autogroup (Linux) starts at nice 0 by itself.
+#[cfg(unix)]
+pub fn drop_raised_nice() {
+    // SAFETY: plain system calls on the calling process (this thread on Linux), no allocation or
+    // locks, so safe between fork and exec. getpriority(PRIO_PROCESS, 0) cannot fail, so a
+    // negative answer is a real nice value.
+    unsafe {
+        if libc::getpriority(libc::PRIO_PROCESS, 0) < 0 {
+            libc::setpriority(libc::PRIO_PROCESS, 0, 0);
+        }
+    }
 }
 
 #[cfg(test)]

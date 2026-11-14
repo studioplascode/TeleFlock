@@ -293,6 +293,10 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&BoardMeta>) -> OmpInfo {
         last_turn_ended_at: i.last_turn_ended_at,
         // Filled by the state store from omp's recap journal (`crate::recaps`).
         recap: None,
+        // The main agent's own estimate (bridge ≥ 2.6.0) while its turn runs here too: never one the
+        // bridge failed to clear, nor one of a turn the board already ended (a background wait
+        // nothing woke from, `JobsWait`).
+        progress: ctl.and_then(|c| c.progress.clone()).filter(|_| i.turn_started_at.is_some() || i.omp.is_some_and(|v| v.turn_active)),
     }
 }
 
@@ -1009,6 +1013,29 @@ mod tests {
         let mut i = inputs(&a);
         i.bridge = Some(&b);
         assert_eq!(build_agent(&i).omp.unwrap().goal, None);
+    }
+
+    /// The main agent's own progress estimate (bridge 2.6.0) shows while its turn runs, by herdr's
+    /// word or the replica's, and not once the board ended the turn (a background wait nothing woke
+    /// from), whatever the bridge still says.
+    #[test]
+    fn bridge_progress_shows_while_the_turn_runs() {
+        let mut a = herdr_agent(AgentStatus::Working);
+        a.agent = Some("omp".into());
+        let progress = tf_proto::AgentProgress { pct: 40.0, stage: Some("wiring the API".into()), at: 9_000, since: 1_000 };
+        let mut b = bridged(None);
+        b.state.progress = Some(progress.clone());
+        let mut i = inputs(&a);
+        i.bridge = Some(&b);
+        i.turn_started_at = Some(1_000);
+        assert_eq!(build_agent(&i).omp.unwrap().progress.as_ref(), Some(&progress));
+        i.turn_started_at = None;
+        assert_eq!(build_agent(&i).omp.unwrap().progress, None);
+        // The replica's turn alone (herdr lagging, or without its omp integration) counts too.
+        let mut view = omp_view(tf_proto::model::LinkState::Live, false, false, false);
+        view.turn_active = true;
+        i.omp = Some(&view);
+        assert_eq!(build_agent(&i).omp.unwrap().progress, Some(progress));
     }
 
     #[test]

@@ -44,6 +44,12 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
 * `call(None, "app.*" | "hosts.*" | "wsl.*" | "settings.*" | "tunnel.*", …)` is handled locally;
   any other method needs `Some(host_id)` and is forwarded to that host's `tf-hostd`
   (30 s timeout, `term.open` 15 s). Errors are `tf_proto::ApiError` (`not_connected` is retryable).
+* `settings.set` tidies and checks what it saves (`settings::validate`). Model presets
+  (`Settings.modelPresets`, apps ≥ 0.9.5): names on one line with single spaces, at most 48
+  characters; models, roles and chains trimmed, empty ones dropped (an empty chain stays: no
+  fallbacks). Refused (`invalid_params`): more than 32 presets, an id that is not
+  `[A-Za-z0-9][A-Za-z0-9._-]` (≤ 64) or is used twice, a preset without a name, and roles or chains
+  beyond what tf-hostd takes for one agent (64 roles, 64 chains of ≤ 16 fallbacks, 256-byte selectors).
 * `subscribe_with_replay` returns, atomically with the event stream: `Profiles`, `Settings`,
   `Tunnels`, then per host `HostStatus` + `HostSnapshot` (cached state with a non-online status
   = stale). On `RecvError::Lagged`, call it again, resend the replay, and call `resend_sessions`

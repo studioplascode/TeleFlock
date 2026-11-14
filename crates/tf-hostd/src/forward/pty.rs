@@ -38,20 +38,21 @@ fn set_flag(fd: RawFd, get: libc::c_int, set: libc::c_int, flag: libc::c_int) ->
 }
 
 /// Runs `cmd` on the terminal `slave`: stdin, stdout and stderr, and (in the child) a new session
-/// whose controlling terminal it is, so the shell gets job control and the terminal's signals.
-pub(crate) fn attach(cmd: &mut tokio::process::Command, slave: &OwnedFd) -> io::Result<()> {
+/// whose controlling terminal it is, so the shell gets job control and the terminal's signals. It
+/// is another host's agents' work: `held` is its gate's pipe, if any (`exec::as_agent_work`).
+pub(crate) fn attach(cmd: &mut tokio::process::Command, slave: &OwnedFd, held: Option<RawFd>) -> io::Result<()> {
     cmd.stdin(slave.try_clone()?).stdout(slave.try_clone()?).stderr(slave.try_clone()?);
-    // SAFETY: only async-signal-safe calls (setsid, ioctl) between fork and exec; stdin is the
-    // slave by then (std sets up stdio before running pre_exec hooks).
+    // SAFETY: only async-signal-safe calls (setsid, ioctl, setpriority, dup2, fcntl) between fork
+    // and exec; stdin is the slave by then (std sets up stdio before running pre_exec hooks).
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
             if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(())
+            super::exec::as_agent_work(held)
         });
     }
     Ok(())
@@ -195,7 +196,7 @@ mod tests {
         let (master, slave) = open(91, 27).unwrap();
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.args(["-c", "stty size; read line; stty size; test -t 0 && echo tty:$line"]);
-        attach(&mut cmd, &slave).unwrap();
+        attach(&mut cmd, &slave, None).unwrap();
         let mut child = cmd.spawn().unwrap();
         // The command keeps copies of the slave for the child's stdio until dropped.
         drop(cmd);

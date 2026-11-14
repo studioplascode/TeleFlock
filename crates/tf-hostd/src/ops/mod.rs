@@ -131,6 +131,7 @@ impl Ctx {
         // agents after a restart), through its own bookkeeping; it runs once the context is up.
         let health = crate::herdr_health::begin(&ctx).await;
         tools::follow(&ctx);
+        crate::priority::follow(&ctx);
         upload::start(&daemon.paths, daemon.shutdown.child_token());
         crate::autoanswer::start_session(&ctx);
         crate::state::start(&ctx).await;

@@ -1,4 +1,5 @@
-import type { ToolItem, TranscriptItem } from "@/core/gen";
+import type { ImageView, ToolItem, TranscriptItem } from "@/core/gen";
+import { shownEvalCells } from "../tools/evalArgs";
 
 /*
  * Row heights before a row is measured (px, without the gap between rows). The virtualiser sizes
@@ -24,16 +25,25 @@ interface Metrics {
   runChrome: number;
   /** A drawn Mermaid / SVG figure (header, padding and a typical diagram). */
   figure: number;
+  /** A call's code card around its lines: header, padding, margins (tools/CodeCard.tsx). */
+  codeChrome: number;
+  /** Characters per line of a call's code card, where its long lines wrap. */
+  codeChars: number;
+  /** Characters of a one-line bash command its card's header shows before it cuts it off (the body then shows it whole). */
+  headChars: number;
 }
 
-const WIDE: Metrics = { toolHead: 38, codeLine: 19.2, userChars: 88, textChars: 96, userChrome: 48, assistantChrome: 26, runChrome: 28, figure: 300 };
+const WIDE: Metrics = { toolHead: 38, codeLine: 19.2, userChars: 88, textChars: 96, userChrome: 48, assistantChrome: 26, runChrome: 28, figure: 300, codeChrome: 65, codeChars: 95, headChars: 72 };
 /** Phones: tighter cards, narrower text, no avatar column. */
-const DENSE: Metrics = { toolHead: 34, codeLine: 17.8, userChars: 46, textChars: 52, userChrome: 36, assistantChrome: 22, runChrome: 18, figure: 240 };
+const DENSE: Metrics = { toolHead: 34, codeLine: 17.8, userChars: 46, textChars: 52, userChrome: 36, assistantChrome: 22, runChrome: 18, figure: 240, codeChrome: 57, codeChars: 48, headChars: 24 };
 
 const TEXT_LINE = 21.5;
 /** Output panes (bash, ANSI) and diffs stop growing here (AnsiText maxHeight, DiffBody COLLAPSED_LINES). */
 const OUTPUT_MAX = 280;
 const DIFF_LINES = 36;
+/** A call's code card folds past CODE_FOLD lines, plus FOLD_SLACK (CodeCard CODE_FOLD_LINES, CodeBlock FOLD_SLACK). */
+const CODE_FOLD = 16;
+const FOLD_SLACK = 4;
 const IMAGE_MAX_H = 420;
 const IMAGE_MAX_W = 480;
 
@@ -84,16 +94,49 @@ function lineCount(text: string): number {
   return n;
 }
 
+/** A call's code card: its chrome and its lines, wrapped at `codeChars`, up to the fold and its "Show N more lines". */
+function codeCardHeight(code: string, m: Metrics): number {
+  let lines = 0;
+  let rows = 0;
+  let shown = 0;
+  for (let start = 0; start <= code.length; lines++) {
+    let end = code.indexOf("\n", start);
+    if (end < 0) end = code.length;
+    const wraps = Math.max(1, Math.ceil((end - start) / m.codeChars));
+    rows += wraps;
+    if (lines < CODE_FOLD) shown += wraps;
+    start = end + 1;
+  }
+  return m.codeChrome + (lines > CODE_FOLD + FOLD_SLACK ? shown * m.codeLine + 18 : rows * m.codeLine);
+}
+
+/** An image view's figure: the picture within its caps, padding and caption. */
+function imageHeight(v: ImageView): number {
+  const w = v.image?.width ?? IMAGE_MAX_W;
+  const h = v.image?.height ?? 270;
+  return 38 + Math.min(IMAGE_MAX_H, h * Math.min(1, IMAGE_MAX_W / w));
+}
+
 function toolHeight(item: ToolItem, m: Metrics): number {
   const v = item.view;
   const head = m.toolHead;
+  // An eval call opens on its cells' code, then its output and a screenshot.
+  const cells = shownEvalCells(item);
+  if (cells.length > 0) {
+    const out = item.output ?? "";
+    const code = cells.reduce((h, c) => h + codeCardHeight(c.code, m), 0);
+    return head + 1 + code + (out ? Math.min(OUTPUT_MAX, lineCount(out) * m.codeLine + 16) + 1 : 0) + (v?.type === "image" ? imageHeight(v) : 0);
+  }
   // Views arrive in pieces while a call runs (a bash view before its output, …): every part is optional here.
   switch (v?.type) {
     case "bash": {
       const a = v.output ?? "";
       const b = item.output ?? "";
       const out = b.length > a.length ? b : a;
-      return head + 35 + (out ? Math.min(OUTPUT_MAX, lineCount(out) * m.codeLine + 16) : 20);
+      // the command shows whole in a code card when the header shows only its first line or cuts it off
+      const command = v.command ?? "";
+      const card = command.includes("\n") || command.length > m.headChars ? codeCardHeight(command, m) : 0;
+      return head + 35 + card + (out ? Math.min(OUTPUT_MAX, lineCount(out) * m.codeLine + 16) : 20);
     }
     case "diff": {
       // DiffBody opens up to three files, each showing its first DIFF_LINES lines
@@ -111,11 +154,8 @@ function toolHeight(item: ToolItem, m: Metrics): number {
     case "web":
       // the answer, then one title + snippet per source
       return head + 69 + 60 * (v.sources?.length ?? 0);
-    case "image": {
-      const w = v.image?.width ?? IMAGE_MAX_W;
-      const h = v.image?.height ?? 270;
-      return head + 38 + Math.min(IMAGE_MAX_H, h * Math.min(1, IMAGE_MAX_W / w));
-    }
+    case "image":
+      return head + imageHeight(v);
     case "ask":
       return head + 30 + 40 * (v.questions?.length ?? 1);
     case "markdown":

@@ -3,6 +3,7 @@ import type { AutoAnswer } from "./AutoAnswer";
 import type { AutoDecision } from "./AutoDecision";
 import type { HerdrHealth } from "./HerdrHealth";
 import type { IdleShells } from "./IdleShells";
+import type { PriorityStatus } from "./PriorityStatus";
 import type { PrunedAgent } from "./PrunedAgent";
 import type { SetupStatus } from "./SetupStatus";
 import type { ToolUpdates } from "./ToolUpdates";
@@ -54,4 +55,10 @@ pruned?: Array<PrunedAgent>,
  * daemons (and while there are none), so apps show no "Decided for you" for them.
  * Carried in `HostInfo` so older apps ignore it.
  */
-decisions?: Array<AutoDecision>, };
+decisions?: Array<AutoDecision>, 
+/**
+ * What tf-hostd does so the host stays responsive while agents load it (§3.35, hosts
+ * ≥ 0.9.5): TeleFlock's own processes, the SSH server and Tailscale run above the agents'
+ * work. Absent from older daemons.
+ */
+priority?: PriorityStatus, };

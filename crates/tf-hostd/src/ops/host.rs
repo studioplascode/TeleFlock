@@ -44,7 +44,8 @@ const SESSION_COUNT_MAX: u64 = 16 * 1024 * 1024;
 
 pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
-        HostMethod::HostHealthReq(_) => to_value(health()),
+        // The agents' shares come from the state store's latest health tick (`state::loads`).
+        HostMethod::HostHealthReq(_) => to_value(HostHealth { agents: ctx.state.agent_loads(), ..health() }),
         HostMethod::HostUsage(p) => crate::ops::usage::handle(ctx, p).await,
         HostMethod::HostLimits(p) => to_value(crate::ops::limits::limits(ctx, p.refresh.unwrap_or(false)).await?),
         HostMethod::HostModels(_) => to_value(models().await?),
@@ -178,6 +179,8 @@ mod platform {
             disk_free,
             disk_total,
             uptime_s,
+            // Filled by the state store's health tick (per-agent loads).
+            agents: Vec::new(),
         }
     }
 }
@@ -218,6 +221,8 @@ mod platform {
             disk_free: disk.map(|d| d.available_space()).unwrap_or(0),
             disk_total: disk.map(|d| d.total_space()).unwrap_or(0),
             uptime_s: System::uptime(),
+            // Filled by the state store's health tick (per-agent loads).
+            agents: Vec::new(),
         }
     }
 }
@@ -1240,6 +1245,8 @@ pub async fn probe_info(ctx: &Ctx) -> HostInfo {
         pruned: Vec::new(),
         // Kept by the state store (`set_info`): decide for me's review items.
         decisions: Vec::new(),
+        // Kept by the state store (`set_info`): what runs above the agents' work.
+        priority: None,
     }
 }
 

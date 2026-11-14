@@ -45,6 +45,9 @@ import { RepoTag } from "./RepoTag";
 import { useShipMemo } from "./shipMemo";
 import { PrProbe, shippedWords, useShippedPr } from "./worktreePr";
 import { JobsMeter, WaitingForJobs } from "./JobsMeter";
+import { ProgressChip } from "./ProgressChip";
+import { LoadChip } from "./LoadChip";
+import { useNotableLoad } from "@/features/hosts/agentLoad";
 
 const NUDGE_EVERY_MS = 20_000;
 
@@ -288,6 +291,8 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   // a muted agent still waits visibly, it just stops tugging at your sleeve
   const nudge = useNudge(lane === "needs" && !stale && !muted);
   const burst = useArrival(agentKey, lane, floating);
+  // its processes take a notable share of the host (CPU or memory): a meter says how much
+  const heavy = useNotableLoad(agentKey);
   if (!agent) return null;
 
   // the lane leads the host state during an optimistic drop
@@ -395,12 +400,14 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   const model = omp?.model;
   const thinking = omp?.thinking && omp.thinking !== "off" ? omp.thinking : undefined;
   const meters =
-    omp?.context || subPct != null || omp?.jobs?.running || diff || omp?.link === "notShared" || model || thinking ? (
+    omp?.progress || omp?.context || subPct != null || omp?.jobs?.running || heavy || diff || omp?.link === "notShared" || model || thinking ? (
       // fixed order; wraps onto a second line on narrow cards instead of hiding anything
       <div className="mt-2.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-line pt-2">
+        <ProgressChip agentKey={agentKey} />
         {omp?.context && <ContextMeter pct={omp.context.pct} />}
         {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
         {omp?.jobs && <JobsMeter jobs={omp.jobs} />}
+        {heavy && <LoadChip agentKey={agentKey} />}
         {diff && <DiffStat {...diff} muted={lane === "done"} />}
         <ConnectLinkButton agentKey={agentKey} />
         {model && (

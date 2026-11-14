@@ -97,6 +97,12 @@ pub struct CtlState {
     /// `caps.userWaits`; architecture §3.5): the agent is Needs you, answered in the terminal.
     #[serde(default, deserialize_with = "lenient")]
     pub user_wait: Option<UserWaitInfo>,
+    /// The main agent's own estimate of how far along the user's current request is (bridge ≥ 2.6.0,
+    /// for a hostd whose `welcome` says `caps.progress`): asked the way omp's completion probe asks a
+    /// subagent, while the agent's run lasts; absent before its first answer and once the run ended.
+    /// Times are the omp process's clock (epoch ms, this host).
+    #[serde(default, deserialize_with = "lenient")]
+    pub progress: Option<tf_proto::AgentProgress>,
 }
 
 impl Default for CtlState {
@@ -115,6 +121,7 @@ impl Default for CtlState {
             plan_review: None,
             attached: false,
             user_wait: None,
+            progress: None,
         }
     }
 }
@@ -1642,8 +1649,10 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
         let _ = shared.events.send(event);
     }
     if let Some(conn) = lock(&shared.reg).conns.get(&conn_id) {
+        // `caps`: what this hostd reads that costs the extension something to produce (bridge ≥
+        // 2.6.0 asks the main agent its progress only for a hostd with `progress`).
         let _ = conn.tx.send(
-            json!({ "t": "welcome", "v": BRIDGE_PROTOCOL, "hostd": crate::HOSTD_VERSION })
+            json!({ "t": "welcome", "v": BRIDGE_PROTOCOL, "hostd": crate::HOSTD_VERSION, "caps": { "progress": true } })
                 .to_string(),
         );
     }
@@ -2348,6 +2357,32 @@ mod tests {
             panic!()
         };
         assert_eq!((turn, question), (0, None));
+    }
+
+    /// Bridge 2.6.0's `state.progress` stays with the session's state, a malformed one is dropped
+    /// without losing the rest of the frame, and `welcome` tells the bridge this hostd reads it.
+    #[tokio::test]
+    async fn bridge_state_carries_the_main_agents_progress() {
+        let (h, _dir) = handle();
+        let mut events = h.subscribe();
+        let mut ext = FakeExt::connect(&h).await;
+        ext.send(json!({ "t": "hello", "v": 2, "pid": 4, "sessionId": "s1", "bridgeVersion": "2.6.0", "caps": { "live": 1 } })).await;
+        let welcome = ext.recv().await;
+        assert_eq!((welcome["t"].as_str(), welcome["caps"]["progress"].as_bool()), (Some("welcome"), Some(true)));
+        let _ = next_event(&mut events).await;
+        let state = |progress: Value| {
+            json!({ "t": "event", "event": "state", "sessionId": "s1", "data": {
+                "fast": false, "mode": "normal", "idle": false, "title": "T",
+                "queue": { "steering": [], "followUp": [] }, "attached": false, "progress": progress } })
+        };
+        ext.send(state(json!({ "pct": 40, "stage": "wiring the API", "at": 1_700_000_120_000_i64, "since": 1_700_000_000_000_i64 }))).await;
+        let BridgeEvent::State { state: s, .. } = next_event(&mut events).await else { panic!("expected State") };
+        let want = tf_proto::AgentProgress { pct: 40.0, stage: Some("wiring the API".into()), at: 1_700_000_120_000, since: 1_700_000_000_000 };
+        assert_eq!(s.progress.as_ref(), Some(&want));
+        assert_eq!(h.by_session("s1").unwrap().state.progress, Some(want));
+        ext.send(state(json!({ "pct": "lots" }))).await;
+        let BridgeEvent::State { state: s, .. } = next_event(&mut events).await else { panic!("expected State") };
+        assert_eq!((s.progress, s.title.as_deref()), (None, Some("T")));
     }
 
     #[tokio::test]

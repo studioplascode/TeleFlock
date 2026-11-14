@@ -1,5 +1,6 @@
 import type { ContextUsage, Subagent } from "@/core/gen";
-import { cn, formatCompact, ProgressRing, Tooltip } from "@/design";
+import { type Estimate, paceText, subagentEstimate, TIME_LEFT_TICK_MS, timeLeft, timeLeftText } from "@/core/progress";
+import { cn, formatCompact, ProgressRing, Tooltip, useNow } from "@/design";
 
 /** Context share at which a subagent's context bar turns warning-coloured (matches the board's context meter). */
 const CONTEXT_HOT_PCT = 80;
@@ -21,15 +22,26 @@ export function contextHint(ctx: ContextUsage): string {
     : `${formatCompact(ctx.tokens)} tokens in this subagent's context (omp does not know its window size).`;
 }
 
-/** The subagent's completion estimate: a small ring and "40% done". */
-export function CompletionMeter({ pct, size = "sm", className }: { pct: number; size?: "sm" | "md"; className?: string }) {
+/** The subagent's completion estimate: a small ring and "40% done", then "· ~3m left" once its pace tells (`estimate`). */
+export function CompletionMeter({ pct, estimate, size = "sm", className }: { pct: number; estimate?: Estimate; size?: "sm" | "md"; className?: string }) {
   const ring = size === "md" ? 18 : 13;
+  const now = useNow(estimate ? TIME_LEFT_TICK_MS : null);
+  const left = estimate && timeLeft(estimate, now);
   return (
-    <Tooltip content={<span className="block max-w-64">{completionHint(pct)}</span>}>
+    <Tooltip
+      content={
+        <span className="flex max-w-64 flex-col gap-1">
+          <span>{completionHint(pct)}</span>
+          {estimate && <span>{paceText(estimate, now)}</span>}
+        </span>
+      }
+    >
       <span className={cn("inline-flex shrink-0 items-center gap-1 whitespace-nowrap", className)}>
         <ProgressRing done={pct} total={100} size={ring} stroke={size === "md" ? 2.5 : 2} label={null} ariaLabel={`About ${Math.round(pct)}% done (subagent's own estimate)`} />
         <span className={cn("font-bold tabular text-accent-hi", size === "md" ? "text-xs" : "text-2xs")}>{Math.round(pct)}%</span>
-        <span className={cn("text-mute-2", size === "md" ? "text-xs" : "text-2xs")}>done</span>
+        <span className={cn("text-mute-2", size === "md" ? "text-xs" : "text-2xs")}>
+          done{left && ` · ${timeLeftText(left)}`}
+        </span>
       </span>
     </Tooltip>
   );
@@ -58,15 +70,15 @@ export function ContextMeter({ ctx, size = "sm", className }: { ctx: ContextUsag
 
 /**
  * The two percentages omp's terminal shows on a subagent row: its completion estimate (`40%`, only while
- * it runs and once omp's probe has answered) and its context usage (`2.4%/272K`). Renders nothing when
- * neither is known.
+ * it runs and once omp's probe has answered, with the time left its pace implies) and its context usage
+ * (`2.4%/272K`). Renders nothing when neither is known.
  */
 export function SubagentMeters({ sub, size = "sm", className }: { sub: Subagent; size?: "sm" | "md"; className?: string }) {
   const completion = sub.status === "running" ? sub.completionPct : undefined;
   if (completion == null && !sub.context) return null;
   return (
     <span className={cn("inline-flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1", className)}>
-      {completion != null && <CompletionMeter pct={completion} size={size} />}
+      {completion != null && <CompletionMeter pct={completion} estimate={subagentEstimate(sub)} size={size} />}
       {sub.context && <ContextMeter ctx={sub.context} size={size} />}
     </span>
   );

@@ -51,6 +51,7 @@ export function WorktreeRow({
   repo,
   inGroup,
   owner,
+  wait,
 }: {
   hostId: string;
   worktree: CleanupWorktree;
@@ -68,6 +69,8 @@ export function WorktreeRow({
   inGroup?: boolean;
   /** The main agent it belongs to (hosts ≥ 0.9.0); older hosts name their last agent instead. */
   owner?: CleanupOwner;
+  /** Why its Delete waits: the report shown is this device's copy from before the visit, or the host is offline. */
+  wait?: string;
 }) {
   const kind = KIND[verdict.kind];
   const pr = prLine(w, now);
@@ -76,8 +79,8 @@ export function WorktreeRow({
     w.dirty === undefined ? (w.missing ? null : "changes unknown") : w.dirty > 0 ? `${w.dirty} uncommitted change${w.dirty === 1 ? "" : "s"}` : "clean";
   const subagents = w.owner?.subagents ?? [];
   const agent = owner || inGroup ? undefined : w.lastAgent;
-  const canDelete = !w.busy && w.locked === undefined;
-  const why = w.busy ? HOLD_WORDS.busy : w.locked !== undefined ? `Locked${w.locked ? `: ${w.locked}` : ""}. Unlock it first (git worktree unlock).` : undefined;
+  const canDelete = !w.busy && w.locked === undefined && wait === undefined;
+  const why = w.busy ? HOLD_WORDS.busy : w.locked !== undefined ? `Locked${w.locked ? `: ${w.locked}` : ""}. Unlock it first (git worktree unlock).` : wait;
   return (
     <li className={cn("flex flex-wrap items-start gap-x-4 gap-y-2 px-4 py-3 max-md:px-3.5", removing && "opacity-50")}>
       <Tooltip content={kind.about}>

@@ -1075,7 +1075,7 @@ describe("extension against a fake hostd", () => {
 		const hostd = await startHostd();
 		const omp = await bridged(hostd);
 		const hello = hostd.lines.find(l => l.t === "hello")!;
-		expect(hello.bridgeVersion).toBe("2.5.0");
+		expect(hello.bridgeVersion).toBe("2.6.0");
 		expect(hello.caps).toMatchObject({ live: 1, dialogs: true, subagentCtl: false, prompt: true, shell: true });
 
 		const res = await request(hostd, "liveSubscribe");

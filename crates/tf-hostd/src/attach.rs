@@ -18,8 +18,11 @@ use crate::paths::Paths;
 const START_WAIT: Duration = Duration::from_secs(30);
 
 /// `tf-hostd attach`. `session` is informational: the client's `hello` selects the
-/// herdr session, so one daemon serves every session.
+/// herdr session, so one daemon serves every session. The app's connection runs above the agents'
+/// work where this process may raise itself (`crate::priority::raise_attach`), from before its
+/// first thread.
 pub fn run(paths: Paths, session: &str, replace: bool, relay_port: u16) -> anyhow::Result<i32> {
+    crate::priority::raise_attach();
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
         paths.ensure_dirs()?;

@@ -325,7 +325,14 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
 - **cleanup.\*** (`cleanup/`, architecture §3.17): the Cleanup page. `cleanup.worktrees` reports every
   linked worktree of the repositories the session's workspaces, parked agents and automations name
   (git facts, admin-dir times, size walk, `gh pr view`, board agents, omp's newest session there),
-  scanned in the background and followed with `waitMs`. `cleanup.remove` checks again (agent working
+  scanned in the background and followed with `waitMs`. What is costly to learn again outlives the
+  daemon in `<home>/cache/cleanup.json` (`cache.rs`; versioned, owner-only, written atomically at
+  most every 5 min; another version or a damaged file is ignored): omp's session index, each
+  worktree's size with the fingerprint of its folders (past 10 min only a changed tree is walked
+  again, any tree after 6 h), and gh's pull request answers with when they came. The report itself
+  and "gh signed out" are not kept. The scan's log line says where its time went (`open_ms`,
+  `git_ms`, `sessions_ms`, `first_ms`, `size_walks`, `size_checks`, `pr_lookups`).
+  `cleanup.remove` checks again (agent working
   → `busy`, locked → `worktree_locked`, detached HEAD with unsaved commits → `orphan_commits` unless
   `force`), then removes exactly like `worktree.remove {path}`; the branch stays. `cleanup.storage` /
   `cleanup.storageRun` run `omp gc --json` with named categories only (`--blobs`, `--wal`,

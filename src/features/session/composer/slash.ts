@@ -424,14 +424,16 @@ export interface SlashOffer {
 }
 
 /**
- * The palette for the draft `value` with the caret at `caret` (one line only): the matching
- * commands while the caret is in `/name`, the command's argument choices once `/name ` is typed
- * (`sel` -1: none picked yet, so Enter sends the command as typed), `popup` null when a command
- * with choices has none matching. `undefined` when the caret is in neither: other popups may apply.
+ * The palette for the draft `value` with the caret at `caret` on its first line (more text may
+ * follow): the matching commands while the caret is in `/name`, the command's argument choices
+ * once `/name ` is typed (`sel` -1: none picked yet, so Enter sends the command as typed), `popup`
+ * null when a command with choices has none matching. `undefined` when the caret is in neither:
+ * other popups may apply.
  */
 export function slashPopupAt(value: string, caret: number, custom: readonly CommandInfo[] = [], offer?: SlashOffer): { popup: SlashPopup | null; sel: number } | undefined {
-  if (value.includes("\n")) return undefined;
   const before = value.slice(0, caret);
+  // A command is a message that starts with one: never on a later line.
+  if (before.includes("\n")) return undefined;
   const typed = /^\/(\S*)$/.exec(before);
   if (typed) {
     const items = matchCommands(typed[1] ?? "", custom);
@@ -442,6 +444,17 @@ export function slashPopupAt(value: string, caret: number, custom: readonly Comm
   if (!sub || !cmd?.subs) return undefined;
   const items = matchSubs(cmd, sub[2] ?? "").filter((s) => !offer || offer.sub(cmd, s));
   return { popup: items.length ? { kind: "sub", cmd, items } : null, sel: sub[2] ? 0 : -1 };
+}
+
+/**
+ * The draft once the palette's pick `insert` (`/name `, or `/name choice `) takes the place of
+ * what is typed before the caret: the rest of the text stays, so `/pl` typed in front of a written
+ * task becomes `/plan ` and the task. The caret lands after the insertion; a space already there
+ * ends it instead of a second one.
+ */
+export function spliceSlash(value: string, caret: number, insert: string): { text: string; caret: number } {
+  const rest = value.slice(caret);
+  return { text: insert.endsWith(" ") && /^[ \t]/.test(rest) ? insert.slice(0, -1) + rest : insert + rest, caret: insert.length };
 }
 
 export const MODE_BADGE: Record<SlashMode, string | null> = {

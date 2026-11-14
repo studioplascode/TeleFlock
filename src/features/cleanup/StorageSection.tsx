@@ -65,6 +65,8 @@ export function StorageSection({ q, hostName, home }: { q: StorageQuery; hostNam
   const check = data?.check;
   const running = data?.running;
   const busy = q.starting || !!running;
+  // This device's copy (from before this visit, or of a host that is offline): nothing is applied on it.
+  const held = q.waiting || !q.fresh;
   const [picked, setPicked] = useState<Record<string, GcCategory[]>>({});
   const todo = check ? CATEGORIES.filter((c) => found(c, check).todo) : [];
   const key = check ? String(check.startedAt) : "";
@@ -110,7 +112,7 @@ export function StorageSection({ q, hostName, home }: { q: StorageQuery; hostNam
                     type="checkbox"
                     className="mt-0.5 size-4 accent-accent"
                     checked={on}
-                    disabled={!f.todo || busy}
+                    disabled={!f.todo || busy || held}
                     onChange={(e) => setPicked({ [key]: e.target.checked ? [...chosen, c] : chosen.filter((x) => x !== c) })}
                   />
                   <span className="grid size-6 shrink-0 place-items-center rounded-sm bg-ink/6 text-mute [&_svg]:size-3.5">{META[c].icon}</span>
@@ -127,7 +129,7 @@ export function StorageSection({ q, hostName, home }: { q: StorageQuery; hostNam
         <Errors run={check} />
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-2xs text-mute-2">Checked {formatAge(now - (check.finishedAt ?? check.startedAt))}</span>
-          <Button size="sm" variant="primary" icon={<Play />} className="ml-auto" disabled={busy || chosen.length === 0} onClick={() => void apply()}>
+          <Button size="sm" variant="primary" icon={<Play />} className="ml-auto" disabled={busy || held || chosen.length === 0} onClick={() => void apply()}>
             Apply {chosen.length > 0 ? `(${chosen.length})` : ""}
           </Button>
         </div>
@@ -141,7 +143,7 @@ export function StorageSection({ q, hostName, home }: { q: StorageQuery; hostNam
         <h2 className="flex items-center gap-2 font-display text-lg font-bold">
           <HardDrive className="size-4 text-mute" /> omp storage
         </h2>
-        <Button size="sm" variant="secondary" icon={busy ? <Spinner /> : <RotateCw />} className="ml-auto" disabled={busy || !!data?.unavailable || !data} onClick={q.check}>
+        <Button size="sm" variant="secondary" icon={busy ? <Spinner /> : <RotateCw />} className="ml-auto" disabled={busy || q.waiting || !!data?.unavailable || !data} onClick={q.check}>
           {running ? (running.apply ? "Applying…" : "Checking…") : check ? "Check again" : "Check"}
         </Button>
       </div>

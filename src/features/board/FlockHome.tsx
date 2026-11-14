@@ -45,14 +45,18 @@ import { FlockFab, HostChip, RepoChip } from "./FlockActions";
 import { LANE_BY_COLUMN, QUIET_AFTER_MS } from "./lanes";
 import { AutoResumeBadge } from "./AutoResumeBadge";
 import { JobsMeter, WaitingForJobs } from "./JobsMeter";
+import { LoadChip } from "./LoadChip";
+import { useNotableLoad } from "@/features/hosts/agentLoad";
 import { RetryLine } from "./RetryLine";
 import { retryOf } from "./retry";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
 import { ParkedChip } from "./ParkedChip";
+import { ProgressChip } from "./ProgressChip";
 import { RecapLine } from "./RecapLine";
 import { PhoneNotices } from "./Notices";
 import { QuickAnswer } from "./QuickAnswer";
 import { RepoTag } from "./RepoTag";
+import { QueueAllButton } from "./QueueAllDialog";
 import { type SwipeAction, SwipeRow } from "./SwipeRow";
 import { boardSetupGap } from "./setupGap";
 import { useBeat } from "./useBeat";
@@ -239,24 +243,27 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
 }
 
 /**
- * Live facts under a row, same set as the desktop card footer: ctx · subagents · diff · not shared · model.
+ * Live facts under a row, same set as the desktop card footer: progress · ctx · subagents · jobs · load · diff · not shared · model.
  * Fixed order, wrapping onto another line instead of running past the card; a narrow row drops the context
  * bar first (its % stays), and the model takes the rest of a line, truncated. A chat has no diff.
  */
 function RowMeta({ agentKey, diff = true }: { agentKey: string; diff?: boolean }) {
   const agent = useAgent(agentKey);
+  const heavy = useNotableLoad(agentKey);
   const omp = agent?.omp;
   if (!agent) return null;
   const subs = omp?.subagents?.live ?? 0;
   const subPct = subs > 0 ? omp?.subagents?.completionPct : undefined;
   const model = omp?.model ? `${omp.model.label ?? omp.model.id}${omp.thinking && omp.thinking !== "off" ? ` · ${omp.thinking}` : ""}` : null;
   const stat = diff && !isChat(agent) ? agent.diff : undefined;
-  if (!omp?.context && subPct == null && !omp?.jobs?.running && !stat && omp?.link !== "notShared" && !model) return null;
+  if (!omp?.progress && !omp?.context && subPct == null && !omp?.jobs?.running && !heavy && !stat && omp?.link !== "notShared" && !model) return null;
   return (
     <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 @container">
+      <ProgressChip agentKey={agentKey} />
       {omp?.context && <ContextMeter pct={omp.context.pct} barClassName="@max-[300px]:hidden" />}
       {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
       {omp?.jobs && <JobsMeter jobs={omp.jobs} />}
+      {heavy && <LoadChip agentKey={agentKey} />}
       {stat && <DiffStat {...stat} />}
       <span className="contents" {...stopRow}>
         <ConnectLinkButton agentKey={agentKey} />
@@ -530,7 +537,7 @@ export function FlockHome() {
           </Section>
         )}
         {running.length > 0 && (
-          <Section column="running" count={running.length} id={RUNNING_ID}>
+          <Section column="running" count={running.length} id={RUNNING_ID} action={<QueueAllButton mobile />}>
             {running.map((k) => (
               <CardFlight key={k} flightId={k}>
                 <AgentRow agentKey={k} column="running" />

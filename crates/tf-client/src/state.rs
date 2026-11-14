@@ -80,6 +80,7 @@ pub(crate) mod fixtures {
                 idle_shells: None,
                 pruned: Vec::new(),
                 decisions: Vec::new(),
+                priority: None,
             },
             health: None,
             workspaces: vec![],

@@ -9,7 +9,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { deviceStorage } from "@/core/deviceStorage";
 
 /** Card ids: the inspector tabs plus the Session card's own tiles. */
-export type CardId = "overview" | "spend" | "throughput" | "btw" | "todos" | "agents" | "jobs" | "artifacts" | "files" | "chat" | "tree";
+export type CardId = "overview" | "spend" | "throughput" | "resources" | "btw" | "todos" | "agents" | "jobs" | "artifacts" | "files" | "chat" | "tree";
 
 /** Marks kept per session (side questions, subagent branches), and sessions kept: the oldest fall out, so the store stays small. */
 export const MAX_MARK_IDS = 300;

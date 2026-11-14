@@ -207,7 +207,7 @@ export class DemoAccounts {
       case "accounts.unlink": {
         const c = this.creds.find((x) => x.id === p.credentialId && x.provider === p.provider);
         if (!c) throw apiError("not_found", "that account is not linked on this host anymore");
-        if (c.disabled) throw apiError("invalid_params", "omp already stopped using this account", { hint: "Link it again to use it." });
+        // An expired login goes too (the host deletes it from omp's store; omp's logout can't).
         this.creds = this.creds.filter((x) => x !== c);
         this.preferred.delete(keyOf(c));
         return this.snapshot();

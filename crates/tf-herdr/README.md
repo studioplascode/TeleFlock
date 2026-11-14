@@ -37,6 +37,9 @@ client.session() / binary() / endpoint()
   `--user` only when the user lingers), so it and its agents survive the login session that started it. When
   `systemd-run` cannot create the unit (it exits non-zero before exec'ing) the server is started plainly.
   `durable::{cgroup_path, login_session, process_cgroup}` read `/proc/<pid>/cgroup` (tf-hostd uses them too).
+- `durable::drop_raised_nice()` (Unix, between fork and exec): a spawned server starts at normal priority
+  even when the spawning process runs above it (tf-hostd raises itself so the host stays responsive; children
+  inherit nice, on Linux per thread). Its panes are the agents' work; a priority lowered on purpose stays.
 
 ## Raw requests and errors
 

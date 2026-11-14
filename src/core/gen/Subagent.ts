@@ -14,6 +14,11 @@ line?: string,
  */
 completionPct?: number, 
 /**
+ * When `completion_pct` last changed (host time): with `started_at` the basis of the
+ * subagent's time-left estimate. Absent with `completion_pct` (and from hosts < 0.9.5).
+ */
+completionAt?: number, 
+/**
  * The subagent's own context-window usage (omp's TUI: `· 2.4%/272K`).
  */
 context?: ContextUsage, toolCount?: number, 

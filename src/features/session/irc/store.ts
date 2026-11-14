@@ -2,7 +2,8 @@ import { useEffect, useMemo } from "react";
 import { create } from "zustand";
 import { core, parseAgentKey, toApiError, useAgent, useCore, useIrcEntries, useSession } from "@/core";
 import { useWindowVisible } from "@/design";
-import { type BoardMessage, type ChatLog, fromTranscript, mergeChatPage, unreadCount } from "./chat";
+import { versionBelow } from "@/features/hosts/kinds";
+import { type BoardMessage, type ChatLog, fromTranscript, logEntryOf, mergeChatPage, type QueueWatch, RECEIVED_MIN_HOSTD, type SentRow, unreadCount } from "./chat";
 import { readMark, seenScope, useIrcSeen } from "./seen";
 
 /**
@@ -119,6 +120,34 @@ export function useAgentChat(agentKey: string, pollMs?: number): AgentChatView {
       void syncAgentChat(agentKey);
     },
   };
+}
+
+/** The host's tf-hostd keeps omp's `injected` after the recipient took the message in (before 0.9.5; one not known yet counts as newer). */
+export function useOldChatHost(agentKey: string): boolean {
+  const version = useCore((s) => s.hosts[parseAgentKey(agentKey).hostId]?.state.info.hostdVersion);
+  return versionBelow(version, RECEIVED_MIN_HOSTD);
+}
+
+/**
+ * The agent chat log's message for an outbound row of one of the session's transcripts (its IRC
+ * bubble; `logEntryOf`), and what the app can say of it while it is queued. Only with `row` (a
+ * send omp queued) is the log read: fetched, then kept current while its revision moves, as
+ * `useAgentChat` does (tf-hostd moves it when the recipient takes a queued message in).
+ */
+export function useLoggedSend(agentKey: string, row: SentRow | undefined): { logged?: BoardMessage; watch: QueueWatch } {
+  const want = row !== undefined;
+  const epoch = useCore((s) => (want ? s.sessions[agentKey]?.meta?.agentChat?.epoch : undefined));
+  const rev = useCore((s) => (want ? (s.sessions[agentKey]?.meta?.agentChat?.rev ?? 0) : 0));
+  const held = useLogs((s) => (want ? s.logs[agentKey]?.log : undefined));
+  const oldHost = useOldChatHost(agentKey);
+  const behind = epoch !== undefined && (held?.epoch !== epoch || held.rev < rev);
+
+  useEffect(() => {
+    if (behind) void syncAgentChat(agentKey);
+  }, [agentKey, behind, epoch, rev]);
+
+  const logged = row && held ? logEntryOf(held.messages, row) : undefined;
+  return { logged, watch: { follows: !oldHost && logged !== undefined, oldHost } };
 }
 
 /** The session's read mark: where it is kept (`seenScope`) and the newest `at` read. */

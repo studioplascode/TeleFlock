@@ -3,7 +3,7 @@ import { fileDiff } from "./codegen";
 import type { AgentDef } from "./data";
 import { docsMediaSteps, migrationNotesSteps, q3ReportSteps } from "./presented";
 import { richContentSteps } from "./richContent";
-import { bash, edit, grep, QUOTA_ERROR, read, say, type Step, think, todo } from "./scripts";
+import { bash, codeCardSteps, edit, grep, QUOTA_ERROR, read, say, type Step, think, todo } from "./scripts";
 
 const G = "\x1b[32m";
 const D = "\x1b[2m";
@@ -200,6 +200,7 @@ export function historyFor(def: AgentDef): Step[] {
             output: ["BoardView.tsx:88:7  warning  'lanes' is possibly undefined", "Lane.tsx:14:3     warning  unused import 'motion'", "0 errors, 2 warnings"],
           },
         },
+        ...codeCardSteps(),
         say("Lanes, drag and drop, and persistence are in. Running the board suite now."),
       );
       break;

@@ -9,18 +9,23 @@
 //! text binds to nothing, and so does a lone Backspace correcting a word: the field never changes.
 //! Typed characters need no binding and arrive.
 //!
+//! Undo and Redo bind to nothing at all: GTK 3's text widgets have no undo, and WebKitGTK's own
+//! key bindings list no Undo or Redo command, so Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y reach a page as
+//! plain key presses and every text field ignores them (the editing commands themselves work).
+//!
 //! WebKit hands a key event that nothing handled (no command ran, the page didn't prevent it) back
 //! to GTK, where it reaches the view's after-handlers. There these keys run their command directly.
-//! A key the page handled, or whose binding ran, never comes back, so nothing runs twice.
+//! A key the page handled, or whose binding ran, never comes back, so nothing runs twice: the
+//! composers, which keep their own undo history, take Ctrl+Z themselves.
 
 use gtk::gdk::{self, keys::constants as key, keys::Key, ModifierType};
 use gtk::glib::prelude::*;
 use tauri::{Runtime, WebviewWindow};
 use webkit2gtk::WebViewExt;
 
-/// The WebKit editing command for a key WebKit left unhandled, when it is one a dictation tool
-/// sends: its paste chords (as GTK binds them: Ctrl+V, Ctrl+Shift+V, Shift+Insert) and the keys it
-/// deletes with. Lock modifiers (Caps Lock, Num Lock) don't count.
+/// The WebKit editing command for a key WebKit left unhandled: a dictation tool's paste chords (as
+/// GTK binds them: Ctrl+V, Ctrl+Shift+V, Shift+Insert) and the keys it deletes with, and undo
+/// (Ctrl+Z) and redo (Ctrl+Shift+Z, Ctrl+Y). Lock modifiers (Caps Lock, Num Lock) don't count.
 pub fn command(keyval: Key, state: ModifierType) -> Option<&'static str> {
     let held = state
         & (ModifierType::SHIFT_MASK
@@ -36,6 +41,9 @@ pub fn command(keyval: Key, state: ModifierType) -> Option<&'static str> {
         key::Insert | key::KP_Insert if held == shift => Some("Paste"),
         key::BackSpace if held.is_empty() => Some("DeleteBackward"),
         key::Delete | key::KP_Delete if held.is_empty() => Some("DeleteForward"),
+        key::z | key::Z if held == ctrl => Some("Undo"),
+        key::z | key::Z if held == ctrl | shift => Some("Redo"),
+        key::y | key::Y if held == ctrl => Some("Redo"),
         _ => None,
     }
 }
@@ -87,6 +95,17 @@ mod tests {
     }
 
     #[test]
+    fn undo_and_redo_chords() {
+        assert_eq!(command(key::z, CTRL), Some("Undo"));
+        // Caps Lock on: the same chord with the capital keyval.
+        assert_eq!(command(key::Z, CTRL | ModifierType::LOCK_MASK), Some("Undo"));
+        assert_eq!(command(key::Z, CTRL | SHIFT), Some("Redo"));
+        assert_eq!(command(key::z, CTRL | SHIFT | ModifierType::LOCK_MASK), Some("Redo"));
+        assert_eq!(command(key::y, CTRL), Some("Redo"));
+        assert_eq!(command(key::y, CTRL | ModifierType::MOD2_MASK), Some("Redo"));
+    }
+
+    #[test]
     fn other_keys_and_chords_are_left_alone() {
         assert_eq!(command(key::v, NONE), None);
         assert_eq!(command(key::v, CTRL | ModifierType::MOD1_MASK), None);
@@ -96,5 +115,11 @@ mod tests {
         assert_eq!(command(key::Delete, SHIFT), None);
         assert_eq!(command(key::BackSpace, CTRL), None);
         assert_eq!(command(key::Return, NONE), None);
+        // Typing z / y, and chords that are no undo (Super+Z, Ctrl+Alt+Z, Ctrl+Shift+Y).
+        assert_eq!(command(key::z, NONE), None);
+        assert_eq!(command(key::Z, SHIFT), None);
+        assert_eq!(command(key::z, ModifierType::SUPER_MASK), None);
+        assert_eq!(command(key::z, CTRL | ModifierType::MOD1_MASK), None);
+        assert_eq!(command(key::Y, CTRL | SHIFT), None);
     }
 }

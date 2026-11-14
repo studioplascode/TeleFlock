@@ -44,6 +44,23 @@ const DEFAULT_SETTINGS: Settings = {
   mutedAgents: [],
   autoUpdate: true,
   closeDone: true,
+  modelPresets: [
+    {
+      // The "cyber review on one model" case: every chat role on Opus, and no fallback away from it.
+      id: "mp-opus-everywhere",
+      name: "Opus everywhere",
+      model: "anthropic/claude-opus-5",
+      thinking: "high",
+      roleModels: Object.fromEntries(["smol", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor", "widget"].map((role) => [role, "anthropic/claude-opus-5:high"])),
+      fallbackChains: { "anthropic/*": [] },
+    },
+    {
+      id: "mp-cheap-subagents",
+      name: "Cheap subagents",
+      roleModels: { task: "openai-codex/gpt-6-luna:medium", smol: "openai-codex/gpt-6-luna:low" },
+      fallbackChains: { "anthropic/*": ["openai/gpt-5.5:high"] },
+    },
+  ],
   templates: [
     {
       id: "tpl-careful-reviewer",

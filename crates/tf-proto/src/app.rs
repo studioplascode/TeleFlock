@@ -186,6 +186,11 @@ wire_struct! {
         /// Desktop: the system-wide shortcut that opens Quick capture, as an accelerator
         /// (`Ctrl+Alt+Space`, `Cmd+Shift+Space`). Absent or empty: off until the user sets one.
         pub capture_shortcut: Option<String>,
+        /// Saved model presets (apps ≥ 0.9.5): a new agent's main model, thinking, own omp model
+        /// roles and fallback chains in one pick (Dispatch's and the new-agent forms' More
+        /// options). Files without the field load with none.
+        #[serde(default)]
+        pub model_presets: Vec<ModelPreset>,
     }
 }
 
@@ -205,6 +210,26 @@ wire_struct! {
         pub plan: bool,
         /// Initial prompt (may be empty for a pure model preset).
         pub prompt: String,
+    }
+}
+
+wire_struct! {
+    /// A saved model preset ([`Settings::model_presets`]): what a new agent runs on, in one pick.
+    /// Absent / empty members mean the host's default, so a preset with nothing set is "reset
+    /// all".
+    pub struct ModelPreset {
+        pub id: String,
+        pub name: String,
+        /// The main model, `provider/id`.
+        pub model: Option<String>,
+        pub thinking: Option<ThinkingLevel>,
+        /// The agent's own omp model roles: role → `provider/id[:thinking]` (as
+        /// `AgentSpec::role_models`).
+        #[serde(default)]
+        pub role_models: std::collections::BTreeMap<String, String>,
+        /// The agent's own omp fallback chains: role → models (as `AgentSpec::fallback_chains`).
+        #[serde(default)]
+        pub fallback_chains: std::collections::BTreeMap<String, Vec<String>>,
     }
 }
 

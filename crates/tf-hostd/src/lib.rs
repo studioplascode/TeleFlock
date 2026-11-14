@@ -31,6 +31,7 @@ pub mod omp;
 pub mod ops;
 pub mod originals;
 pub mod paths;
+pub mod priority;
 pub mod recovery;
 pub mod refusal;
 pub mod restart;

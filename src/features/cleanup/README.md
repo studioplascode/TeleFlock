@@ -18,7 +18,8 @@ export function CleanupView(props: { hostId?: string }): JSX.Element;
 // actions.tsx — removeOne (confirm → cleanup.remove; force / trust asked separately), removeMany (confirm the exact list, one at a time, never force)
 // classify.ts — classify / holdOf / bulkSet / totals / sortForPage (classify.test.ts)
 // disk.ts — diskLevel / showDiskNotice (classify.test.ts)
-// useCleanup.ts — useCleanupReport (follows a running scan with waitMs), useCleanupStorage (check / apply, follows a run)
+// useCleanup.ts — useCleanupReport (this device's last report at once, then follows the host's scan with waitMs), useCleanupStorage (check / apply, follows a run)
+// cache.ts — each host's last report and storage status on this device (memory + localStorage "tf.cleanup.cache", 1 MB, newest hosts first): settleReport, keepReport, keepStorage, useKept (cache.test.ts)
 // store.ts — useCleanupPrefs: last host, stale days, hidden low-disk notices (zustand persist, localStorage "tf.cleanup")
 ```
 
@@ -60,6 +61,17 @@ the host's tf-hostd predates the page ("Update TeleFlock on <host>").
 - **Report**: a scan runs on the host in the background; the page asks with `waitMs` (1.5 s first, then 15 s
   while `scanning`), so sizes and pull requests fill in; Rescan (`refresh`) asks for everything again; the
   page asks again every 2 min while visible. Rows sort removable kinds first, longest idle first.
+- **Last report at once** (`cache.ts`): each host's last report and omp storage status stay on the device,
+  in memory across visits and in localStorage across restarts of the app (another format or a damaged copy
+  is ignored). The page shows them at once with their age ("scanned 3h ago") and "Updating…" until the
+  host answers. While a scan runs, sizes and pull requests it has not filled in yet keep their earlier
+  values (`settleReport`; a pull request only for the same branch and HEAD), and the host's first scan
+  after a start, still at git, replaces nothing. Nothing acts on a report from before the visit: Delete,
+  the bulk tiles and Apply wait for the host's answer (as they wait for a running scan). A host that is
+  offline shows its last report read-only ("<host> is offline: its last report, scanned 3h ago"); a failed
+  ask keeps the report and says "Couldn't update". hostd keeps its own costly facts across restarts too
+  (`<home>/cache/cleanup.json`: omp's session index, sizes with a fingerprint of their folders, pull
+  requests), so the first scan after an update has owners, sizes and pull requests at once.
 - **Chats** (`ChatCleanup`, features/chats, between the repositories and omp storage): the host's chat folders
   (`chat.list`, without the chats of its other herdr sessions) with their card's state, size, age and what keeps
   them; Delete goes through the chat's own confirm (`chat.delete` dry run first); a folder no card uses that holds
@@ -80,4 +92,5 @@ knows: stale, gone, locked (external SSD), closed with 3 changes, a detached HEA
 automation's merged worktree, a merged docs fix. A scan takes 1.8 s; `cleanup.remove` keeps hostd's
 checks; the omp storage check finds 23 blobs and 6 MB of WAL (compression unsupported, as on Linux) and an
 apply empties what it was given. studio-pc's tf-hostd predates the page and its disk is nearly full, so
-the board's low-disk notice shows once it is online.
+the board's low-disk notice shows once it is online. Reloading the page shows the last report at once
+with "Updating…" while the demo host (a new one after each reload) scans again.

@@ -5,6 +5,7 @@ import { useDraftState } from "@/core";
 import type { AgentSpec, AutoAnswer, ModelCatalog, Settings, ThinkingLevel } from "@/core/gen";
 import { Field, Input, Select, type SelectOption, Switch, Textarea, cn, spring } from "@/design";
 import { AgentRolesSection, rolesSummaryChip, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
+import { ModelPresetsSection, presetChip, useMatchingPreset } from "@/features/agentRoles/ModelPresets";
 import { launchMainText, launchOverrides } from "@/features/agentRoles/roles";
 import { specAutoAnswer } from "@/features/autoAnswer/format";
 import { useHostAutoAnswer } from "@/features/autoAnswer/hooks";
@@ -133,6 +134,7 @@ export function AgentFields({ hostId, draft, onChange, derivedName, suggestedNam
   const defaultRole = catalog?.roles.find((r) => r.role === "default")?.model;
   const decides = !!useHostAutoAnswer(hostId);
   const takesRoles = useHostTakesRoles(hostId);
+  const preset = useMatchingPreset(draft);
 
   const modelOptions = useMemo<SelectOption[]>(() => {
     const opts: SelectOption[] = [{ value: DEFAULT, label: "Host default", hint: defaultRole ?? "omp's default role", icon: <Sparkles /> }];
@@ -214,7 +216,11 @@ export function AgentFields({ hostId, draft, onChange, derivedName, suggestedNam
           />
         )}
       </Field>
-      <AgentOptions summary={[takesRoles ? rolesSummaryChip(draft.roleModels, draft.fallbackChains) : null, autoAnswerChip(decides ? draft.autoAnswer : undefined)]} className={compact ? undefined : "md:col-span-2"}>
+      <AgentOptions
+        summary={[presetChip(preset), takesRoles && !preset ? rolesSummaryChip(draft.roleModels, draft.fallbackChains) : null, autoAnswerChip(decides ? draft.autoAnswer : undefined)]}
+        className={compact ? undefined : "md:col-span-2"}
+      >
+        <ModelPresetsSection hostId={hostId} value={draft} onApply={onChange} />
         <AgentRolesSection
           hostId={hostId}
           roles={draft.roleModels}

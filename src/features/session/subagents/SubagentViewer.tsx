@@ -29,6 +29,7 @@ import { errorText, hostCall, usePending } from "../api";
 import { SessionCtx } from "../context";
 import { IrcSelfCtx } from "../irc/IrcBubble";
 import { useSessionUi } from "../state";
+import { lastMessage } from "../transcript/lastMessage";
 import { ircThreadKey, isRailTool, ItemRow } from "../transcript/rows";
 import { TRANSCRIPT_MAX_WIDTH, TranscriptLog } from "../transcript/Transcript";
 import { SubagentMeters } from "./SubagentMeters";
@@ -465,6 +466,8 @@ function SubTranscript({ sub, snap, mobile, followSignal }: { sub: Subagent; sna
   const items = useMemo(() => ids.map((id) => byId.get(id)), [ids, byId]);
   const last = byId.get(ids[ids.length - 1] ?? "");
   const lastLive = last != null && ((last.kind === "assistant" && last.streaming) || (last.kind === "thinking" && last.streaming) || (last.kind === "tool" && (last.status === "running" || last.status === "pending")));
+  // Its newest message (its text, or the prompt it works on: the parent's task or a later one).
+  const message = useMemo(() => lastMessage(ids, (id) => byId.get(id)), [ids, byId]);
   return (
     <TranscriptLog
       ids={ids}
@@ -508,6 +511,7 @@ function SubTranscript({ sub, snap, mobile, followSignal }: { sub: Subagent; sna
           {unseen > 0 ? `${unseen} new` : running ? "Streaming" : "Jump to latest"}
         </>
       )}
+      jumpBack={message && (message.kind === "assistant" ? { id: message.id, label: "Agent's last message", short: "Agent's message" } : { id: message.id, label: "Last prompt" })}
     />
   );
 }

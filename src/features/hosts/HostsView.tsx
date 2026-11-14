@@ -38,6 +38,8 @@ import { setupFromHash, useSetupFocus } from "./setupFocus";
 import { HerdrHostRow } from "./HerdrControls";
 import { ToolUpdatesRow } from "./ToolUpdates";
 import { ServicesSection } from "./services/ServicesSection";
+import { TopAgents } from "./TopAgents";
+import { PriorityRow } from "./PriorityRow";
 
 function gb(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(bytes >= 100 * 1024 ** 3 ? 0 : 1)}`;
@@ -264,6 +266,8 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
           <>
             <Counts hostId={profile.id} />
             <Health hostId={profile.id} />
+            <TopAgents hostId={profile.id} />
+            <PriorityRow hostId={profile.id} />
             <Versions hostId={profile.id} />
             <HerdrHostRow hostId={profile.id} />
             <ToolUpdatesRow hostId={profile.id} />

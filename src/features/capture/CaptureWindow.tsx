@@ -22,6 +22,7 @@ import {
 } from "@/design";
 import { ACTIONS } from "@/features/shell/vocab";
 import { Ticks } from "@/features/shell/Ticks";
+import { useUndoHistory } from "@/features/session/composer/useUndoHistory";
 import { capturePort, type Port, requestId, type ToCapture, type ToMain } from "./link";
 import type { CaptureOption, CaptureQuestion, CaptureSnapshot, CaptureTarget } from "./snapshot";
 import { imagesLabel } from "./task";
@@ -91,6 +92,16 @@ export function CaptureWindow() {
   const box = useRef<HTMLTextAreaElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const pending = useRef<{ id: string; what: Action; timer: number } | null>(null);
+  // Ctrl+Z / Ctrl+Shift+Z, as in the composers: grouped typing, select all + delete, a send starts over.
+  const undo = useUndoHistory({
+    key: "capture",
+    text,
+    setText: (t) => {
+      setText(t);
+      writeText(t);
+    },
+    ta: box,
+  });
 
   // ---- the main window's picture and answers
   useEffect(() => {
@@ -105,6 +116,7 @@ export function CaptureWindow() {
         if (msg.ok && what === "send") {
           setText("");
           writeText("");
+          undo.reset("");
           setDraftImages(IMAGES_KEY, []);
         }
         setStatus({ kind: "done", what, ok: msg.ok, title: msg.title, ...(msg.detail ? { detail: msg.detail } : {}) });
@@ -118,7 +130,9 @@ export function CaptureWindow() {
   // then replaces the text shown at start, unless something was typed since.
   useEffect(() => {
     void captureText.load().then((newer) => {
-      if (newer !== undefined) setText(newer ?? "");
+      if (newer === undefined) return;
+      setText(newer ?? "");
+      undo.reset(newer ?? "");
     });
   }, []);
 
@@ -240,7 +254,7 @@ export function CaptureWindow() {
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing) return;
+    if (e.nativeEvent.isComposing || undo.onKeyDown(e)) return;
     if (e.key === "Escape") {
       e.preventDefault();
       hideWindow(port);
@@ -309,6 +323,7 @@ export function CaptureWindow() {
             if (status.kind === "done") setStatus({ kind: "idle" });
           }}
           onKeyDown={onKeyDown}
+          onSelect={(e) => undo.onSelect(e.currentTarget)}
           onPaste={onPaste}
           rows={3}
           maxHeight={200}

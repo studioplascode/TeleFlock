@@ -84,6 +84,7 @@ function RepoSection({
   staleDays,
   removing,
   onDelete,
+  wait,
 }: {
   hostId: string;
   repo: CleanupRepo;
@@ -94,6 +95,8 @@ function RepoSection({
   staleDays: number;
   removing: ReadonlySet<string>;
   onDelete(w: CleanupWorktree): void;
+  /** Why its rows' Delete waits. */
+  wait?: string;
 }) {
   const agentIds = useCore((s) => (s.hosts[hostId]?.state.agents ?? []).map((a) => a.id).join("\n"));
   const live = new Set(agentIds.split("\n"));
@@ -131,6 +134,7 @@ function RepoSection({
                   liveAgent={!!named && live.has(named)}
                   owner={owner}
                   onDelete={() => onDelete(w)}
+                  wait={wait}
                 />
               );
             })}
@@ -183,7 +187,10 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   const t = totals(report, now, staleDays);
   const shipped = bulkSet(report, "shipped", now, staleDays);
   const stale = bulkSet(report, "stale", now, staleDays);
-  const scanning = !!report?.scanning;
+  // This device's copy of the report (from before this visit, or of a host that is offline) is shown
+  // but nothing is deleted on it: the host's current one decides, as a scan in progress does.
+  const wait = q.waiting ? `${hostName} is offline: deleting waits until it is back` : !q.fresh ? "Waits for the host's current report" : undefined;
+  const scanning = !!report?.scanning && !wait;
   // Hosts ≥ 0.9.0 say who each worktree belongs to; older ones are listed by repository only.
   const byAgent = groupBy === "agent" && report?.owners !== undefined;
   const groups = byAgent ? groupByOwner(report, now, staleDays) : [];
@@ -223,6 +230,8 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   const progress = (which: BulkKind) => (bulkRun?.which === which ? counter(bulkRun) : null);
   const groupProgress = (key: string | null) => (bulkRun?.which === "cleanable" && bulkRun.group === key ? counter(bulkRun) : null);
 
+  // Nothing to show yet: no report, or the host's first scan has nothing yet.
+  const empty = !report || (report.scannedAt === undefined && report.repos.length === 0);
   let body;
   if (!hostId) {
     body = (
@@ -236,7 +245,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     );
   } else if (q.outdated) {
     body = <OutdatedHost hostName={hostName} />;
-  } else if (!report && (q.waiting || (q.error && phase !== "online"))) {
+  } else if (empty && (q.waiting || (q.error && phase !== "online"))) {
     body = (
       <EmptyState
         icon={<WifiOff />}
@@ -250,7 +259,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
         className="mt-6"
       />
     );
-  } else if (!report && q.error) {
+  } else if (empty && q.error) {
     body = (
       <EmptyState
         icon={<FolderGit2 />}
@@ -264,7 +273,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
         className="mt-6"
       />
     );
-  } else if (!report || (report.scannedAt === undefined && report.repos.length === 0)) {
+  } else if (!report || empty) {
     body = (
       <div className="flex flex-col gap-3" aria-busy>
         <Skeleton className="h-[120px] rounded-tile" />
@@ -273,6 +282,8 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     );
   } else {
     const repos = report.repos;
+    // When the report shown was made: its scan's end, else when this device got it.
+    const shownAt = report.scannedAt ?? q.receivedAt;
     body = (
       <>
         <div className="grid gap-3 sm:grid-cols-3">
@@ -284,7 +295,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
             held={shipped.held.length}
             bytes={shipped.bytes}
             label="Delete merged/closed…"
-            disabled={scanning || !!bulkRun}
+            disabled={scanning || !!bulkRun || !!wait}
             progress={progress("shipped")}
             onRun={() => void runBulk("shipped")}
           />
@@ -295,7 +306,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
             held={stale.held.length}
             bytes={stale.bytes}
             label="Prune stale…"
-            disabled={scanning || !!bulkRun}
+            disabled={scanning || !!bulkRun || !!wait}
             progress={progress("stale")}
             onRun={() => void runBulk("stale")}
           >
@@ -318,13 +329,25 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
               </>
             )}
           </span>
-          {scanning ? (
+          {q.waiting ? (
+            <span className="inline-flex items-center gap-1.5">
+              <WifiOff className="size-3.5" aria-hidden /> {hostName} is offline: its last report{shownAt !== undefined && `, scanned ${formatAge(now - shownAt)}`}
+            </span>
+          ) : q.updating ? (
+            <>
+              {shownAt !== undefined && <span>scanned {formatAge(now - shownAt)}</span>}
+              <span className="inline-flex items-center gap-1.5">
+                <Spinner /> Updating…
+              </span>
+            </>
+          ) : scanning ? (
             <span className="inline-flex items-center gap-1.5">
               <Spinner /> sizes and pull requests are filling in…
             </span>
           ) : (
             report.scannedAt !== undefined && <span>scanned {formatAge(now - report.scannedAt)}</span>
           )}
+          {q.error && !q.waiting && <span className="text-error/90">Couldn't update: {q.error.message}</span>}
           {report.owners !== undefined && repos.length > 0 && (
             <SegmentedControl<CleanupGrouping>
               aria-label="Group worktrees by"
@@ -380,12 +403,15 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
                 onDelete={(w) => void deleteOne(w)}
                 onClean={() => void cleanGroup(g)}
                 progress={groupProgress(g.key)}
-                disabled={scanning || !!bulkRun}
+                disabled={scanning || !!bulkRun || !!wait}
+                wait={wait}
               />
             );
           })
         ) : (
-          repos.map((r) => <RepoSection key={r.root} hostId={hostId} repo={r} owners={owners} home={home} now={now} staleDays={staleDays} removing={busyPaths} onDelete={(w) => void deleteOne(w)} />)
+          repos.map((r) => (
+            <RepoSection key={r.root} hostId={hostId} repo={r} owners={owners} home={home} now={now} staleDays={staleDays} removing={busyPaths} onDelete={(w) => void deleteOne(w)} wait={wait} />
+          ))
         )}
         <ChatCleanup hostId={hostId} hostName={hostName} home={home} />
         <IdleShellsSection hostId={hostId} />
@@ -395,7 +421,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   }
 
   const rescan = hostId && report && !q.outdated && (
-    <Button variant="secondary" icon={scanning ? <Spinner /> : <RotateCw />} disabled={scanning} onClick={q.rescan}>
+    <Button variant="secondary" icon={scanning ? <Spinner /> : <RotateCw />} disabled={scanning || q.waiting} onClick={q.rescan}>
       {scanning ? "Scanning…" : "Rescan"}
     </Button>
   );
@@ -409,7 +435,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
           back
           actions={
             hostId && report && !q.outdated ? (
-              <IconButton label="Rescan" size="lg" disabled={scanning} onClick={q.rescan}>
+              <IconButton label="Rescan" size="lg" disabled={scanning || q.waiting} onClick={q.rescan}>
                 {scanning ? <Spinner /> : <RotateCw />}
               </IconButton>
             ) : undefined

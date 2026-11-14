@@ -6,6 +6,8 @@ import { Button, Shimmer, Spinner, toast, useIsMobile } from "@/design";
 import { deepEqual } from "@/features/ompSettings/model";
 import { useModels } from "@/features/session/header/useModels";
 import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
+import { ModelPresetsSection } from "./ModelPresets";
+import { sessionFields, sessionMaps } from "./presets";
 import { RoleOverridesEditor } from "./RoleOverridesEditor";
 import { type ChainMap, type RoleMap, selectorLabel, validateOverrides } from "./roles";
 
@@ -163,16 +165,28 @@ export function SessionRolesDialog({ agentKey, open, onOpenChange }: { agentKey:
             </p>
           )}
           <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0">
-            <RoleOverridesEditor
-              hostId={hostId}
-              value={roles}
-              onChange={setRoles}
-              host={data.host}
-              defaultRow="editable"
-              chains={chains}
-              onChainsChange={setChains}
-              hostChains={data.hostChains}
-            />
+            <div className="flex min-w-0 flex-col gap-4">
+              <ModelPresetsSection
+                hostId={hostId}
+                session
+                value={sessionFields(roles, chains)}
+                onApply={(patch) => {
+                  const next = sessionMaps(patch, data.host.default);
+                  setRoles(next.roles);
+                  setChains(next.chains);
+                }}
+              />
+              <RoleOverridesEditor
+                hostId={hostId}
+                value={roles}
+                onChange={setRoles}
+                host={data.host}
+                defaultRow="editable"
+                chains={chains}
+                onChainsChange={setChains}
+                hostChains={data.hostChains}
+              />
+            </div>
           </fieldset>
           {saveError && <Problem error={saveError} />}
         </div>

@@ -119,6 +119,7 @@ pub fn parked_agent(r: &ParkedRecord) -> Agent {
         last_turn_ended_at: r.last_turn_ended_at,
         // Filled by the state store from omp's recap journal (`crate::recaps`).
         recap: None,
+        progress: None,
     };
     Agent {
         id: r.agent_id.clone(),

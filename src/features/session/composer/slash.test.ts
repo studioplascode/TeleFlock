@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { TranscriptItem } from "@/core/gen";
 import { OMP_COMMAND_NAMES } from "@/core/ompCommands";
-import { findCommand, isSlashDraft, matchCommands, matchSubs, parseSlash, pickFromTranscript, SLASH_COMMANDS, slashPopupAt } from "./slash";
+import { findCommand, isSlashDraft, matchCommands, matchSubs, parseSlash, pickFromTranscript, SLASH_COMMANDS, slashPopupAt, spliceSlash } from "./slash";
 
 describe("slash catalog", () => {
   test("covers exactly the builtins hostd accepts", async () => {
@@ -75,14 +75,32 @@ describe("slash catalog", () => {
     expect(slashPopupAt("/fast o", 7)).toMatchObject({ popup: { kind: "sub", items: [{ name: "on" }, { name: "off" }] }, sel: 0 });
     // No choice matches: nothing shows, and no other popup takes over.
     expect(slashPopupAt("/fast zz", 8)).toEqual({ popup: null, sel: 0 });
-    // Past the first argument, on a second line, mid-text: other popups (files) may apply.
+    // Past the first argument, on a later line, mid-text: other popups (files) may apply.
     expect(slashPopupAt("/plan add @src", 14)).toBeUndefined();
-    expect(slashPopupAt("/pl\nmore", 3)).toBeUndefined();
+    expect(slashPopupAt("/plan\n/pl", 9)).toBeUndefined();
+    expect(slashPopupAt("/fast\n", 6)).toBeUndefined();
     expect(slashPopupAt("fix /pl", 7)).toBeUndefined();
+    // Typed in front of a written task, more lines below: the palette opens all the same.
+    expect(slashPopupAt("/plfix the login bug\nsteps below", 3)).toMatchObject({ popup: { kind: "slash" }, sel: 0 });
     // An offer narrows both lists.
     const offer = { command: (c: { name: string }) => c.name === "fast", sub: (_: unknown, s: { name: string }) => s.name !== "status" };
     expect(slashPopupAt("/", 1, [], offer)?.popup?.items.map((c) => c.name)).toEqual(["fast"]);
     expect(slashPopupAt("/fast s", 7, [], offer)).toEqual({ popup: null, sel: 0 });
+  });
+
+  test("a pick replaces only the command typed before the caret: the text after it stays", () => {
+    // `/pl` typed at the start of a written task, with or without a space before the task.
+    expect(spliceSlash("/plfix the login bug", 3, "/plan ")).toEqual({ text: "/plan fix the login bug", caret: 6 });
+    expect(spliceSlash("/pl fix the login bug", 3, "/plan ")).toEqual({ text: "/plan fix the login bug", caret: 6 });
+    // The first line of a longer task: the other lines stay as they are.
+    expect(spliceSlash("/plfix the login bug\n\n- sign in twice\n- see auth.ts", 3, "/plan ")).toEqual({ text: "/plan fix the login bug\n\n- sign in twice\n- see auth.ts", caret: 6 });
+    expect(spliceSlash("/pl\nfix it", 3, "/plan ")).toEqual({ text: "/plan \nfix it", caret: 6 });
+    // An argument choice replaces the command and the argument begun.
+    expect(spliceSlash("/goal sefix the flaky test\nthen ship", 8, "/goal set ")).toEqual({ text: "/goal set fix the flaky test\nthen ship", caret: 10 });
+    expect(spliceSlash("/fast o now", 7, "/fast on")).toEqual({ text: "/fast on now", caret: 8 });
+    // `/skill:` goes on with the skill's name (no space), then the skill takes its place.
+    expect(spliceSlash("/skfix the diff", 3, "/skill:")).toEqual({ text: "/skill:fix the diff", caret: 7 });
+    expect(spliceSlash("/skill:refix the diff", 9, "/skill:review ")).toEqual({ text: "/skill:review fix the diff", caret: 14 });
   });
 
   test("copy/open pick from the loaded transcript", () => {

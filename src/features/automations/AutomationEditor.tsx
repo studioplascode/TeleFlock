@@ -4,6 +4,7 @@ import { core, toApiError, useHostState } from "@/core";
 import type { Automation, AutomationDraft, AutoAnswer, ThinkingLevel } from "@/core/gen";
 import { Button, Field, Input, SegmentedControl, Select, type SelectOption, Switch, Textarea, toast, useIsMobile } from "@/design";
 import { AgentRolesSection, rolesSummaryChip, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
+import { ModelPresetsSection } from "@/features/agentRoles/ModelPresets";
 import { launchMainText, launchOverrides } from "@/features/agentRoles/roles";
 import { specAutoAnswer } from "@/features/autoAnswer/format";
 import { useHostAutoAnswer } from "@/features/autoAnswer/hooks";
@@ -343,6 +344,7 @@ export function AutomationEditor({ hostId, automation, timezone, open, onOpenCha
               </div>
               <div className="flex min-w-0 flex-col gap-1.5 md:col-span-2">
                 <AgentOptions summary={[takesRoles ? rolesSummaryChip(form.roleModels, form.fallbackChains) : null, autoAnswerChip(decides ? form.autoAnswer : undefined)]} defaultOpen={!!fieldError("roles")}>
+                  <ModelPresetsSection hostId={hostId} value={form} onApply={patch} />
                   <AgentRolesSection
                     hostId={hostId}
                     roles={form.roleModels}

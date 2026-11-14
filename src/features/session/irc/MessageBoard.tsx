@@ -40,6 +40,7 @@ import {
   type BoardMessage,
   type ChatAgent,
   deliveryOf,
+  deliveryTip,
   filterMessages,
   firstUnread,
   MAIN,
@@ -48,10 +49,11 @@ import {
   participants,
   positionText,
   previewText,
-  receiptText,
+  type QueueWatch,
 } from "./chat";
+import { DeliveryState } from "./DeliveryState";
 import { useIrcSeen } from "./seen";
-import { BOARD_POLL_MS, syncAgentChat, useAgentChat, useSeenMark } from "./store";
+import { BOARD_POLL_MS, syncAgentChat, useAgentChat, useOldChatHost, useSeenMark } from "./store";
 
 /** Long bodies (wake relays carry a subagent's whole answer) start clamped. */
 const CLAMP_CHARS = 700;
@@ -91,6 +93,8 @@ interface RowCtx {
   filterBy(id: string): void;
   /** Address the composer to a subagent. */
   messageTo(sub: Subagent): void;
+  /** What a queued message's tooltip can say: the host's log tells when it reaches its recipient. */
+  watch: QueueWatch;
 }
 
 /**
@@ -128,6 +132,7 @@ export function MessageBoard({ agentKey, mobile }: { agentKey: string; mobile: b
   const now = useNow(60_000);
   const visible = useWindowVisible();
   const loaded = !chat.loading;
+  const oldHost = useOldChatHost(agentKey);
 
   // Everything shown counts as read while the board is on screen (a mark kept under the agent key moves to the session's).
   const latest = chat.messages[chat.messages.length - 1]?.at ?? 0;
@@ -190,6 +195,7 @@ export function MessageBoard({ agentKey, mobile }: { agentKey: string; mobile: b
       setTarget(sub.id);
       composerRef.current?.focus();
     },
+    watch: { follows: chat.source === "log" && !oldHost, oldHost },
   };
 
   const filtering = picked.length > 0 || query.trim() !== "";
@@ -511,11 +517,11 @@ function Recipients({ m, ctx }: { m: BoardMessage; ctx: RowCtx }) {
   );
 }
 
-/** The status line under a message: sending / delivered / not delivered (and why). */
-function Receipts({ m }: { m: BoardMessage }) {
+/** The status line under a message: sending / delivered / queued / not delivered (and why), worded as the transcript's IRC bubbles word it. */
+function Receipts({ m, ctx }: { m: BoardMessage; ctx: RowCtx }) {
   const d = deliveryOf(m);
   if (d.kind === "none") return null;
-  const detail = m.receipts.length > 1 ? m.receipts.map((r) => `${r.to}: ${receiptText(r)}`).join("\n") : undefined;
+  const name = (id: string) => ctx.agentOf(id).label;
   let body: ReactNode;
   if (d.kind === "sending") {
     body = (
@@ -525,33 +531,18 @@ function Receipts({ m }: { m: BoardMessage }) {
       </span>
     );
   } else if (d.kind === "failed") {
-    body = (
+    const tip = deliveryTip(m.receipts, d, ctx.watch, name);
+    const line = (
       <span className="flex min-w-0 items-center gap-1 text-error">
         <CircleX className="size-3 shrink-0" />
         <span className="min-w-0 truncate">not delivered{d.error ? `: ${d.error}` : ""}</span>
       </span>
     );
+    body = tip ? <Tooltip content={<span className="block whitespace-pre-line">{tip}</span>}>{line}</Tooltip> : line;
   } else {
-    body = (
-      <span className="flex min-w-0 items-center gap-1.5">
-        <span className="text-done/85">✓ {d.label}</span>
-        {d.pending > 0 && <span className="text-accent-hi">· {d.pending} sending</span>}
-        {d.failed.length > 0 && <span className="min-w-0 truncate text-error">· {d.failed.length === 1 ? `not to ${d.failed[0]?.to}` : `${d.failed.length} not delivered`}</span>}
-      </span>
-    );
+    body = <DeliveryState d={d} tip={deliveryTip(m.receipts, d, ctx.watch, name)} name={name} />;
   }
-  const tip = detail ?? (d.kind === "failed" ? d.error : undefined);
-  return (
-    <div className="mt-0.5 flex min-w-0 text-[10.5px] font-semibold text-mute-2">
-      {tip ? (
-        <Tooltip content={tip}>
-          <span className="flex min-w-0">{body}</span>
-        </Tooltip>
-      ) : (
-        body
-      )}
-    </div>
-  );
+  return <div className="mt-0.5 flex min-w-0 text-[10.5px] font-semibold text-mute-2">{body}</div>;
 }
 
 /** The message this one answers, as a quote; a click brings it into view. */
@@ -648,7 +639,7 @@ function BoardRow({ m, compact, divider, ctx }: { m: BoardMessage; compact: bool
               {open ? "Show less" : "Show all"}
             </button>
           )}
-          <Receipts m={m} />
+          <Receipts m={m} ctx={ctx} />
         </div>
         {itemId && (
           <span className="absolute top-1 right-1 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">

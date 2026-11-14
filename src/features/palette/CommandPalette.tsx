@@ -12,6 +12,7 @@ import {
   GitFork,
   History,
   Keyboard,
+  ListPlus,
   Columns2,
   MessageSquareReply,
   MessagesSquare,
@@ -56,6 +57,7 @@ import {
 } from "@/core";
 import type { MotionPref, ThinkingLevel } from "@/core/gen";
 import { archiveWithUndo, openAnswerHud, openTerminal, setArchived, setMuted, stopAgent } from "@/features/board/agentActions";
+import { openQueueAll } from "@/features/board/QueueAllDialog";
 import { openChat } from "@/features/dispatch/openChat";
 import { connect } from "@/features/hosts/ConnStatusCard";
 import { MOTION_COPY } from "@/features/settings/parts";
@@ -180,6 +182,17 @@ function useEntries(): Entry[] {
     { id: "act:shortcuts", title: "Keyboard shortcuts", group: "Actions", keywords: ["keys", "help", "?", "terms", "glossary"], icon: <Keyboard />, shortcut: "?", hint: "Every key, and what TeleFlock's words mean", run: () => ui.openDialog({ kind: "shortcuts" }) },
     { id: "act:whats-new", title: "What's new", group: "Actions", keywords: ["changelog", "release notes", "version", "update", "changes"], icon: <Sparkles />, hint: "The release notes of this version", run: () => openWhatsNew() },
   );
+  if (agents.some((a) => a.column === "running")) {
+    entries.push({
+      id: "act:queue-all",
+      title: "Queue a message for all running agents",
+      group: "Actions",
+      keywords: ["broadcast", "everyone", "all agents", "follow-up", "queue", "message", "steer", "send", "running"],
+      icon: <ListPlus />,
+      hint: "Each running agent in the board's filter gets it after its current turn",
+      run: openQueueAll,
+    });
+  }
   for (const m of ["system", "full", "reduced"] as const satisfies readonly MotionPref[]) {
     if (m === settings.motion) continue;
     entries.push({

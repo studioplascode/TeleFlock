@@ -18,6 +18,7 @@ import { ResumeButton } from "../resume/ResumeButton";
 import { CostTooltip } from "../spend";
 import { ActionsMenu, FastToggle, GoalChip, ModelPicker, PlanToggle, ThinkingPicker } from "./Controls";
 import { LimitsChip } from "./LimitsChip";
+import { ProgressLine } from "./ProgressLine";
 
 /** The header pill's words: the state ("Question", "Running", "To review"), plus the wait while it needs you. */
 export function StateWord({ agent }: { agent: Agent }) {
@@ -33,7 +34,7 @@ export function StateWord({ agent }: { agent: Agent }) {
 
 /**
  * Desktop session header: identity, liveness, and every mode control. `inspector`: the inspector
- * rail is on screen beside it, so the session cost lives there instead of here.
+ * rail is on screen beside it, so the session cost and the turn's progress live there instead of here.
  */
 export function SessionHeader({ agentKey, compact = false, inspector = false }: { agentKey: string; compact?: boolean; inspector?: boolean }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
@@ -110,6 +111,7 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
             )}
           </div>
           <RecapLine agent={agent} className="mt-0.5 max-w-[72ch]" />
+          {!inspector && <ProgressLine agentKey={agentKey} className="mt-1 max-w-[72ch]" />}
         </div>
         {!compact && (
           <div className="hidden w-[112px] shrink-0 @min-[36rem]/hdr:block">

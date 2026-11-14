@@ -68,7 +68,12 @@ pub(crate) async fn run(open: FwdEv, mut s: Stream, cancel: CancellationToken, s
     match command_for(kind, command, argv, cwd, shims) {
         Ok(mut prepared) => {
             in_session(&mut prepared.cmd).await;
-            process(prepared, pty, &mut s, cancel).await
+            // Another host's agents' work: out of tf-hostd's own raised unit (`crate::priority`).
+            #[cfg(unix)]
+            let gate = crate::priority::work_gate();
+            #[cfg(not(unix))]
+            let gate = None;
+            process(prepared, pty, &mut s, cancel, gate).await
         }
         Err(why) => {
             (s.send)(FwdEv::Close { error: Some(why) });
@@ -285,35 +290,63 @@ async fn drain<R: AsyncRead + Unpin>(mut r: R, fd: u8, window: Arc<Window>, send
     }
 }
 
-async fn process(p: Prepared, pty: Option<FwdPty>, s: &mut Stream, cancel: CancellationToken) {
+/// What holds a program until it is in a scope of its own: `Some` while tf-hostd's own unit carries
+/// raised weights (`crate::priority::work`, Unix).
+#[cfg(unix)]
+type Gate = Option<crate::priority::work::Gate>;
+#[cfg(not(unix))]
+type Gate = Option<std::convert::Infallible>;
+
+/// In the child between fork and exec, after `setsid` (a new session: on Linux a new autogroup,
+/// at nice 0): another host's agents' work never keeps tf-hostd's raised priority
+/// (`crate::priority`), and a held program keeps its gate's pipe (`held`).
+#[cfg(unix)]
+pub(super) fn as_agent_work(held: Option<std::os::fd::RawFd>) -> std::io::Result<()> {
+    tf_herdr::durable::drop_raised_nice();
+    match held {
+        Some(fd) => crate::priority::work::keep(fd),
+        None => Ok(()),
+    }
+}
+
+async fn process(p: Prepared, pty: Option<FwdPty>, s: &mut Stream, cancel: CancellationToken, gate: Gate) {
     #[cfg(unix)]
     if let Some(size) = pty {
-        return on_terminal(p, size, s, cancel).await;
+        return on_terminal(p, size, s, cancel, gate).await;
     }
     #[cfg(not(unix))]
     let _ = pty;
-    with_pipes(p, s, cancel).await
+    with_pipes(p, s, cancel, gate).await
 }
 
-async fn with_pipes(p: Prepared, s: &mut Stream, cancel: CancellationToken) {
+async fn with_pipes(p: Prepared, s: &mut Stream, cancel: CancellationToken, gate: Gate) {
     use std::process::Stdio;
     let Prepared { cmd, what } = p;
+    #[cfg(unix)]
+    let cmd = match &gate {
+        Some(g) => g.wrap(&cmd),
+        None => cmd,
+    };
     let mut cmd = tokio::process::Command::from(cmd);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     // Like ssh without a terminal: no TERM.
     cmd.env_remove("TERM");
     #[cfg(unix)]
-    // SAFETY: setsid is async-signal-safe.
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+    {
+        let held = gate.as_ref().map(|g| g.child_fd());
+        // SAFETY: setsid, setpriority and fcntl are async-signal-safe.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                as_agent_work(held)
+            });
+        }
     }
     #[cfg(windows)]
     {
+        // No priority class flag: a child of an above-normal tf-hostd runs at normal priority.
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
@@ -324,6 +357,12 @@ async fn with_pipes(p: Prepared, s: &mut Stream, cancel: CancellationToken) {
             return;
         }
     };
+    #[cfg(unix)]
+    if let Some(g) = gate {
+        g.release(child.id());
+    }
+    #[cfg(not(unix))]
+    let _ = gate;
     let tree = Tree::of(&child);
     let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
     if !(s.send)(FwdEv::Opened { pty: false }) {
@@ -334,13 +373,18 @@ async fn with_pipes(p: Prepared, s: &mut Stream, cancel: CancellationToken) {
 }
 
 #[cfg(unix)]
-async fn on_terminal(p: Prepared, size: FwdPty, s: &mut Stream, cancel: CancellationToken) {
+async fn on_terminal(p: Prepared, size: FwdPty, s: &mut Stream, cancel: CancellationToken, gate: Gate) {
     use super::pty;
     let Prepared { cmd, what } = p;
+    let cmd = match &gate {
+        Some(g) => g.wrap(&cmd),
+        None => cmd,
+    };
+    let held = gate.as_ref().map(|g| g.child_fd());
     let mut cmd = tokio::process::Command::from(cmd);
     cmd.kill_on_drop(true).env("TERM", size.term.as_deref().filter(|t| !t.is_empty()).unwrap_or("xterm-256color"));
     let started = pty::open(size.cols, size.rows).and_then(move |(master, slave)| {
-        pty::attach(&mut cmd, &slave)?;
+        pty::attach(&mut cmd, &slave, held)?;
         let child = cmd.spawn()?;
         // The command holds copies of the slave for the child's stdio: only the program may keep
         // it open, so the master reads the end once the program and its jobs are gone.
@@ -355,6 +399,9 @@ async fn on_terminal(p: Prepared, size: FwdPty, s: &mut Stream, cancel: Cancella
             return;
         }
     };
+    if let Some(g) = gate {
+        g.release(child.id());
+    }
     let tree = Tree::of(&child);
     if !(s.send)(FwdEv::Opened { pty: true }) {
         return tree.kill(&mut child).await;
@@ -679,5 +726,95 @@ mod tests {
         let path = std::env::join_paths([td.path().join("link"), shims.clone(), real.clone()]).unwrap();
         assert_eq!(resolve("tool", &path, &shims), Ok(real.join("tool")));
         assert_eq!(resolve("plain", &path, &shims), Err("plain: command not found".to_string()));
+    }
+
+    /// Forwarded commands as another host's agents' work (`crate::priority`): held for their move
+    /// while tf-hostd's own unit is raised, and never above normal priority.
+    #[cfg(target_os = "linux")]
+    mod agent_work {
+        use std::sync::Mutex;
+
+        use super::*;
+        use crate::priority::Fail;
+        use crate::priority::work::tests::high;
+        use crate::priority::work::{Gate, Place};
+
+        /// A stream whose events are collected; the app's side stays open while the sender lives.
+        fn stream() -> (Stream, Arc<Mutex<Vec<FwdEv>>>, mpsc::UnboundedSender<FwdEv>) {
+            let got = Arc::new(Mutex::new(Vec::new()));
+            let send: Send = {
+                let got = got.clone();
+                Arc::new(move |ev| {
+                    got.lock().unwrap().push(ev);
+                    true
+                })
+            };
+            let (tx, rx) = mpsc::unbounded_channel();
+            (Stream { send, rx, window: Arc::new(Window::default()), inflight: Arc::new(Inflight::default()) }, got, tx)
+        }
+
+        fn output(evs: &[FwdEv]) -> String {
+            let bytes: Vec<u8> = evs.iter().filter_map(|e| if let FwdEv::Data { data, .. } = e { Some(B64.decode(data).unwrap()) } else { None }).flatten().collect();
+            String::from_utf8_lossy(&bytes).replace("\r\n", "\n")
+        }
+
+        fn script(line: &str) -> Prepared {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.args(["-c", line]);
+            Prepared { cmd, what: line.to_string() }
+        }
+
+        fn terminal(on: bool) -> Option<FwdPty> {
+            on.then_some(FwdPty { cols: 80, rows: 24, term: None })
+        }
+
+        /// Through pipes and on a terminal, with the gate's pipe on a two-digit descriptor (as in
+        /// tf-hostd, and `sh` reads one digit only): the program starts after its move, or after a
+        /// move that failed, and runs once.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_held_command_runs_once_whether_its_move_works_or_not() {
+            let td = tempfile::tempdir().unwrap();
+            for (pty, moves) in [(false, true), (false, false), (true, true), (true, false)] {
+                let mark = td.path().join(format!("moved-{pty}-{moves}"));
+                let place: Place = {
+                    let mark = mark.clone();
+                    Arc::new(move |_| {
+                        if !moves {
+                            return Err(Fail::Other("Failed to start transient scope unit".into()));
+                        }
+                        std::fs::write(&mark, "").unwrap();
+                        Ok(())
+                    })
+                };
+                let gate = high(Gate::new(place).unwrap(), 40);
+                let (mut s, got, _app) = stream();
+                let line = format!("test -e '{}' && echo moved; echo ran", mark.display());
+                process(script(&line), terminal(pty), &mut s, CancellationToken::new(), Some(gate)).await;
+                let evs = got.lock().unwrap().clone();
+                assert_eq!(output(&evs), if moves { "moved\nran\n" } else { "ran\n" }, "terminal: {pty}, moved: {moves}");
+                assert_eq!(evs.last(), Some(&FwdEv::Exit { code: Some(0), signal: None }));
+            }
+        }
+
+        /// tf-hostd runs above normal priority and children inherit it (on Linux the forking
+        /// thread's nice): a forwarded command, through pipes or on a terminal, runs at normal.
+        #[tokio::test]
+        async fn a_forwarded_command_never_inherits_a_raised_priority() {
+            // SAFETY: gettid has no preconditions; setpriority changes this thread only (the one
+            // that spawns: a current-thread runtime).
+            let set = |nice: i32| unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, nice) == 0 };
+            if !set(-5) {
+                eprintln!("not permitted to raise a thread's priority here (needs root): skipped");
+                return;
+            }
+            let mut nices = Vec::new();
+            for pty in [false, true] {
+                let (mut s, got, _app) = stream();
+                process(script("cut -d' ' -f19 /proc/$$/stat"), terminal(pty), &mut s, CancellationToken::new(), None).await;
+                nices.push(output(&got.lock().unwrap()).trim().to_string());
+            }
+            set(0);
+            assert_eq!(nices, ["0", "0"]);
+        }
     }
 }

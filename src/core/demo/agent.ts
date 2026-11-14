@@ -27,12 +27,14 @@ import type {
   OmpMode,
   GoalInfo,
   ModelRef,
+  ModelShare,
 } from "@/core/gen";
 import { apiError } from "../errors";
 import { chatTurn } from "./chats";
 import { fileDiff } from "./codegen";
 import { MODELS, type AgentDef } from "./data";
 import { boardReportSteps, PRESENT_KIND_WORD } from "./presented";
+import { estimatePct, lastAsk, nextAsk, stageOf, stepMs } from "./progress";
 import type { Rng } from "./rng";
 import { replyTurn, type Step, subagentRow, type TaskSub, taskSubs, think, type ToolSpec, type UiSpec } from "./scripts";
 
@@ -76,7 +78,28 @@ const CHARS_PER_SEC = 160; // ≈ 40 tok/s
 const STEER_LAND_MS = 2500;
 /** The advisor reviews each finished reply/tool with a reviewer model (omp `modelRoles.advisor`). */
 const ADVISOR_MODEL = MODELS.find((m) => m.id === "gpt-5.5");
-type Spender = keyof TpsSplit;
+/** omp's `smol` role, which serves the main agent's side calls (session titles, judges). */
+const SIDE_MODEL = MODELS.find((m) => m.id === "gpt-6-luna");
+type Spender = Exclude<keyof TpsSplit, "models">;
+
+/** A model as `CostSplit.models` / `TpsSplit.models` group it: `provider/id`. */
+function modelKey(m: { provider: string; id: string } | undefined): string | undefined {
+  return m && `${m.provider}/${m.id}`;
+}
+
+function addPart(parts: Map<string, number>, key: string | undefined, value: number): void {
+  if (key && value > 0) parts.set(key, (parts.get(key) ?? 0) + value);
+}
+
+/** `figure` in the proportions of `parts` (`provider/id` → value), the largest first, as tf-hostd's `ModelShare`s. */
+function shares(spender: Spender, parts: Map<string, number>, figure: number): ModelShare[] {
+  const known = [...parts.values()].reduce((n, v) => n + v, 0);
+  if (!(figure > 0 && known > 0)) return [];
+  return [...parts]
+    .sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
+    .map(([key, v]) => ({ spender, model: key.slice(key.indexOf("/") + 1), provider: key.slice(0, key.indexOf("/")), value: (v * figure) / known }));
+}
+
 const TODO_STATUS_LABEL: Record<string, string> = { completed: "✓", inProgress: "●", pending: "○", blocked: "◆", abandoned: "✗" };
 
 export class AgentSim {
@@ -88,7 +111,7 @@ export class AgentSim {
   private queue: Step[] = [];
   private cur: Active | null = null;
   pending: PendingUi | null = null;
-  private tokenLog: { at: number; n: number; src: Spender }[] = [];
+  private tokenLog: { at: number; n: number; src: Spender; model?: string }[] = [];
   private ctxTokens: number;
   private window: number;
   files: ChangedFile[];
@@ -108,6 +131,8 @@ export class AgentSim {
   caps: Capabilities;
   /** USD billed by the main agent's own calls and by its advisor; subagents bill through their rows. */
   mainUsd: number;
+  /** `mainUsd` by model (`provider/id`): the models it ran on and its side calls' (`CostSplit.models`). */
+  private mainByModel = new Map<string, number>();
   advisorUsd: number;
   /** The advisor is reviewing (streaming its notes) until then, at `advisorRate` tok/s. */
   private advisorUntil = 0;
@@ -137,9 +162,12 @@ export class AgentSim {
     this.thinking = def.thinking;
     this.window = m?.contextWindow ?? 200_000;
     this.ctxTokens = Math.round(((def.ctxPct ?? 10) / 100) * this.window);
-    // Seeded history: a slice of the def's spend went to the advisor (omp agents only).
+    // Seeded history: a slice of the def's spend went to the advisor (omp agents only), and of the
+    // main agent's a little to its side calls (titles, judges) on the smol model.
     this.advisorUsd = this.omp ? (def.cost ?? 0) * 0.07 : 0;
     this.mainUsd = (def.cost ?? 0) - this.advisorUsd;
+    addPart(this.mainByModel, modelKey(m), this.mainUsd * 0.96);
+    addPart(this.mainByModel, modelKey(SIDE_MODEL), this.mainUsd * 0.04);
     // Changed files accumulate from the seeded history's edit calls (see seeds.ts), not from the def.
     this.files = [];
     this.todos = structuredClone(def.todos ?? []);
@@ -223,13 +251,21 @@ export class AgentSim {
 
   private costInfo(): NonNullable<NonNullable<Agent["omp"]>["cost"]> {
     const subagents = this.subagentUsd();
+    const split = { main: round3(this.mainUsd), subagents: round3(subagents), advisor: round3(this.advisorUsd) };
+    const subModels = new Map<string, number>();
+    for (const s of this.subagents) addPart(subModels, modelKey(MODELS.find((m) => m.label === s.model)), s.costUsd ?? 0);
+    const advisorModels = new Map<string, number>();
+    addPart(advisorModels, modelKey(ADVISOR_MODEL), this.advisorUsd);
     return {
       usd: round3(this.mainUsd + subagents + this.advisorUsd),
       input: this.tokensIn + 380_000,
       output: this.tokensOut + 36_000,
       cacheRead: 1_240_000,
       cacheWrite: 88_000,
-      split: { main: round3(this.mainUsd), subagents: round3(subagents), advisor: round3(this.advisorUsd) },
+      split: {
+        ...split,
+        models: [...shares("main", this.mainByModel, split.main), ...shares("subagents", subModels, split.subagents), ...shares("advisor", advisorModels, split.advisor)],
+      },
     };
   }
 
@@ -339,20 +375,27 @@ export class AgentSim {
     this.host.agentChanged(this.agent.id);
   }
 
-  private tokens(n: number, src: Spender = "main"): void {
+  private tokens(n: number, src: Exclude<Spender, "subagents"> = "main"): void {
     const now = this.host.now();
-    this.tokenLog.push({ at: now, n, src });
+    const m = src === "advisor" ? ADVISOR_MODEL : MODELS.find((x) => x.id === this.model?.id);
+    this.tokenLog.push({ at: now, n, src, model: modelKey(m) });
     this.tokensOut += n;
     if (src === "main") this.ctxTokens = Math.min(this.window * 0.97, this.ctxTokens + n);
-    const m = src === "advisor" ? ADVISOR_MODEL : MODELS.find((x) => x.id === this.model?.id);
     const usd = (n * (m?.outPerM ?? 10)) / 1e6;
     if (src === "advisor") this.advisorUsd += usd;
-    else if (src === "main") {
+    else {
       this.mainUsd += usd;
+      addPart(this.mainByModel, modelKey(m), usd);
       this.turnOut += n;
     }
-    // Subagent output is billed by their rows (`subagentRow` cost), counted in `tick`.
-    if (src !== "subagents") this.host.usage(0, n, usd);
+    this.host.usage(0, n, usd);
+  }
+
+  /** Running subagents stream `n` tokens between them, each on its own model. Their output is billed by their rows (`subagentRow` cost), counted in `tick`. */
+  private subagentTokens(n: number, running: Subagent[]): void {
+    const at = this.host.now();
+    this.tokensOut += n;
+    for (const s of running) this.tokenLog.push({ at, n: n / running.length, src: "subagents", model: modelKey(MODELS.find((m) => m.label === s.model)) });
   }
 
   private inputTokens(n: number): void {
@@ -361,6 +404,7 @@ export class AgentSim {
     const m = MODELS.find((x) => x.id === this.model?.id);
     const usd = (n * (m?.inPerM ?? 3) * 0.25) / 1e6; // mostly cache reads
     this.mainUsd += usd;
+    addPart(this.mainByModel, modelKey(m), usd);
     this.host.usage(n, 0, usd);
   }
 
@@ -376,15 +420,21 @@ export class AgentSim {
     this.advisorRate = rng.range(45, 75);
   }
 
-  /** Rolling output tok/s over the last 3 s, per spender (same window as tf-hostd's main rate). */
+  /** Rolling output tok/s over the last 3 s, per spender (same window as tf-hostd's main rate), and per model. */
   private tps(now: number): { tps?: number; split?: TpsSplit } {
     this.tokenLog = this.tokenLog.filter((x) => now - x.at <= 3000);
-    const split: TpsSplit = { main: 0, subagents: 0, advisor: 0 };
-    for (const x of this.tokenLog) split[x.src] += x.n / 3;
+    const split = { main: 0, subagents: 0, advisor: 0 };
+    const parts: Record<Spender, Map<string, number>> = { main: new Map(), subagents: new Map(), advisor: new Map() };
+    for (const x of this.tokenLog) {
+      split[x.src] += x.n / 3;
+      addPart(parts[x.src], x.model, x.n / 3);
+    }
     const total = split.main + split.subagents + split.advisor;
     if (total <= 0) return {};
     const r = (v: number) => Math.round(v * 10) / 10;
-    return { tps: r(total), split: { main: r(split.main), subagents: r(split.subagents), advisor: r(split.advisor) } };
+    const rounded = { main: r(split.main), subagents: r(split.subagents), advisor: r(split.advisor) };
+    const models = (["main", "subagents", "advisor"] as const).flatMap((s) => shares(s, parts[s], rounded[s]).map((m) => ({ ...m, value: r(m.value) })));
+    return { tps: r(total), split: { ...rounded, models: models.filter((m) => m.value > 0) } };
   }
 
   // ---------------------------------------------------------------- seeding (instant)
@@ -497,6 +547,7 @@ export class AgentSim {
     this.setState("working");
     // A new turn makes the idle recap out of date (the host stops sending it).
     if (this.agent.omp) this.agent.omp = { ...this.agent.omp, turnStartedAt: now, recap: undefined };
+    this.startProgress(now);
     this.turnOut = 0;
     this.inputTokens(4000 + this.host.rng.int(0, 9000));
     this.host.metaChanged(this.agent.id);
@@ -507,6 +558,7 @@ export class AgentSim {
     this.queue = steps;
     this.cur = null;
     this.backdate = backdateMs;
+    this.resumeProgress(backdateMs);
   }
 
   private backdate = 0;
@@ -520,9 +572,59 @@ export class AgentSim {
     this.cur = null;
     this.setState("working");
     if (this.agent.omp) this.agent.omp = { ...this.agent.omp, turnStartedAt: now };
+    this.startProgress(now);
     this.turnOut = 0;
     this.inputTokens(4000 + this.host.rng.int(0, 9000));
     this.host.metaChanged(this.agent.id);
+  }
+
+  // ---------------------------------------------------------------- progress (`OmpInfo.progress`)
+
+  /** When the current turn began, the basis of its estimates; when the bridge asks next (0: no turn to ask about). */
+  private turnSince = 0;
+  private nextProgressAt = 0;
+
+  /** A new turn: no estimate until the bridge's first ask is answered. */
+  private startProgress(now: number): void {
+    this.turnSince = now;
+    this.nextProgressAt = now + nextAsk(0);
+    if (this.agent.omp?.progress) this.agent.omp = { ...this.agent.omp, progress: undefined };
+  }
+
+  /** Seeded mid-turn (`resume`): the turn began with its state, and the bridge's last ask so far has its answer. */
+  private resumeProgress(backdateMs: number): void {
+    const now = this.host.now();
+    this.turnSince = this.agent.omp?.turnStartedAt ?? this.agent.stateSince;
+    const elapsed = now - this.turnSince;
+    this.nextProgressAt = this.turnSince + nextAsk(elapsed);
+    const asked = lastAsk(elapsed);
+    if (!this.agent.omp || asked === undefined) return;
+    // The work ahead at that ask: what has run since, and the script from here (its first step began `backdateMs` ago).
+    const ahead = elapsed - asked + this.remainingMs(now) - backdateMs;
+    this.agent.omp = { ...this.agent.omp, progress: { pct: estimatePct(asked, ahead, this.agent.id), stage: this.stage(), at: this.turnSince + asked, since: this.turnSince } };
+  }
+
+  /** The bridge's ask, when due; not while omp waits out a provider error (the model can't answer until it is back). */
+  private askProgress(now: number): void {
+    if (!this.agent.omp || !this.nextProgressAt || now < this.nextProgressAt || this.cur?.k === "retry") return;
+    const elapsed = now - this.turnSince;
+    this.nextProgressAt = this.turnSince + nextAsk(elapsed);
+    this.agent.omp = { ...this.agent.omp, progress: { pct: estimatePct(elapsed, this.remainingMs(now), this.agent.id), stage: this.stage(), at: now, since: this.turnSince } };
+    this.host.agentChanged(this.agent.id);
+  }
+
+  /** The scripted work left: the rest of the current step, then every queued one. */
+  private remainingMs(now: number): number {
+    const c = this.cur;
+    const rest = c?.k === "think" ? c.ms - (now - c.start) : c?.k === "tool" ? c.spec.ms - (now - c.start) : c?.k === "say" ? ((c.text.length - c.shown) / c.rate) * 1000 : c ? c.until - now : 0;
+    return Math.max(0, rest) + this.queue.reduce((n, s) => n + stepMs(s, CHARS_PER_SEC), 0);
+  }
+
+  /** The agent's current step in its words: the running step, else the next one, else its todo in progress. */
+  private stage(): string | undefined {
+    const c = this.cur;
+    const step: Step | undefined = c?.k === "tool" ? { t: "tool", spec: c.spec } : c?.k === "think" ? { t: "think", ms: c.ms, text: c.text } : c?.k === "say" ? { t: "say", text: c.text } : c ? undefined : this.queue[0];
+    return stageOf(step) ?? this.todos.flatMap((p) => p.tasks).find((t) => t.status === "inProgress")?.content;
   }
 
   /** Queued like omp's steering queue: listed in `queue.steering` until the next step boundary. */
@@ -579,6 +681,11 @@ export class AgentSim {
     if (state !== "blocked") a.needs = undefined;
     if (state !== "working") {
       a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined };
+    }
+    // The turn is over: hostd drops its estimate, and the bridge stops asking.
+    if (state === "done" || state === "idle") {
+      this.nextProgressAt = 0;
+      if (a.omp?.progress) a.omp = { ...a.omp, progress: undefined };
     }
     if (prevColumn !== a.column) this.host.pulse(a.id, "state", 1);
     this.refreshDerived();
@@ -938,6 +1045,7 @@ export class AgentSim {
       if (!this.advance(now, dt)) break; // still running
       this.cur = null;
     }
+    this.askProgress(now);
     const subAfter = this.subagentUsd();
     if (subAfter > subBefore) this.host.usage(0, 0, subAfter - subBefore);
     if (Math.round((this.mainUsd + subAfter + this.advisorUsd) * 1000) !== Math.round(costBefore * 1000)) {
@@ -1141,8 +1249,8 @@ export class AgentSim {
     }
     if (spec.subagents) {
       // Each running subagent streams its own replies; their bill shows on their rows.
-      const running = this.subagents.filter((s) => s.status === "running" && c.subs.some((t) => t.id === s.id)).length;
-      if (running) this.tokens(Math.max(1, Math.round((running * this.host.rng.range(28, 46) * dt) / 1000)), "subagents");
+      const running = this.subagents.filter((s) => s.status === "running" && c.subs.some((t) => t.id === s.id));
+      if (running.length) this.subagentTokens(Math.max(1, Math.round((running.length * this.host.rng.range(28, 46) * dt) / 1000)), running);
       let changed = false;
       for (const t of c.subs) {
         if (elapsed < t.at) continue;
@@ -1212,7 +1320,7 @@ export class AgentSim {
       if (s.status !== "running") return s;
       changed = true;
       // omp only reports the completion estimate while a subagent runs.
-      return { ...s, status, endedAt: now, completionPct: undefined };
+      return { ...s, status, endedAt: now, completionPct: undefined, completionAt: undefined };
     });
     if (changed) {
       this.refreshDerived();
@@ -1382,6 +1490,7 @@ export class AgentSim {
     this.todos = [];
     this.subagents = [];
     this.mainUsd = 0;
+    this.mainByModel.clear();
     this.advisorUsd = 0;
     this.advisorUntil = 0;
     this.lastTurnTps = undefined;

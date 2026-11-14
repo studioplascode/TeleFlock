@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, ArrowUp } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
 import { getTranscript, loadOlder, useAgent, useCore, useSession, useSessionItem } from "@/core";
@@ -13,6 +13,7 @@ import { useSessionUi } from "../state";
 import { arrivedSince, type ListMark } from "./arrivals";
 import { estimateRowHeight, initialScrollOffset } from "./estimate";
 import { EmptyTranscript } from "./FreshStart";
+import { lastMessage, sameLastMessage } from "./lastMessage";
 import { LimitRunRow } from "./LimitRunRow";
 import { foldLimitRuns, limitSignature } from "./limitRuns";
 import { Row } from "./rows";
@@ -26,6 +27,14 @@ const ROW_GAP_DENSE = 8;
 export const TRANSCRIPT_MAX_WIDTH = 1120;
 /** Growth larger than this while following is a jump (session switch, big paste), not a glide. */
 const GLIDE_MAX_PX = 900;
+/** Where a jump to a row's start lands its top: under the faded top edge (and a phone's pager dots). */
+const JUMP_TOP_PX = 28;
+/** A row whose top is this close to that spot is already there: no pill. */
+const JUMP_NEAR_PX = 24;
+/** How long a jump keeps placing its row while the rows around it measure in. */
+const JUMP_SETTLE_MS = 1000;
+/** Input on the list that hands a jump in progress back to the user. */
+const JUMP_ENDERS = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
 
 /** Layout knobs shared by the session transcript and other transcript lists (subagents). */
 export interface TranscriptLayout {
@@ -51,7 +60,7 @@ export interface TranscriptProps extends TranscriptLayout {
 
 /**
  * Virtualised, append-only transcript of a session. Rows subscribe to their own item; this
- * component only re-renders when the id list changes.
+ * component only re-renders when the id list (or which row is the last message) changes.
  */
 export function Transcript({ agentKey, ...layout }: TranscriptProps) {
   const session = useSession(agentKey);
@@ -75,6 +84,13 @@ export function Transcript({ agentKey, ...layout }: TranscriptProps) {
   const folded = useMemo(() => (finding ? null : foldLimitRuns(rawIds, rawItems)), [finding, rawIds, rawItems]);
   const ids = folded?.ids ?? rawIds;
   const items = folded?.items ?? rawItems;
+  // The newest message (the agent's text or the user's prompt, whichever is newer): the pill beside
+  // "jump to latest" brings its start up. From the store, so a text row that starts streaming takes
+  // over without a new id.
+  const last = useCore((s) => {
+    const e = s.sessions[agentKey];
+    return e ? lastMessage(e.itemIds, (id) => e.items[id]) : null;
+  }, sameLastMessage);
   return (
     <FindScopeCtx.Provider value={agentKey}>
       <TranscriptLog
@@ -91,6 +107,7 @@ export function Transcript({ agentKey, ...layout }: TranscriptProps) {
         empty={<EmptyTranscript agentKey={agentKey} />}
         footer={<WorkingFooter agentKey={agentKey} lastId={ids[ids.length - 1]} />}
         jumpLabel={(unseen) => <JumpLabel agentKey={agentKey} unseen={unseen} />}
+        jumpBack={last && (last.kind === "assistant" ? { id: last.id, label: "Agent's last message", short: "Agent's message" } : { id: last.id, label: "Your last message", short: "Your message" })}
         focus={focus}
         find={find}
       />
@@ -118,6 +135,12 @@ export interface TranscriptLogProps extends TranscriptLayout {
   onLoadOlder?: () => Promise<unknown>;
   /** Content of the "jump to latest" pill shown while scrolled up. */
   jumpLabel: (unseen: number) => ReactNode;
+  /**
+   * A row to offer a jump to beside the "jump to latest" pill (the last message: `lastMessage`),
+   * named by `label` (`short` where the list is narrow: phones, split panes). The jump brings the
+   * row's top to the top of the list; the pill hides while it is there.
+   */
+  jumpBack?: { id: string; label: string; short?: string } | null;
   ariaLabel?: string;
   /** Scroll this row into view and flash it (a new `nonce` re-triggers). */
   focus?: { itemId: string; nonce: number };
@@ -131,8 +154,8 @@ export interface TranscriptLogProps extends TranscriptLayout {
 
 /**
  * The transcript list itself, independent of where rows come from. Sticks to the bottom while
- * streaming, offers a "jump to latest" pill when scrolled up, and pages older rows in at the top
- * without a jump.
+ * streaming, offers a "jump to latest" pill when scrolled up (and beside it one to `jumpBack`'s
+ * row), and pages older rows in at the top without a jump.
  */
 export function TranscriptLog({
   ids,
@@ -145,6 +168,7 @@ export function TranscriptLog({
   hasMore = false,
   onLoadOlder,
   jumpLabel,
+  jumpBack,
   ariaLabel = "Transcript",
   focus,
   followSignal = 0,
@@ -170,6 +194,13 @@ export function TranscriptLog({
   const settled = useIdleReady(400);
   const settledRef = useRef(settled);
   settledRef.current = settled;
+  const listRef = useRef<HTMLDivElement>(null);
+  // The jump-back pill's aim: its row and which way that is from the view (null: no pill). Kept with
+  // the row it was worked out for, so a new target never shows the previous one's arrow.
+  const [aim, setAim] = useState<{ id: string; dir: "up" | "down" } | null>(null);
+  const backIdRef = useRef(jumpBack?.id);
+  backIdRef.current = jumpBack?.id;
+  const jumpRaf = useRef(0);
 
   // Stable while the rows are: a new getItemKey makes the virtualizer re-measure every row (O(n))
   // on each render, which scrolling a long transcript does dozens of times a second.
@@ -247,6 +278,7 @@ export function TranscriptLog({
     if (!content || !viewport) return;
     const ro = new ResizeObserver(() => {
       if (stick.current) glide();
+      else aimBack();
     });
     ro.observe(content);
     ro.observe(viewport);
@@ -316,6 +348,76 @@ export function TranscriptLog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new signal jumps
   }, [followSignal]);
 
+  // Where the jump-back row is from the view: "up" / "down", or null (no pill) while its top is at
+  // the top already, or when the list can't scroll it up there (the jump would end at the bottom,
+  // where "jump to latest" goes). Reads refs only: the resize observer calls it too.
+  const aimBack = () => {
+    const el = scrollRef.current;
+    const list = listRef.current;
+    const id = backIdRef.current;
+    const index = id == null ? -1 : idsRef.current.lastIndexOf(id);
+    // Its place in the list, measured or (not rendered) estimated. Not from the rendered range: a
+    // scroll event reaches React before the virtualiser has moved that range along.
+    const row = index < 0 ? undefined : virtualizer.measurementsCache[index];
+    if (!el || !list || stick.current || id == null || !row) {
+      setAim(null);
+      return;
+    }
+    // How far the list scrolls to bring the row's top to its spot.
+    const shift = list.getBoundingClientRect().top - el.getBoundingClientRect().top + row.start - JUMP_TOP_PX;
+    const reaches = el.scrollTop + shift < el.scrollHeight - el.clientHeight - STICK_PX;
+    const dir = Math.abs(shift) <= JUMP_NEAR_PX || (shift > 0 && !reaches) ? null : shift < 0 ? "up" : "down";
+    setAim((prev) => (dir == null ? null : prev?.id === id && prev.dir === dir ? prev : { id, dir }));
+  };
+  // A new target (rows streaming in), rows paged in, or the list let go of the bottom / caught it.
+  useLayoutEffect(() => aimBack(), [ids, jumpBack?.id, stuck]);
+
+  // Brings a row's top to JUMP_TOP_PX and stops following the bottom, like scrolling up. A row not
+  // rendered yet comes into view by the virtualiser's estimates first; then the row itself is placed,
+  // frame by frame while the rows around it measure in, until it holds still, the user takes over or
+  // the list follows the bottom again.
+  const jumpToStart = (id: string) => {
+    const el = scrollRef.current;
+    const index = idsRef.current.lastIndexOf(id);
+    if (!el || index < 0) return;
+    setStick(false);
+    cancelAnimationFrame(jumpRaf.current);
+    const rowEl = () => el.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(id)}"]`);
+    // Scrolls the row to its spot (as near as the list scrolls); false once it is there.
+    const place = (row: HTMLElement) => {
+      const to = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, el.scrollTop + row.getBoundingClientRect().top - el.getBoundingClientRect().top - JUMP_TOP_PX));
+      if (Math.abs(to - el.scrollTop) <= 1) return false;
+      el.scrollTop = to;
+      return true;
+    };
+    const row = rowEl();
+    if (row) place(row);
+    else virtualizer.scrollToIndex(index, { align: "start" });
+    const since = performance.now();
+    let still = 0;
+    const step = () => {
+      const now = rowEl();
+      still = now && !place(now) ? still + 1 : 0;
+      jumpRaf.current = !stick.current && still < 3 && performance.now() - since < JUMP_SETTLE_MS ? requestAnimationFrame(step) : 0;
+    };
+    jumpRaf.current = requestAnimationFrame(step);
+  };
+
+  // Any input on the list ends a jump in progress: the user scrolls on from there.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const stop = () => {
+      cancelAnimationFrame(jumpRaf.current);
+      jumpRaf.current = 0;
+    };
+    for (const ev of JUMP_ENDERS) el.addEventListener(ev, stop, { passive: true });
+    return () => {
+      for (const ev of JUMP_ENDERS) el.removeEventListener(ev, stop);
+      stop();
+    };
+  }, []);
+
   // Unsticking is driven by user input (wheel, touch, keys, scrollbar) only: the virtualizer moves
   // scrollTop on its own while rows measure, which would read as the user scrolling up.
   const onScroll = () => {
@@ -331,6 +433,7 @@ export function TranscriptLog({
       setLoadingOlder(true);
       void onLoadOlder().finally(() => setLoadingOlder(false));
     }
+    aimBack();
   };
 
   // Wheel/touch/keys up while stuck: release immediately so the user wins against streaming.
@@ -342,6 +445,10 @@ export function TranscriptLog({
   };
 
   const visible = virtualizer.getVirtualItems();
+  // The pill once it has been aimed at the current target.
+  const back = aim != null && aim.id === jumpBack?.id ? aim.dir : null;
+  // Both pills show: a layout change slides them (else no layout work while scrolling re-renders the list).
+  const pair = !stuck && back != null;
 
   return (
     <div className={cn("relative flex min-h-0 flex-1 flex-col", className)}>
@@ -379,7 +486,7 @@ export function TranscriptLog({
           ) : ids.length === 0 ? (
             empty
           ) : (
-            <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+            <div ref={listRef} className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
               {visible.map((v) => {
                 const id = ids[v.index];
                 if (!id) return null;
@@ -402,24 +509,47 @@ export function TranscriptLog({
           {footer}
         </div>
       </div>
-      <AnimatePresence>
-        {!stuck && ids.length > 0 && (
-          <motion.button
-            type="button"
-            initial={{ opacity: 0, y: 16, scale: 0.9 }}
-            animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
-            exit={{ opacity: 0, y: 10, scale: 0.92 }}
-            onClick={() => {
-              setStick(true);
-              toBottom(true);
-            }}
-            className="focus-ring absolute bottom-4 left-1/2 z-raised flex -translate-x-1/2 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink shadow-glow-accent"
-          >
-            {jumpLabel(unseen)}
-            <ArrowDown className="size-3.5" />
-          </motion.button>
-        )}
-      </AnimatePresence>
+      {/* Over the bottom edge, centred as a pair: one coming or going slides the other over. */}
+      <div className="pointer-events-none absolute inset-x-3 bottom-4 z-raised flex justify-center gap-2 @container">
+        <AnimatePresence mode="popLayout">
+          {!stuck && back && jumpBack && (
+            <motion.button
+              key="back"
+              type="button"
+              layout="position"
+              layoutDependency={pair}
+              initial={{ opacity: 0, y: 16, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
+              exit={{ opacity: 0, y: 10, scale: 0.92 }}
+              onClick={() => jumpToStart(jumpBack.id)}
+              className="focus-ring pointer-events-auto flex min-w-0 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink-2 transition-colors hover:text-ink"
+            >
+              {back === "up" ? <ArrowUp className="size-3.5 shrink-0" /> : <ArrowDown className="size-3.5 shrink-0" />}
+              <span className={cn("min-w-0 truncate", jumpBack.short && "hidden @min-[26rem]:block")}>{jumpBack.label}</span>
+              {jumpBack.short && <span className="min-w-0 truncate @min-[26rem]:hidden">{jumpBack.short}</span>}
+            </motion.button>
+          )}
+          {!stuck && ids.length > 0 && (
+            <motion.button
+              key="latest"
+              type="button"
+              layout="position"
+              layoutDependency={pair}
+              initial={{ opacity: 0, y: 16, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
+              exit={{ opacity: 0, y: 10, scale: 0.92 }}
+              onClick={() => {
+                setStick(true);
+                toBottom(true);
+              }}
+              className="focus-ring pointer-events-auto flex shrink-0 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink shadow-glow-accent"
+            >
+              {jumpLabel(unseen)}
+              <ArrowDown className="size-3.5" />
+            </motion.button>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
   );
 }

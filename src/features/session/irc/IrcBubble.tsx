@@ -1,12 +1,15 @@
 import { ArrowDownLeft, ChevronDown, CircleX, Megaphone, MessagesSquare, Reply, Sparkles } from "lucide-react";
 import { type CSSProperties, createContext, type ReactNode, useContext, useState } from "react";
 import { type IrcEntry, useAgent, useSession } from "@/core";
-import type { IrcMessage, IrcReceipt, Subagent } from "@/core/gen";
+import type { IrcMessage, Subagent } from "@/core/gen";
 import { AgentGlyph, agentGlyphTheme, cn, formatAge, Spinner, Tooltip, useNow } from "@/design";
 import { SessionCtx } from "../context";
 import { Markdown } from "../markdown/Markdown";
 import { useSessionUi } from "../state";
 import { SUB_STATUS } from "../subagents/Subagents";
+import { deliveryOf, deliveryTip, MAIN, rowReceipts } from "./chat";
+import { DeliveryState } from "./DeliveryState";
+import { useLoggedSend } from "./store";
 
 /**
  * Name of the agent whose transcript is rendering. Defaults to the session's agent; a subagent
@@ -36,12 +39,22 @@ function peerTint(peer: string, strength = 1): CSSProperties {
   };
 }
 
-const OUTCOME: Record<string, string> = { injected: "delivered", woken: "woke it", revived: "revived it" };
-
-/** Delivery line for an outbound send: sending… / delivered / woke it / failed. */
-function Delivery({ entry }: { entry: IrcEntry }) {
+/**
+ * Delivery line for an outbound send: sending / delivered / queued / woke it / not delivered.
+ * omp's `injected` (queued for a busy recipient) shows as delivered only once the session's agent
+ * chat log says the recipient's transcript has it; `peerName`: the recipient as the bubble names it.
+ */
+function Delivery({ entry, peerName }: { entry: IrcEntry; peerName: string }) {
+  const session = useContext(SessionCtx);
+  // omp's id of the agent whose transcript this is: the sender.
+  const from = useContext(IrcSelfCtx) ?? MAIN;
   const { status, message } = entry;
-  if (status === "pending" || status === "running") {
+  // The log is read only for a send omp queued (or one this omp wrote no receipts for).
+  const asks = status === "ok" && (message.receipts.length === 0 || message.receipts.some((r) => r.outcome === "injected"));
+  const { logged, watch } = useLoggedSend(session?.key ?? "", asks ? { from, to: message.peer, text: message.text, at: entry.at } : undefined);
+  const receipts = rowReceipts(message.receipts, logged);
+  const d = deliveryOf({ receipts });
+  if (status === "pending" || status === "running" || d.kind === "sending") {
     return (
       <span className="flex items-center gap-1 text-accent-hi">
         <Spinner size={10} label="sending" />
@@ -49,9 +62,8 @@ function Delivery({ entry }: { entry: IrcEntry }) {
       </span>
     );
   }
-  const failed: IrcReceipt[] = message.receipts.filter((r) => r.outcome === "failed");
-  if (status === "error" || status === "aborted" || status === "denied" || (message.receipts.length > 0 && failed.length === message.receipts.length)) {
-    const why = failed[0]?.error ?? entry.error;
+  if (status === "error" || status === "aborted" || status === "denied" || d.kind === "failed") {
+    const why = (d.kind === "failed" ? d.error : undefined) ?? entry.error;
     return (
       <Tooltip content={why ?? "Not delivered"}>
         <span className="flex items-center gap-1 text-error">
@@ -61,17 +73,9 @@ function Delivery({ entry }: { entry: IrcEntry }) {
       </Tooltip>
     );
   }
-  if (message.broadcast && message.receipts.length > 0) {
-    return (
-      <Tooltip content={message.receipts.map((r) => `${r.to}: ${r.outcome === "failed" ? `failed${r.error ? ` (${r.error})` : ""}` : (OUTCOME[r.outcome] ?? r.outcome)}`).join("\n")}>
-        <span className="text-done">
-          ✓ {message.receipts.length - failed.length}/{message.receipts.length} delivered
-        </span>
-      </Tooltip>
-    );
-  }
-  const outcome = message.receipts[0]?.outcome;
-  return <span className="text-done">✓ {outcome ? (OUTCOME[outcome] ?? outcome) : "sent"}</span>;
+  if (d.kind === "none") return <span className="text-done">✓ sent</span>;
+  const name = (id: string) => (id === message.peer ? peerName : id);
+  return <DeliveryState d={d} tip={deliveryTip(receipts, d, watch, name)} name={name} />;
 }
 
 /** Small tags: broadcast / parent / auto-relay / reply / via wait. */
@@ -156,7 +160,7 @@ export function IrcBubble({ entry, withPrev = false, withNext = false }: { entry
       </span>
       {out && (
         <span className="text-[11px] font-bold">
-          <Delivery entry={entry} />
+          <Delivery entry={entry} peerName={sub?.name ?? m.peer} />
         </span>
       )}
     </div>

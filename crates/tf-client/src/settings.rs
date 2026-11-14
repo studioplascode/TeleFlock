@@ -1,6 +1,21 @@
 //! App settings: defaults, validation, quiet hours, and the notification policy.
 
-use tf_proto::{ApiError, MotionPref, NotifyKind, Settings};
+use std::collections::{BTreeMap, HashSet};
+
+use tf_proto::{ApiError, ModelPreset, MotionPref, NotifyKind, Settings};
+
+/// Most model presets one device keeps (the app's Save as preset stops there too).
+pub const MAX_MODEL_PRESETS: usize = 32;
+/// Longest model preset name, in characters.
+pub const MAX_PRESET_NAME: usize = 48;
+/// Longest model preset id (the app makes `mp-<time>-<random>`).
+const MAX_PRESET_ID: usize = 64;
+/// A preset's roles and chains stay within what tf-hostd takes for one agent (`agentcfg`), so a
+/// saved preset always fits a launch.
+const MAX_PRESET_ROLES: usize = 64;
+const MAX_PRESET_CHAINS: usize = 64;
+const MAX_PRESET_CHAIN_LEN: usize = 16;
+const MAX_PRESET_SELECTOR: usize = 256;
 
 pub fn default_settings(device_name: String) -> Settings {
     Settings {
@@ -26,6 +41,7 @@ pub fn default_settings(device_name: String) -> Settings {
         idle_after_min: None,
         device_kind: None,
         capture_shortcut: None,
+        model_presets: Vec::new(),
     }
 }
 
@@ -67,7 +83,111 @@ pub fn validate(mut s: Settings) -> Result<Settings, ApiError> {
     if s.idle_after_min.is_some_and(|m| !(1..=60).contains(&m)) {
         return Err(ApiError::new("invalid_params", "idleAfterMin must be between 1 and 60"));
     }
+    s.model_presets = model_presets(std::mem::take(&mut s.model_presets))?;
     Ok(s)
+}
+
+/// Model presets as the app sends them, tidied: names on one line with single spaces and at most
+/// [`MAX_PRESET_NAME`] characters, every model, role and chain trimmed and empty ones dropped (an
+/// empty chain stays: it means "no fallbacks"). Refused: more than [`MAX_MODEL_PRESETS`], an id
+/// that is not the app's kind or is used twice, a preset without a name, and roles or chains
+/// beyond tf-hostd's limits for an agent.
+fn model_presets(presets: Vec<ModelPreset>) -> Result<Vec<ModelPreset>, ApiError> {
+    if presets.len() > MAX_MODEL_PRESETS {
+        return Err(invalid(format!("at most {MAX_MODEL_PRESETS} model presets")));
+    }
+    let mut ids = HashSet::new();
+    presets
+        .into_iter()
+        .map(|p| {
+            let p = model_preset(p)?;
+            if !ids.insert(p.id.clone()) {
+                return Err(invalid(format!("two model presets have the id `{}`", p.id)));
+            }
+            Ok(p)
+        })
+        .collect()
+}
+
+fn model_preset(mut p: ModelPreset) -> Result<ModelPreset, ApiError> {
+    p.id = p.id.trim().to_string();
+    if !preset_id_ok(&p.id) {
+        return Err(invalid(format!(
+            "model preset id `{}`: letters, digits, `.`, `-` and `_`, at most {MAX_PRESET_ID}",
+            clip(&p.id)
+        )));
+    }
+    let name: String = p.name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_PRESET_NAME).collect();
+    p.name = name.trim_end().to_string();
+    if p.name.is_empty() {
+        return Err(invalid(format!("model preset `{}` needs a name", p.id)));
+    }
+    let what = format!("model preset `{}`", p.name);
+    p.model = match p.model.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(m) => Some(bounded(&what, m)?.to_string()),
+    };
+    let mut roles = BTreeMap::new();
+    for (role, selector) in std::mem::take(&mut p.role_models) {
+        let (role, selector) = (role.trim(), selector.trim());
+        if !role.is_empty() && !selector.is_empty() {
+            roles.insert(bounded(&what, role)?.to_string(), bounded(&what, selector)?.to_string());
+        }
+    }
+    if roles.len() > MAX_PRESET_ROLES {
+        return Err(invalid(format!("{what}: at most {MAX_PRESET_ROLES} model roles")));
+    }
+    p.role_models = roles;
+    let mut chains = BTreeMap::new();
+    for (key, entries) in std::mem::take(&mut p.fallback_chains) {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let entries = entries
+            .iter()
+            .map(|e| e.trim())
+            .filter(|e| !e.is_empty())
+            .map(|e| bounded(&what, e).map(str::to_string))
+            .collect::<Result<Vec<_>, _>>()?;
+        if entries.len() > MAX_PRESET_CHAIN_LEN {
+            let key = clip(key);
+            return Err(invalid(format!("{what}: fallback chain `{key}` has more than {MAX_PRESET_CHAIN_LEN} fallbacks")));
+        }
+        chains.insert(bounded(&what, key)?.to_string(), entries);
+    }
+    if chains.len() > MAX_PRESET_CHAINS {
+        return Err(invalid(format!("{what}: at most {MAX_PRESET_CHAINS} fallback chains")));
+    }
+    p.fallback_chains = chains;
+    Ok(p)
+}
+
+/// What the app makes: ASCII letters and digits with `.`, `-` and `_`, starting with a letter or digit.
+fn preset_id_ok(id: &str) -> bool {
+    id.len() <= MAX_PRESET_ID
+        && id.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// A model, role or chain of a preset no longer than tf-hostd takes.
+fn bounded<'a>(what: &str, s: &'a str) -> Result<&'a str, ApiError> {
+    if s.len() > MAX_PRESET_SELECTOR {
+        return Err(invalid(format!("{what}: `{}` is too long (at most {MAX_PRESET_SELECTOR} bytes)", clip(s))));
+    }
+    Ok(s)
+}
+
+fn invalid(message: String) -> ApiError {
+    ApiError::new("invalid_params", message)
+}
+
+fn clip(s: &str) -> String {
+    let mut out: String = s.chars().take(80).collect();
+    if out.len() < s.len() {
+        out.push('…');
+    }
+    out
 }
 
 /// Whether `now` (minutes after local midnight) falls inside the quiet window.
@@ -110,6 +230,7 @@ pub fn is_muted(s: &Settings, host_id: &str, agent_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tf_proto::ThinkingLevel;
 
     #[test]
     fn hhmm() {
@@ -122,17 +243,19 @@ mod tests {
 
     #[test]
     fn legacy_settings_json_loads() {
-        // A settings.json written before mutedAgents/templates/autoUpdate existed, and with the
-        // `confirmArchive` key that 0.4.0 removed (unknown keys are ignored).
+        // A settings.json written before mutedAgents/templates/autoUpdate/modelPresets existed, and
+        // with the `confirmArchive` key that 0.4.0 removed (unknown keys are ignored).
         let mut v = serde_json::to_value(default_settings("d".into())).unwrap();
         let o = v.as_object_mut().unwrap();
         o.remove("mutedAgents");
         o.remove("templates");
         o.remove("autoUpdate");
+        o.remove("modelPresets");
         o.insert("confirmArchive".into(), serde_json::Value::Bool(true));
         let s: Settings = serde_json::from_value(v).unwrap();
         assert!(s.muted_agents.is_empty());
         assert!(s.templates.is_empty());
+        assert!(s.model_presets.is_empty());
         assert!(s.auto_update);
         assert_eq!(s.device_name, "d");
     }
@@ -197,5 +320,73 @@ mod tests {
         assert!(wants(&s, NotifyKind::Presented));
         s.notify_presented = Some(false);
         assert!(!wants(&s, NotifyKind::Presented));
+    }
+
+    fn preset(id: &str, name: &str) -> ModelPreset {
+        ModelPreset { id: id.into(), name: name.into(), model: None, thinking: None, role_models: BTreeMap::new(), fallback_chains: BTreeMap::new() }
+    }
+
+    fn with_presets(presets: Vec<ModelPreset>) -> Result<Vec<ModelPreset>, ApiError> {
+        let mut s = default_settings("d".into());
+        s.model_presets = presets;
+        validate(s).map(|s| s.model_presets)
+    }
+
+    #[test]
+    fn model_presets_are_tidied() {
+        let mut p = preset(" mp-1 ", "  Opus \n  everywhere  ");
+        p.model = Some("  ".into());
+        p.thinking = Some(ThinkingLevel::High);
+        p.role_models = BTreeMap::from([
+            (" smol ".into(), " anthropic/claude-opus-5:high ".into()),
+            ("task".into(), " ".into()),
+            (" ".into(), "a/b".into()),
+        ]);
+        p.fallback_chains = BTreeMap::from([
+            (" default ".into(), vec![" a/b ".into(), String::new()]),
+            ("anthropic/*".into(), Vec::new()),
+            ("  ".into(), vec!["x/y".into()]),
+        ]);
+        let mut long = preset("mp-2", &format!("{} tail", "x".repeat(MAX_PRESET_NAME)));
+        long.model = Some(" openai/gpt-5.5 ".into());
+        let out = with_presets(vec![p, long]).unwrap();
+        let p = &out[0];
+        assert_eq!((p.id.as_str(), p.name.as_str(), p.model.as_deref(), p.thinking), ("mp-1", "Opus everywhere", None, Some(ThinkingLevel::High)));
+        assert_eq!(p.role_models, BTreeMap::from([("smol".to_string(), "anthropic/claude-opus-5:high".to_string())]));
+        // An empty chain stays: it means "no fallbacks" for its key.
+        assert_eq!(p.fallback_chains, BTreeMap::from([("anthropic/*".to_string(), vec![]), ("default".to_string(), vec!["a/b".to_string()])]));
+        assert_eq!(out[1].name, "x".repeat(MAX_PRESET_NAME));
+        assert_eq!(out[1].model.as_deref(), Some("openai/gpt-5.5"));
+        assert!(with_presets(Vec::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn model_presets_refused() {
+        let refused = |presets: Vec<ModelPreset>| {
+            let e = with_presets(presets).unwrap_err();
+            assert_eq!(e.code, "invalid_params");
+            e.message
+        };
+        // Ids are the app's kind, and each names one preset.
+        let long = "m".repeat(65);
+        for id in ["", "  ", "bad id", "-mp", "mp/1", long.as_str()] {
+            assert!(refused(vec![preset(id, "A")]).contains("model preset id"), "{id:?}");
+        }
+        assert!(refused(vec![preset("mp-1", "A"), preset(" mp-1", "B")]).contains("`mp-1`"));
+        assert!(refused(vec![preset("mp-1", " \t ")]).contains("needs a name"));
+        assert!(refused((0..=MAX_MODEL_PRESETS).map(|i| preset(&format!("mp-{i}"), &format!("P{i}"))).collect()).contains("at most 32 model presets"));
+        // Roles and chains stay within what tf-hostd takes for one agent.
+        let mut p = preset("mp-1", "Many roles");
+        p.role_models = (0..=MAX_PRESET_ROLES).map(|i| (format!("r{i}"), "a/b".to_string())).collect();
+        assert!(refused(vec![p]).contains("`Many roles`: at most 64 model roles"));
+        let mut p = preset("mp-1", "Long chain");
+        p.fallback_chains = BTreeMap::from([("default".to_string(), (0..=MAX_PRESET_CHAIN_LEN).map(|i| format!("a/m{i}")).collect())]);
+        assert!(refused(vec![p]).contains("more than 16 fallbacks"));
+        let mut p = preset("mp-1", "Long model");
+        p.model = Some(format!("acme/{}", "x".repeat(MAX_PRESET_SELECTOR)));
+        assert!(refused(vec![p]).contains("too long"));
+        let mut p = preset("mp-1", "Many chains");
+        p.fallback_chains = (0..=MAX_PRESET_CHAINS).map(|i| (format!("r{i}"), Vec::new())).collect();
+        assert!(refused(vec![p]).contains("at most 64 fallback chains"));
     }
 }

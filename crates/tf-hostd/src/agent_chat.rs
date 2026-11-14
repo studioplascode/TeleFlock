@@ -25,10 +25,17 @@
 //! from the same sender with the same text, broadcast-ness and recipient within the time window
 //! whose leg for that recipient has not been seen from that side yet. omp sends a broadcast as
 //! one message per peer: its legs merge into one message to all of them.
+//!
+//! Each recipient's receipt: `pending` while the send runs, omp's outcome once it settled
+//! (`injected`: queued for a busy recipient, which takes it in when its current step ends, after a
+//! long tool call maybe minutes later; `woken`, `revived`, `failed`), and `received` once the
+//! recipient's transcript has a message omp queued for it (or one whose outcome is not known yet).
+//! While a message waits in a recipient's queue, the session's files are read again every
+//! [`FOLLOW_EVERY`] ([`follow`]), so the log moves (and is announced) when the recipient takes it in.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -40,6 +47,7 @@ use tf_proto::{ApiError, Millis};
 use tracing::debug;
 
 use crate::ops::Ctx;
+use crate::util::now_ms;
 
 /// Messages a log keeps; the oldest go first.
 const MAX_MESSAGES: usize = 2_000;
@@ -71,6 +79,12 @@ const MAX_LINE: usize = 16 << 20;
 const READ_CHUNK: usize = 1 << 20;
 /// A fetch reads the transcript files again only this long after the last read.
 const SCAN_EVERY: Duration = Duration::from_millis(750);
+/// While a message waits in a busy recipient's queue (omp's `injected`), the session's files are
+/// read again this often, so the log says `received` soon after the recipient takes it in.
+const FOLLOW_EVERY: Duration = Duration::from_secs(2);
+/// A queued message is waited for this long after it was sent at most (its recipient ended
+/// without taking it in).
+const FOLLOW_FOR: Millis = 60 * 60_000;
 /// The sender of what the user sent an agent from TeleFlock (or from omp's agent hub).
 pub const USER: &str = IRC_USER;
 /// omp's id of the main agent (`MAIN_AGENT_ID`).
@@ -217,13 +231,20 @@ impl Leg {
         !self.seen[obs.side as usize] && !matches!((&self.omp, &obs.omp_id), (Some(a), Some(b)) if a != b)
     }
 
+    /// omp queued it for its busy recipient (`injected`), whose transcript does not have it yet.
+    fn queued(&self) -> bool {
+        self.outcome.as_deref() == Some("injected") && !self.seen[Side::In as usize]
+    }
+
     fn receipt(&self) -> IrcReceipt {
-        let outcome = match &self.outcome {
-            Some(o) => o.clone(),
-            None if self.seen[Side::In as usize] => "received".into(),
-            None => "pending".into(),
+        let outcome = match self.outcome.as_deref() {
+            // The recipient's transcript has it: what omp queued (or what had not settled yet)
+            // reached it.
+            Some("injected") | None if self.seen[Side::In as usize] => "received",
+            Some(o) => o,
+            None => "pending",
         };
-        IrcReceipt { to: self.to.clone(), outcome, error: self.error.clone() }
+        IrcReceipt { to: self.to.clone(), outcome: outcome.to_owned(), error: self.error.clone() }
     }
 }
 
@@ -313,8 +334,9 @@ impl Msg {
             let leg = &mut self.legs[i];
             if !leg.seen[obs.side as usize] {
                 leg.seen[obs.side as usize] = true;
-                // Only an inbound sighting changes what the app shows (`received`).
-                changed |= obs.side == Side::In && leg.outcome.is_none();
+                // Only an inbound sighting changes what the app shows: `received`, for a message
+                // in flight or one omp queued.
+                changed |= obs.side == Side::In && matches!(leg.outcome.as_deref(), None | Some("injected"));
             }
             if leg.omp.is_none() && obs.omp_id.is_some() {
                 leg.omp = obs.omp_id.clone();
@@ -439,6 +461,11 @@ impl Log {
             self.text = self.text.saturating_sub(gone.text.len());
             self.truncated = true;
         }
+    }
+
+    /// A message sent within [`FOLLOW_FOR`] before `now` waits in a recipient's queue.
+    pub(crate) fn waiting(&self, now: Millis) -> bool {
+        self.msgs.iter().any(|m| m.at() + FOLLOW_FOR > now && m.legs.iter().any(Leg::queued))
     }
 
     pub(crate) fn info(&self, live: bool) -> AgentChatInfo {
@@ -672,6 +699,8 @@ pub(crate) struct Chat {
     log: Mutex<Log>,
     /// Held while the files are read (on the blocking pool), so one read runs at a time.
     files: Mutex<Files>,
+    /// A [`follow`]er reads the files while a message waits in a recipient's queue.
+    following: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -680,7 +709,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Chat {
     fn new() -> Chat {
-        Chat { log: Mutex::new(Log::new()), files: Mutex::new(Files::default()) }
+        Chat { log: Mutex::new(Log::new()), files: Mutex::new(Files::default()), following: AtomicBool::new(false) }
     }
 
     /// Folds sightings in; `true` when the log changed.
@@ -707,6 +736,11 @@ impl Chat {
 
     pub(crate) fn page(&self, epoch: Option<&str>, after: Option<u64>, live: bool) -> AgentChatLog {
         lock(&self.log).page(epoch, after, live)
+    }
+
+    /// A message waits in a recipient's queue ([`Log::waiting`]).
+    fn waiting(&self) -> bool {
+        lock(&self.log).waiting(now_ms())
     }
 }
 
@@ -762,6 +796,47 @@ fn announce(ctx: &Ctx, session_id: &str, chat: &Chat) {
     }
 }
 
+/// While a message of session `session_id`'s log waits in a busy recipient's queue, reads the
+/// session's files every [`FOLLOW_EVERY`] and announces what they add, so the log says `received`
+/// (and its revision moves) soon after the recipient takes it in: after a long tool call, the
+/// recipient's transcript is all that tells. One follower per log, in the context the session
+/// lives in; it ends once nothing waits, the session is gone from the context or its log is no
+/// longer kept.
+fn follow(ctx: &Ctx, session_id: &str, chat: &Arc<Chat>) {
+    if ctx.omp.session(session_id).is_none() || !chat.waiting() || chat.following.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let ctx = ctx.arc();
+    let chat = chat.clone();
+    let sid = session_id.to_owned();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => break,
+                _ = tokio::time::sleep(FOLLOW_EVERY) => {}
+            }
+            // Its log is no longer kept (other sessions' logs pushed it out): a later sighting starts over.
+            if !lock(&LOGS).map.get(&sid).is_some_and(|c| Arc::ptr_eq(c, &chat)) {
+                break;
+            }
+            let Some((Some(file), main)) = ctx.omp.session(&sid).map(|s| s.chat_source()) else { break };
+            if chat.waiting() {
+                let reader = chat.clone();
+                if tokio::task::spawn_blocking(move || reader.read_files(&file, &main, false)).await.unwrap_or(false) {
+                    announce(&ctx, &sid, &chat);
+                }
+                continue;
+            }
+            chat.following.store(false, Ordering::Release);
+            // A message queued since, by a sighting that found this follower still on: go on.
+            if !chat.waiting() || chat.following.swap(true, Ordering::AcqRel) {
+                return;
+            }
+        }
+        chat.following.store(false, Ordering::Release);
+    });
+}
+
 /// `session.open` of a live session: its meta names the log; the files are read in the background
 /// (the log's first read rebuilds what was said before).
 pub(crate) fn open(ctx: &Ctx, agent_id: &str, session_id: &str) {
@@ -776,6 +851,7 @@ pub(crate) fn open(ctx: &Ctx, agent_id: &str, session_id: &str) {
         if changed {
             announce(&ctx, &sid, &chat);
         }
+        follow(&ctx, &sid, &chat);
     });
 }
 
@@ -792,6 +868,7 @@ pub(crate) async fn fetch(ctx: &Ctx, agent_id: &str, session_id: &str, p: AgentC
             announce(ctx, session_id, &chat);
         }
     }
+    follow(ctx, session_id, &chat);
     Ok(chat.page(p.epoch.as_deref(), p.after, tapped(ctx, session_id)))
 }
 
@@ -816,6 +893,7 @@ pub(crate) fn on_leg(ctx: &Ctx, session_id: &str, leg: IrcLeg) {
     if chat.absorb([Obs::from_leg(leg)]) {
         announce(ctx, session_id, &chat);
     }
+    follow(ctx, session_id, &chat);
 }
 
 /// The user sent subagent `to` a message from TeleFlock (`agent.subagent` chat; `broadcast`: one of
@@ -826,6 +904,7 @@ pub(crate) fn on_user_chat(ctx: &Ctx, session_id: &str, to: &str, text: &str, br
     if chat.absorb([Obs::from_user(to, text, broadcast, error, sent)]) {
         announce(ctx, session_id, &chat);
     }
+    follow(ctx, session_id, &chat);
 }
 
 #[cfg(test)]
@@ -847,7 +926,7 @@ mod tests {
     }
 
     /// A worker's send seen by the tap (start and end), in its own transcript and in the
-    /// recipient's: one message, delivered and received.
+    /// recipient's: one message, queued for the busy recipient, then received.
     #[test]
     fn one_message_from_every_side() {
         let mut log = Log::new();
@@ -863,14 +942,44 @@ mod tests {
         let result = json!({"type": "message", "id": "e2", "message": {"role": "toolResult", "toolCallId": "c1", "toolName": "write", "timestamp": t + 5,
             "details": {"message": {"op": "send", "from": "Orch.A", "to": "Orch.B", "receipts": [{"to": "Orch.B", "outcome": "injected"}]}}}});
         log.absorb(record("Orch.A", result, &mut sender).unwrap());
+        assert_eq!(outcomes(&log.page(None, None, true).messages[0]), vec![("Orch.B".into(), "injected".into())], "queued for Orch.B");
         let mut recipient = IrcFileScan::new("Orch.B", false);
         let inbound = json!({"type": "custom_message", "id": "e9", "customType": "irc:incoming", "timestamp": t + 1, "details": {"id": "omp1", "from": "Orch.A", "message": "Which port?"}});
-        log.absorb(record("Orch.B", inbound, &mut recipient).unwrap());
+        assert!(log.absorb(record("Orch.B", inbound, &mut recipient).unwrap()), "Orch.B took it in");
         let page = log.page(None, None, true);
         assert_eq!(page.messages.len(), 1, "{:#?}", page.messages);
         let m = &page.messages[0];
         assert_eq!((m.from.as_str(), m.to.clone(), m.at), ("Orch.A", vec!["Orch.B".to_owned()], t + 1));
-        assert_eq!(outcomes(m), vec![("Orch.B".into(), "injected".into())]);
+        assert_eq!(outcomes(m), vec![("Orch.B".into(), "received".into())]);
+    }
+
+    /// A message omp queued for a busy recipient (`injected`) waits until the recipient's
+    /// transcript has it, minutes later after a long tool call: then it is `received`, a change
+    /// apps fetch, and nothing waits any more. A message that woke its recipient is not waited
+    /// for, nor one queued longer than [`FOLLOW_FOR`] ago.
+    #[test]
+    fn a_queued_message_is_received_once_its_recipient_takes_it_in() {
+        let mut log = Log::new();
+        let t = 1_793_600_000_000;
+        for (id, to, text, ts, outcome) in [("q1", "Audit", "Rank per request.", t, "injected"), ("w1", "Scout", "Go on.", t + 1_000, "woken")] {
+            let mut l = leg(id, "Main", to, text, ts);
+            l.outcome = Some(outcome.into());
+            log.absorb(Obs::from_leg(l));
+        }
+        let page = log.page(None, None, true);
+        let receipts: Vec<Vec<(String, String)>> = page.messages.iter().map(outcomes).collect();
+        assert_eq!(receipts, vec![vec![("Audit".into(), "injected".into())], vec![("Scout".into(), "woken".into())]]);
+        assert!(log.waiting(t + 5_000));
+        assert!(!log.waiting(t + FOLLOW_FOR + 1), "queued an hour ago: no longer waited for");
+        // Audit's eval ends four minutes later: it takes the message in (an omp before 18.14
+        // stamps the row then).
+        let before = log.rev();
+        let inbound = json!({"type": "custom_message", "id": "x1", "customType": "irc:incoming", "timestamp": t + 240_000, "details": {"id": "o1", "from": "Main", "message": "Rank per request."}});
+        assert!(log.absorb(record("Audit", inbound, &mut IrcFileScan::new("Audit", false)).unwrap()));
+        let changed = log.page(Some(&page.epoch), Some(before), true);
+        let got: Vec<(String, Vec<(String, String)>)> = changed.messages.iter().map(|m| (m.id.clone(), outcomes(m))).collect();
+        assert_eq!(got, vec![(page.messages[0].id.clone(), vec![("Audit".into(), "received".into())])]);
+        assert!(!log.waiting(t + 241_000));
     }
 
     /// The same text sent twice is two messages, each paired with its own other side, in order.
@@ -951,10 +1060,11 @@ mod tests {
     fn a_learned_id_that_relinks_a_reply_is_a_change() {
         let mut log = Log::new();
         let t = 9_000_000;
-        // Orch asks Orch.A twice; the tap saw both delivered.
-        for (id, text, ts) in [("p1", "Status?", t), ("p2", "Run lint too.", t + 5_000)] {
+        // Orch asks Orch.A twice; the tap saw the first wake it (a delivery its row adds nothing
+        // to) and the second queued.
+        for (id, text, ts, outcome) in [("p1", "Status?", t, "woken"), ("p2", "Run lint too.", t + 5_000, "injected")] {
             let mut l = leg(id, "Orch", "Orch.A", text, ts);
-            l.outcome = Some("injected".into());
+            l.outcome = Some(outcome.into());
             log.absorb(Obs::from_leg(l));
         }
         // Orch.A's wake relay answers the first ask by an omp id nothing named yet: the latest ask
@@ -1011,9 +1121,9 @@ mod tests {
         for (i, to) in ["Orch", "Orch.A", "Orch.B"].into_iter().enumerate() {
             live.absorb(Obs::from_user(to, "Wrap up.", true, None, t + 225 + i as Millis * 130));
         }
-        assert_eq!(shape(&live), want("injected"), "the requests: one message each");
+        assert_eq!(shape(&live), want("injected"), "the requests: one message each, queued for the subagents");
         read(&mut live);
-        assert_eq!(shape(&live), want("injected"), "the transcripts add nothing");
+        assert_eq!(shape(&live), want("received"), "the subagents' transcripts have them");
 
         let mut rebuilt = Log::new();
         read(&mut rebuilt);
@@ -1105,7 +1215,7 @@ mod tests {
         let page = chat.page(None, None, false);
         assert_eq!(page.messages.len(), 1, "{:#?}", page.messages);
         assert_eq!((page.messages[0].from.as_str(), page.messages[0].to.clone()), ("Orch.A", vec!["Orch.B".to_owned()]));
-        assert_eq!(outcomes(&page.messages[0]), vec![("Orch.B".into(), "injected".into())]);
+        assert_eq!(outcomes(&page.messages[0]), vec![("Orch.B".into(), "received".into())], "queued for Orch.B, whose transcript has it");
         let mut budget = 2;
         let mut few = Vec::new();
         subagent_files(&arts, 0, &mut budget, &mut few);

@@ -114,7 +114,7 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
   2. identity: todo ring or glyph, name, host name chip (several hosts), repo · branch
   3. task title (session name or first prompt)
   4. lane body: live line, tool chip with timer, heartbeat, tok/s | question with answers (each option's description in its button; "+N more" opens the HUD) or Allow once / for session / Deny | the next ship step (Commit 3 files / Push / Open PR / Merge), Mark done, Open
-  5. meters in one order that wraps rather than hides: `ctx 61%` · `subs 59%` · `+188 −74 · 3 files` · model · thinking
+  5. meters in one order that wraps rather than hides: the agent's own `64% done · ~7m left` while it runs · `ctx 61%` · `subs 59%` · `+188 −74 · 3 files` · model · thinking, and `cpu 33% ram 2.6 GB` while the agent weighs on its host
 - Above the lanes (P0), a summary row (one ~72 px strip on windows ≤ 820 px tall):
   - First steps (demo and new hosts only; retires itself)
   - today's cost and tokens with the tightest subscription window (→ Usage)
@@ -122,16 +122,19 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
   - a live mini-terminal tile showing the most active agent's output
   - strips for offline hosts (snapshot age, read-only) and for setup gaps (Fix… → Host setup)
 - Filters (host via the title-bar pill, repo, kind), search, group by status or repo, J/K and H/L navigation, multi-select (P1).
+- **Queue for all** (Running lane header, palette): one message queued as a follow-up (or sent as a steer) to every running agent of the filters, with recipients to tick, the reason an agent can't take it, and a retry for the ones that failed.
 
 ### Session: omp agents (P0)
 - **Transcript.** Virtualized and append-only, with streaming markdown and syntax highlighting.
   - Collapsible thinking blocks ("Thought for 12s").
-  - Rich tool cards: read, edit/write (inline diff), bash (ANSI output, exit code, duration), grep/glob/find (match counts, expandable), lsp, web_search (sources), browser (screenshot), eval (cell + output), task (subagent cards with live progress), todo (phase checklist), ask (resolved answer), github, and a generic JSON fallback.
+  - Rich tool cards: read, edit/write (inline diff), bash (ANSI output, exit code, duration; a long or multi-line command whole in a code card), grep/glob/find (match counts, expandable), lsp, web_search (sources), browser (screenshot), eval (the code of each cell in a highlighted code card, then its output and screenshot), task (subagent cards with live progress and time left), todo (phase checklist), ask (resolved answer), github, and a generic JSON fallback.
+  - Scrolled up, **Jump to latest** and a pill to the start of the agent's last message or the user's last prompt, whichever is newer.
 - **Ask card.** Single or multi select (options numbered 1…N, Other = N+1, recommended marked with ★), Other with free text, editor requests, approvals, Skip (answer nothing). It stays sticky until answered. The same option control renders on cards, the Inbox, the HUD and the phone.
 - **Composer**
   - `Enter` sends while idle and **steers** while running; `Alt+Enter` queues a **follow-up**; `Shift+Enter` is a newline. A steer or follow-up shows as a queued chip the moment it is sent and stays until it lands in the transcript; queued chips can be edited and removed.
   - Stop turn (Esc).
-  - `/` slash palette with argument hints.
+  - `/` slash palette with argument hints; a pick replaces only the command typed before the caret.
+  - Undo and redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y), app edits included.
   - `@` file mention with remote file search.
   - Image paste/drop (P1).
   - Large pastes become a chip with omp's choice of attachment block, local file or inline text.
@@ -140,8 +143,10 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
 - **Header controls.** Model picker, thinking selector, plan mode, goal mode (objective + budget), fast mode, each showing whether it is on. Cost shows in the header only while the inspector is hidden.
 - **Inspector** (ordered by what you ask first)
   - can it keep going: context used and subscription left, as two labelled bars (`ctx 61% used`, `limit 41% left`); **Context X-ray** breaks down what fills the window and compacts with a focus
-  - spend: total, main / subagents / advisor, tokens in/out
-  - throughput: tok/s sparkline, now/peak, per source
+  - how far along the turn is: the agent's own estimate with its step and time left
+  - spend: total, main / subagents / advisor (each by model on hover), tokens in/out
+  - throughput: tok/s sparkline, now/peak, per source (each by model on hover)
+  - resources: the agent's share of the host's CPU and memory, its processes
   - todos by phase (with the blocked count)
   - subagents (steer · kill · revive · retry · view transcript; finished ones grouped, green or red by outcome, grey Stopped when a crash cut them off)
   - background jobs (output, Stop) and the session's documents (plans, reports, handoffs, subagent outputs)
@@ -211,7 +216,7 @@ Scheduled agents per host: a name, a repository or folder, a fresh worktree per 
 Browse past omp sessions on a host and resume one in a new pane. Past sessions also searches the text of every session on the host.
 
 ### Templates (P2)
-Saved agent presets and prompt snippets.
+Saved agent presets and prompt snippets. **Model presets** keep a main model, thinking, the agent's own roles and fallback chains under a name, applied in one click wherever an agent starts (or to a running one); "One model for every role" and "Reset all" (the host's defaults) sit beside them.
 
 ### Focus mode (P2)
 A single-agent zen view: just the stream and the composer.
@@ -226,7 +231,9 @@ A single-agent zen view: just the stream and the composer.
 ### Hosts (P1)
 - **Move an agent to another host** with its branch, uncommitted changes, session, subagents and documents; a failed step rolls everything back.
 - **Make this host like that one:** omp settings, model roles and MCP servers after a diff, sign-ins sealed end to end only on request.
-- **Clean up:** every worktree with pull request state, size and age, bulk removal with the safety checks, omp storage cleanup that never touches sessions, a low-disk notice.
+- **Clean up:** every worktree with pull request state, size and age, bulk removal with the safety checks, omp storage cleanup that never touches sessions, a low-disk notice; the last report shows at once and survives app and host restarts.
+- **Stays responsive:** tf-hostd, the SSH server and Tailscale run above the agents' work (systemd weights, else process priority), the host card says what it could raise.
+- **Accounts:** an expired login can be unlinked as well as linked again.
 - **Skills and plugins** next to MCP servers; GitHub CLI sign-in and git identity in Host setup.
 - **Notifications that find you:** the device in use first, the others after a wait, retracted everywhere once handled; with no app connected, push to ntfy, Pushover or a webhook.
 

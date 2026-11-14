@@ -575,11 +575,23 @@ fn s17_task_completion_probe() {
         .filter(|a| a.completion_pct.is_some())
         .collect();
     assert!(cards.iter().any(|a| a.completion_pct == Some(15.0)), "task tool card never showed the estimate");
+    // When the estimate took its value: one time for every frame repeating it, the card's and the
+    // meta's alike, no earlier than the first frame that carried it (`completion_at`).
+    let first = load("17-task-completion-probe")
+        .iter()
+        .filter(|row| row.frame.to_string().contains("\"completionPercent\":15"))
+        .map(|row| row.at)
+        .min()
+        .expect("a frame with the estimate");
+    let ats: std::collections::HashSet<Option<Millis>> = live.iter().chain(&cards).map(|s| s.completion_at).collect();
+    assert_eq!(ats.len(), 1, "{ats:?}");
+    let at = ats.into_iter().next().flatten().expect("the estimate's time");
+    assert!(at >= first, "{at} < {first}");
     // Finished: omp's TUI only prints the estimate on live rows.
     let subs = &r.replica.meta().subagents;
     assert_eq!(subs.len(), 1, "{subs:?}");
     assert_eq!(subs[0].status, SubagentStatus::Done);
-    assert_eq!(subs[0].completion_pct, None);
+    assert_eq!((subs[0].completion_pct, subs[0].completion_at), (None, None));
     assert!(subs[0].context.is_some());
 }
 

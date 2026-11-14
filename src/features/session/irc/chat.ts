@@ -216,33 +216,156 @@ export function firstUnread(messages: readonly BoardMessage[], seenAt: number): 
 
 // ── delivery ──
 
-const OUTCOME: Record<string, string> = { injected: "delivered", woken: "woke it", revived: "revived it", received: "received" };
+/**
+ * From this tf-hostd on, the log says `received` once the recipient's transcript has a message
+ * omp queued for it (`injected`); an older one keeps `injected`.
+ */
+export const RECEIVED_MIN_HOSTD = "0.9.5";
+
+/**
+ * A recipient's state in words. omp's outcome once the send settled: `injected`, queued (the
+ * recipient was busy: it takes the message in when its current step ends, after a long tool call
+ * maybe minutes later); `woken`, it was idle and started a turn with it; `revived`, it was parked
+ * and omp revived it with it. The log's `received`: the recipient's transcript has it.
+ */
+const STATE: Record<string, string> = { received: "delivered", woken: "woke it", revived: "revived it", injected: "queued" };
 
 /** What a message's receipts say, for its status line. */
 export type Delivery =
   | { kind: "none" }
   | { kind: "sending" }
   | { kind: "failed"; error?: string }
-  /** `label`: one recipient's outcome ("delivered", "woke it"), else "3/4 delivered". */
-  | { kind: "delivered"; label: string; pending: number; failed: IrcReceipt[] };
+  /**
+   * `delivered`: a recipient has it; `queued`: none has it yet, omp queued it for some. `label`:
+   * one recipient's state ("delivered", "woke it", "queued"), else "2/3 delivered" ("3 queued"
+   * while none has it). `queued`: the recipients it waits for.
+   */
+  | { kind: "delivered" | "queued"; label: string; queued: string[]; pending: number; failed: IrcReceipt[] };
 
-export function deliveryOf(m: Pick<BoardMessage, "receipts">): Delivery {
+export function deliveryOf(m: { receipts: readonly IrcReceipt[] }): Delivery {
   const r = m.receipts;
   if (r.length === 0) return { kind: "none" };
   const failed = r.filter((x) => x.outcome === "failed");
   const pending = r.filter((x) => x.outcome === "pending").length;
   if (failed.length === r.length) return { kind: "failed", error: failed.find((x) => x.error)?.error };
   if (pending === r.length) return { kind: "sending" };
-  const ok = r.length - failed.length - pending;
+  const queued = r.filter((x) => x.outcome === "injected").map((x) => x.to);
+  const ok = r.length - failed.length - pending - queued.length;
+  const kind = ok === 0 && queued.length > 0 ? "queued" : "delivered";
   const one = r.length === 1 ? (r[0] as IrcReceipt) : undefined;
-  return { kind: "delivered", label: one ? (OUTCOME[one.outcome] ?? one.outcome) : `${ok}/${r.length} delivered`, pending, failed };
+  const label = one ? (STATE[one.outcome] ?? one.outcome) : kind === "queued" ? `${queued.length} queued` : `${ok}/${r.length} delivered`;
+  return { kind, label, queued, pending, failed };
 }
 
-/** One recipient's outcome in words ("delivered", "not delivered: …"). */
+/** A part of a delivery line after its label. */
+export interface DeliveryNote {
+  tone: "queued" | "sending" | "failed";
+  text: string;
+}
+
+/** What follows a delivery line's label: "1 queued", "2 sending", "not to Sweep" / "2 not delivered". */
+export function deliveryNotes(d: Extract<Delivery, { label: string }>, name: (id: string) => string = (id) => id): DeliveryNote[] {
+  const notes: DeliveryNote[] = [];
+  if (d.kind === "delivered" && d.queued.length > 0) notes.push({ tone: "queued", text: `${d.queued.length} queued` });
+  if (d.pending > 0) notes.push({ tone: "sending", text: `${d.pending} sending` });
+  const [first] = d.failed;
+  if (first) notes.push({ tone: "failed", text: d.failed.length === 1 ? `not to ${name(first.to)}` : `${d.failed.length} not delivered` });
+  return notes;
+}
+
+/** One recipient's state in words ("delivered", "queued", "not delivered: …"). */
 export function receiptText(r: IrcReceipt): string {
   if (r.outcome === "failed") return r.error ? `not delivered: ${r.error}` : "not delivered";
   if (r.outcome === "pending") return "sending";
-  return OUTCOME[r.outcome] ?? r.outcome;
+  return STATE[r.outcome] ?? r.outcome;
+}
+
+/**
+ * What the app can say of a queued message. `follows`: the host's log says when it reaches its
+ * recipient (the message is the log's, tf-hostd ≥ 0.9.5); `oldHost`: the host's tf-hostd never does.
+ */
+export interface QueueWatch {
+  follows: boolean;
+  oldHost: boolean;
+}
+
+/** Why a message is still queued for its recipients `names`, for tooltips. */
+export function queuedText(names: readonly string[], w: QueueWatch): string {
+  const one = names.length === 1;
+  const who = one ? (names[0] as string) : names.length === 2 ? `${names[0]} and ${names[1]}` : `${names.length} agents`;
+  const its = one ? "its" : "their";
+  if (w.follows) return `Waiting for ${who} to finish ${its} current step: omp queued the message until then.`;
+  const unknown = w.oldHost ? `This host can't tell when that happens (tf-hostd ${RECEIVED_MIN_HOSTD} can).` : "TeleFlock can't tell yet whether that happened.";
+  return `omp queued the message: ${who} ${one ? "gets" : "get"} it at ${its} next step.\n${unknown}`;
+}
+
+/**
+ * A delivery line's tooltip: one recipient's state and what it means (why a queued message
+ * waits, why one failed), or each recipient's state and why the queued ones wait.
+ */
+export function deliveryTip(receipts: readonly IrcReceipt[], d: Delivery, w: QueueWatch, name: (id: string) => string = (id) => id): string | undefined {
+  if (d.kind === "none" || d.kind === "sending") return undefined;
+  if (receipts.length > 1) {
+    const lines = receipts.map((r) => `${name(r.to)}: ${receiptText(r)}`);
+    if (d.kind !== "failed" && d.queued.length > 0) lines.push("", queuedText(d.queued.map(name), w));
+    return lines.join("\n");
+  }
+  if (d.kind === "failed") return d.error;
+  const r = receipts[0] as IrcReceipt;
+  const who = name(r.to);
+  if (r.outcome === "injected") return queuedText([who], w);
+  if (r.outcome === "received") return `${who} has it`;
+  if (r.outcome === "woken") return `${who} was idle: the message started its turn`;
+  if (r.outcome === "revived") return `${who} was parked: omp revived it with the message`;
+  return undefined;
+}
+
+/** An outbound IRC row of an agent's transcript, as the log is searched for it (`logEntryOf`). */
+export interface SentRow {
+  /** omp id of the agent whose transcript it is: the sender. */
+  from: string;
+  /** omp id of the recipient; `all`: a broadcast. */
+  to: string;
+  text: string;
+  /** The row's time: the assistant message that made the call started then, so omp sent it then or later. */
+  at: number;
+}
+
+/** A row and the log tell time by omp's clock; a row the host stamped itself (its call's start) can be this much late. */
+const ROW_SLACK_MS = 3_000;
+
+/** The same body: tf-hostd compares bodies trimmed and cuts a long one (marked `\n\n…`). */
+function sameText(logged: string, row: string): boolean {
+  return logged.trim() === row.trim() || (logged.endsWith("\n\n…") && row.startsWith(logged.slice(0, -3)));
+}
+
+/**
+ * The log's message for an outbound row of a transcript: the same sender, recipient (a
+ * broadcast's: a broadcast) and text, the first sent at or after the row's time (identical sends
+ * pair up in order), else the last sent shortly before it. `messages`: oldest first.
+ */
+export function logEntryOf(messages: readonly BoardMessage[], row: SentRow): BoardMessage | undefined {
+  const all = row.to === "all";
+  let before: BoardMessage | undefined;
+  for (const m of messages) {
+    if (m.at < row.at - ROW_SLACK_MS || m.from !== row.from || m.broadcast !== all) continue;
+    if ((!all && (m.to.length !== 1 || m.to[0] !== row.to)) || !sameText(m.text, row.text)) continue;
+    if (m.at >= row.at) return m;
+    before = m;
+  }
+  return before;
+}
+
+/**
+ * A transcript row's receipts (omp's outcomes when the send settled) with what the log's message
+ * for it adds: a recipient whose transcript has it (`received`) no longer waits in its queue. A
+ * row without receipts (an omp before them) takes the log's.
+ */
+export function rowReceipts(row: readonly IrcReceipt[], logged: Pick<BoardMessage, "receipts"> | undefined): readonly IrcReceipt[] {
+  if (!logged) return row;
+  if (row.length === 0) return logged.receipts;
+  const got = new Set(logged.receipts.flatMap((r) => (r.outcome === "received" ? [r.to] : [])));
+  return got.size === 0 ? row : row.map((r) => (r.outcome === "injected" && got.has(r.to) ? { ...r, outcome: "received" } : r));
 }
 
 /** One line of a message for previews: Markdown marks and line breaks gone. */

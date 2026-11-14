@@ -144,6 +144,11 @@ export function bash(command: string, output: string[], ms: number, exitCode = 0
   };
 }
 
+/** An omp `eval` call: one cell of Python (`py`) or JavaScript (`js`) code, its `output` printed line by line while it runs. */
+export function evalCell(language: "py" | "js", title: string, code: string, output: string[], ms: number, view?: ToolView): Step {
+  return { t: "tool", spec: { tool: "eval", title, args: { language, code, title }, ms, output, view } };
+}
+
 export function read(path: string, lines = 88): Step {
   return {
     t: "tool",
@@ -227,6 +232,72 @@ const BOARD_TESTS_GREEN = [
   ``,
   `${G}${B}40 pass${X} ${D}· 0 fail · 112 expect() calls · 1.64s${X}`,
 ];
+
+/** `moveCard`, tried on a sample lane (kanban's history, `codeCardSteps`). */
+const MOVE_CHECK = `const lane = ["a", "b", "c", "d"];
+const moveCard = (cards, key, dir) => {
+  const from = cards.indexOf(key);
+  const next = cards.filter((k) => k !== key);
+  next.splice(Math.max(0, Math.min(next.length, from + dir)), 0, key);
+  return next;
+};
+for (const [key, dir] of [["c", 1], ["d", 1], ["a", -1]]) {
+  console.log(\`\${key} \${dir > 0 ? "↓" : "↑"}\`, moveCard(lane, key, dir).join(" "));
+}`;
+
+const SLOWEST_TESTS = `import json
+from pathlib import Path
+from statistics import median
+
+runs = json.loads(Path("coverage/board-timings.json").read_text())
+slowest = sorted(runs, key=lambda r: r["ms"], reverse=True)[:3]
+for r in slowest:
+    print(f"{r['file']:<24} {r['ms']:>7.1f} ms  ({r['tests']} tests)")
+print(f"median {median(r['ms'] for r in runs):.1f} ms across {len(runs)} files")`;
+
+const BOARD_SHOT_CODE = `const tab = await browser.open("http://localhost:5173/board");
+await tab.press("Shift+J");
+const shot = await tab.screenshot({ selector: "[data-board]" });
+console.log(\`\${shot.width}×\${shot.height} → \${shot.path}\`);`;
+
+const BOARD_SHOT = btoa(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 270"><rect width="480" height="270" fill="#101018"/><g font-family="sans-serif" font-size="11" font-weight="600" fill="#9a9aad"><text x="20" y="26">Backlog</text><text x="136" y="26">Doing</text><text x="252" y="26">Review</text><text x="368" y="26">Done</text></g><g fill="#1b1b25"><rect x="12" y="36" width="104" height="222" rx="10"/><rect x="128" y="36" width="104" height="222" rx="10"/><rect x="244" y="36" width="104" height="222" rx="10"/><rect x="360" y="36" width="104" height="222" rx="10"/></g><g fill="#2c2c3b"><rect x="20" y="46" width="88" height="36" rx="7"/><rect x="20" y="90" width="88" height="36" rx="7"/><rect x="136" y="46" width="88" height="36" rx="7"/><rect x="252" y="46" width="88" height="36" rx="7"/><rect x="368" y="46" width="88" height="36" rx="7"/><rect x="368" y="90" width="88" height="36" rx="7"/></g><rect x="136" y="90" width="88" height="36" rx="7" fill="#a35cf0"/><rect x="136" y="90" width="88" height="36" rx="7" fill="none" stroke="#e9dcff" stroke-width="1.5"/></svg>`,
+);
+
+/**
+ * Code in tool cards (eval cells in Python and JavaScript, one returning a screenshot, and a long
+ * bash one-liner), for kanban's history: instant rows, so the live demo's timeline stays as it was.
+ */
+export function codeCardSteps(): Step[] {
+  return [
+    evalCell("js", "Try moveCard on a sample lane", MOVE_CHECK, ["c ↓ a b d c", "d ↓ a b c d", "a ↑ a b c d"], 1800),
+    bash(
+      'rg -n --no-heading "moveCard\\(" src/features/board | cut -d: -f1 | sort | uniq -c | sort -rn && git diff --stat -- src/features/board | tail -1',
+      ["      2 src/features/board/keyboard.ts", "      1 src/features/board/BoardView.tsx", "      1 src/features/board/keyboard-move.test.ts", " 1 file changed, 14 insertions(+), 7 deletions(-)"],
+      1400,
+      0,
+      "Where moveCard is called, and what changed",
+    ),
+    evalCell(
+      "py",
+      "Rank the slowest board tests",
+      SLOWEST_TESTS,
+      [
+        `${"drag-drop.test.ts".padEnd(24)} ${"412.0".padStart(7)} ms  (12 tests)`,
+        `${"persist.test.ts".padEnd(24)} ${"288.4".padStart(7)} ms  (9 tests)`,
+        `${"keyboard-move.test.ts".padEnd(24)} ${"201.7".padStart(7)} ms  (6 tests)`,
+        "median 141.2 ms across 6 files",
+      ],
+      3200,
+    ),
+    evalCell("js", "Screenshot the board after Shift+J", BOARD_SHOT_CODE, ["960×540 → /tmp/omp/board.png"], 2600, {
+      type: "image",
+      image: { mime: "image/svg+xml", data: BOARD_SHOT, width: 480, height: 270 },
+      alt: "Board after Shift+J",
+      url: "http://localhost:5173/board",
+    }),
+  ];
+}
 
 export function kanbanTurn(): Step[] {
   return [
@@ -379,13 +450,33 @@ export function poolTurn(): Step[] {
         bash("go test ./internal/db/... ./internal/http/...", [`ok  \tgateway/internal/db\t2.114s`, `ok  \tgateway/internal/http\t3.870s`], 8000),
         todo("Wire pool into handlers", "completed"),
         todo("Load test p99", "inProgress"),
-        bash(
-          "hey -z 30s -c 64 http://127.0.0.1:8080/v1/search?q=flock",
-          [`Summary:`, `  Total:\t30.0021 secs`, `  Requests/sec:\t4182.3`, ``, `Latency distribution:`, `  50% in 0.0061 secs`, `  90% in 0.0119 secs`, `  99% in 0.0176 secs`, ``, `Status code distribution:`, `  [200]\t125471 responses`],
-          31_000,
-          0,
-          "Load test against the local gateway (dev server on :8080)",
-        ),
+        {
+          t: "tool",
+          spec: {
+            tool: "task",
+            title: "2 subagents load-testing the pool",
+            intent: "Load test p99 against the local gateway (dev server on :8080)",
+            args: { tasks: 2 },
+            ms: 150_000,
+            // Minutes long, as a real load test is: long enough for their own estimates to tell time left.
+            subagents: [
+              {
+                name: "LoadTest",
+                description: "Drive /v1/search with 64 connections for 2 minutes",
+                ms: 146_000,
+                model: "luna",
+                lines: ["hey -z 120s -c 64 http://127.0.0.1:8080/v1/search?q=flock", "warming up: 3.9k req/s", "steady at 4.2k req/s, p99 17.8 ms", "done: 4182 req/s, p99 17.6 ms, all 200"],
+              },
+              {
+                name: "PoolWatch",
+                description: "Sample db_pool_* every second while the load runs",
+                ms: 140_000,
+                model: "luna",
+                lines: ["polling /debug/pool every second", "11 to 16 of 16 conns in use, acquire under 2 ms", "peak 16 of 16 for 40 ms, no timeouts", "no acquire timeouts in 2 minutes"],
+              },
+            ],
+          },
+        },
         todo("Load test p99", "completed"),
         todo("Docs", "completed"),
         say("p99 is now **17.6 ms** (was 41 ms) at 4.2k req/s. The pool is health-checked every 30 s and exposes `db_pool_*` metrics. Ready for review; preview the dev server at http://localhost:8080/debug/pool."),
@@ -780,12 +871,17 @@ const PROBES = [0.12, 0.27, 0.42, 0.57, 0.72, 0.87];
 /**
  * The subagent's own completion estimate as omp's probe reports it: absent until the first answer, then a
  * step that lags the true progress a little and holds until the next probe (each agent misjudges by its own bias).
+ * `at`: the share of the run at which the probe first gave that percentage (`completionAt`: when it last changed).
  */
-function completionEstimate(spec: SubagentSpec, p: number): number | undefined {
-  const probe = PROBES.findLast((f) => p >= f);
-  if (probe === undefined) return undefined;
+function completionEstimate(spec: SubagentSpec, p: number): { pct: number; at: number } | undefined {
   const bias = (spec.name.length % 5) * 3 - 6;
-  return Math.max(5, Math.min(95, Math.round(probe * 100 + bias)));
+  let est: { pct: number; at: number } | undefined;
+  for (const probe of PROBES) {
+    if (p < probe) break;
+    const pct = Math.max(5, Math.min(95, Math.round(probe * 100 + bias)));
+    if (pct !== est?.pct) est = { pct, at: probe };
+  }
+  return est;
 }
 
 /** One subagent of a `task` call, its own subagents included (`taskSubs`). */
@@ -824,6 +920,7 @@ export function subagentRow(sub: TaskSub, startedAt: number, now: number): Subag
   const lineIdx = Math.min(spec.lines.length - 1, Math.floor(p * spec.lines.length));
   const window = SUB_WINDOW[spec.model ?? ""] ?? 200_000;
   const contextTokens = Math.floor(6_400 + p * 41_000);
+  const estimate = done ? undefined : completionEstimate(spec, p);
   return {
     id: sub.id,
     name: sub.name,
@@ -833,7 +930,8 @@ export function subagentRow(sub: TaskSub, startedAt: number, now: number): Subag
     endedAt: done ? startedAt + spec.ms : undefined,
     model: spec.model,
     line: spec.lines[lineIdx],
-    completionPct: done ? undefined : completionEstimate(spec, p),
+    completionPct: estimate?.pct,
+    completionAt: estimate && startedAt + Math.round(estimate.at * spec.ms),
     context: { tokens: contextTokens, window, pct: (contextTokens / window) * 100 },
     toolCount: Math.floor(p * 14) + 1,
     tokens: Math.floor(p * 38_000),

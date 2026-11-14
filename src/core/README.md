@@ -227,6 +227,17 @@ The app relays between two hosts (they never talk to each other; architecture §
   not online leaves the record. `isMoveActive(moveId)` skips moves this app runs. The move store
   (`features/move/store.ts`) runs it at start and whenever a host comes online.
 
+## Progress estimates (`progress.ts`)
+
+Pure time-left math over an agent's own completion estimate `{ pct, at, since }`: the main agent's
+`OmpInfo.progress` and each running subagent's (`subagentEstimate(sub)`: `completionPct` since `startedAt`, as of
+`completionAt`). `estimatedEnd(e)` = `at + (at − since) × (100 − pct) / pct`, undefined under `MIN_PCT` (5) or with less
+than `MIN_ELAPSED_MS` (1 min) behind the estimate; `timeLeft(e, now)` → `{kind: "left", ms}`, `"due"` (past the end by
+less than a fifth of the estimated whole, 1–5 min) or `{kind: "over", ms}`; `timeLeftOfAll(estimates, now)` (the one
+ending last; none while any can't tell); `timeLeftText` ("~7m left", "any minute", "over estimate"), `paceText` (the
+tooltip sentence), `roundPct`, `TIME_LEFT_TICK_MS` (15 s: the clock the surfaces recompute on). Used by the board card,
+the session header and inspector, subagent meters and task cards. `bun test src/core/progress.test.ts`.
+
 ## Demo host (`src/core/demo`)
 
 Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests).
@@ -239,6 +250,17 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
   (pool's task), cost/usage ticking, health jitter every 2 s, pulses at 10 Hz, patches at 5 Hz.
   `ci` goes quiet (> 90 s without events while working) shortly after start, and CI-themed
   follow-ups do it again.
+- Running omp agents carry the main agent's progress (`OmpInfo.progress`, `demo/progress.ts`): the bridge's asks ten
+  times faster (12 s, 30 s, 60 s, 3 min, 6 min, then every 6 min into a turn; none during a retry wait), each answer the
+  scripted work's true share misjudged by up to ±12 % per agent, with its step (a tool's intent, a thought's first
+  sentence, else the todo in progress); agents seeded mid-turn (`resume`) open with the answer to the last ask; gone
+  when the turn ends. Subagent rows carry `completionAt` (when their percentage last changed); pool's load test after its
+  question runs two subagents for about 2.5 min, long enough for time left. `bun test src/core/demo/progress.test.ts`.
+- Each live agent's share of the host (`HostHealth.agents`, `demo/agentLoads.ts`, on a random stream of its own): idle
+  agents near zero (a few hundred MB), a working agent's own process a tenth of a core, a bash tool running tests or a
+  build (`bun test`, `go test`, …) 5–8 cores and about 2 GB more, gliding there between health ticks (up fast, down
+  slower); the host's own CPU and memory never drop below the agents' sum. Prompt a forge agent with "fix the flaky
+  test" to see the card chip, the Resources tile and the hosts page's top agents move. `bun test src/core/demo/agentLoads.test.ts`.
 - A director keeps every lane alive: idle agents (not chats) get prompted from “Pixel 9”, a new question
   arrives 40 s after the Needs-you lane empties (rotating planReview → editor → approval →
   select → confirm), unanswered questions get answered from “Pixel 9” after 4 min, review > 3

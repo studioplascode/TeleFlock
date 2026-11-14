@@ -73,6 +73,26 @@ describe("estimateRowHeight", () => {
     expect(estimateRowHeight(tool({ id: "x1", tool: "bash", view, userRun: { python: false, excluded: true } }), false)).toBe(model + 28);
     expect(estimateRowHeight(tool({ id: "x1", tool: "bash", view, userRun: { python: false, excluded: true } }), true)).toBe(estimateRowHeight(tool({ id: "m", tool: "bash", view }), true) + 18);
   });
+
+  test("an eval call opens on its code, folded past 16 lines (20 with the slack), then its output", () => {
+    const evalCall = (code: string, output?: string) => tool({ tool: "eval", args: { language: "py", code }, output });
+    const short = estimateRowHeight(evalCall(lines(3)), false);
+    expect(short).toBeGreaterThan(38 + 3 * 19);
+    expect(estimateRowHeight(evalCall(lines(12)), false)).toBeGreaterThan(short);
+    expect(estimateRowHeight(evalCall(lines(30)), false)).toBe(estimateRowHeight(evalCall(lines(300)), false));
+    expect(estimateRowHeight(evalCall(lines(3), lines(5)), false)).toBeGreaterThan(short);
+    // several cells: a card each
+    const two = tool({ tool: "eval", args: { cells: [{ code: lines(3) }, { language: "js", code: lines(3) }] } });
+    expect(estimateRowHeight(two, false)).toBeGreaterThan(short + 3 * 19);
+  });
+
+  test("a bash command the header cuts off adds its code card, on a phone from a shorter command", () => {
+    const bash = (command: string) => tool({ tool: "bash", view: { type: "bash", command, output: "ok", background: false, timedOut: false } });
+    const long = `rg -n "needle" ${"src/features/".repeat(4)}`;
+    expect(estimateRowHeight(bash(long), true)).toBeGreaterThan(estimateRowHeight(bash("ls"), true) + 50);
+    expect(estimateRowHeight(bash(long), false)).toBe(estimateRowHeight(bash("ls"), false));
+    expect(estimateRowHeight(bash(`cd x\n${long}`), false)).toBeGreaterThan(estimateRowHeight(bash("ls"), false) + 50);
+  });
 });
 
 describe("initialScrollOffset", () => {

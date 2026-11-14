@@ -47,7 +47,8 @@ describe("demo agent chat", () => {
 
     const broadcast = all.find((m) => m.broadcast);
     expect(broadcast).toMatchObject({ from: "PoolBench", to: ["Main", "QueryScout", "LockAudit", "PoolBench.Sweep", "PoolBench.Sweep.Size16", "PoolBench.Sweep.Size32"] });
-    expect(broadcast?.receipts.every((x) => x.outcome === "injected")).toBe(true);
+    // omp queued it for the busy ones; by now every one took it in (Size16 as it ended).
+    expect(broadcast?.receipts.every((x) => x.outcome === "received")).toBe(true);
 
     // Size64 had failed by then: omp refused the sweep's retry.
     const [, retry] = between(all, "PoolBench.Sweep", "PoolBench.Sweep.Size64");
@@ -76,6 +77,31 @@ describe("demo agent chat", () => {
     const fresh = await r.call<AgentChatLog>("session.agentChat", { agentId: "pool", epoch: "gone", after: early.rev });
     expect(fresh.reset).toBe(true);
     expect(fresh.messages.length).toBe(early.messages.length + next.messages.filter((m) => !early.messages.some((e) => e.id === m.id)).length);
+  });
+
+  test("Main's answer to QueryScout, busy with a long run, is queued until QueryScout takes it in", async () => {
+    const r = rig();
+    const open = () => r.call<SessionSnapshot>("session.open", { agentId: "pool" });
+    const t0 = (await open()).meta.subagents.find((s) => s.name === "QueryScout")?.startedAt;
+    if (t0 === undefined) throw new Error("pool's task did not start");
+    const at = (ms: number) => r.clock.advance(t0 + ms - r.clock.now());
+    const answer = async () => between((await r.call<AgentChatLog>("session.agentChat", { agentId: "pool" })).messages, "Main", "QueryScout")[0];
+
+    // Sent 8.6 s into the task; omp settles it 0.7 s later.
+    at(9_000);
+    expect((await answer())?.receipts).toEqual([{ to: "QueryScout", outcome: "pending" }]);
+    at(15_000);
+    const queued = await answer();
+    expect(queued?.receipts).toEqual([{ to: "QueryScout", outcome: "injected" }]);
+    // Main's transcript row of the send and the log's message tell the same time (the bubble finds it by that).
+    const row = (await open()).items.find((i) => i.kind === "tool" && i.view?.type === "irc" && i.view.peer === "QueryScout");
+    expect(row?.at).toBe(queued?.at);
+    const rev = (await open()).meta.agentChat?.rev ?? 0;
+    at(22_000);
+    const got = await answer();
+    expect(got?.receipts).toEqual([{ to: "QueryScout", outcome: "received" }]);
+    expect(got?.rev).toBeGreaterThan(rev);
+    expect((await open()).meta.agentChat?.rev).toBeGreaterThanOrEqual(got?.rev ?? Number.POSITIVE_INFINITY);
   });
 
   test("the user's message to every running subagent is one message from user", async () => {

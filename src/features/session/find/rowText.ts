@@ -1,14 +1,15 @@
 import type { ToolItem, TranscriptItem } from "@/core/gen";
 import { stripAnsi } from "../lib/ansi";
+import { shownEvalCells } from "../tools/evalArgs";
 import { countIn, type Needle } from "./match";
 
 /**
  * What Find in a session searches in a transcript row: the text its card shows (prompt and reply
- * text, thinking, tool titles, arguments, outputs without ANSI escapes, errors, the fields of a
- * tool's rich view). tf-hostd's `find/rows.rs` lists the same fields for the rows the client has
- * not loaded. Matches never span two texts. The tool's name and the cards' chrome (author, time,
- * model, status) are not searched. Views still arriving may lack fields: every field is optional
- * here.
+ * text, thinking, tool titles, arguments, an eval call's code, outputs without ANSI escapes, errors,
+ * the fields of a tool's rich view). tf-hostd's `find/rows.rs` lists the same fields for the rows
+ * the client has not loaded. Matches never span two texts. The tool's name and the cards' chrome
+ * (author, time, model, status) are not searched. Views still arriving may lack fields: every field
+ * is optional here.
  */
 export function rowTexts(item: TranscriptItem): string[] {
   const cached = textCache.get(item);
@@ -59,7 +60,19 @@ function toolTexts(t: ToolItem, add: (s: string | null | undefined) => void): vo
   // The header shows the title, except bash (the command's first line) and task (a count) cards.
   if (v?.type !== "bash" && v?.type !== "task") add(t.title);
   add(t.intent);
-  if (!v) {
+  const cells = shownEvalCells(t);
+  if (cells.length > 0) {
+    // The eval card: each cell's code (under its title when there are several), the output, a screenshot's caption.
+    for (const c of cells) {
+      if (cells.length > 1) add(c.title);
+      add(c.code);
+    }
+    if (t.output) add(stripAnsi(t.output));
+    if (v?.type === "image") {
+      add(v.alt);
+      add(v.url);
+    }
+  } else if (!v) {
     // The generic card: pretty-printed arguments, then the output.
     const args = t.args == null ? "" : typeof t.args === "string" ? t.args : JSON.stringify(t.args, null, 2);
     if (args !== "{}") add(args);
@@ -75,9 +88,10 @@ function toolTexts(t: ToolItem, add: (s: string | null | undefined) => void): vo
       case "bash": {
         const command = v.command ?? "";
         add(command.split("\n")[0]);
-        // A multi-line command is shown whole under the header too.
-        if (command.includes("\n")) add(command);
         add(v.cwd);
+        // A multi-line command is shown whole under the header too. (A one-line command the header
+        // cuts off shows whole there instead: the header's copy is left out, so it still counts once.)
+        if (command.includes("\n")) add(command);
         // Streaming output arrives on the item; the view carries the final text.
         const view = v.output ?? "";
         const out = (t.output?.length ?? 0) > view.length ? (t.output ?? "") : view;

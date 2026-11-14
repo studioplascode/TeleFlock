@@ -1,10 +1,10 @@
 import { Slash } from "lucide-react";
 import { motion } from "motion/react";
-import { type KeyboardEvent, type ReactNode, type RefObject, useState } from "react";
+import { type KeyboardEvent, type ReactNode, type RefObject, useRef, useState } from "react";
 import type { CommandInfo } from "@/core/gen";
 import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, Kbd, spring } from "@/design";
-import { MODE_BADGE, type SlashCommand, type SlashOffer, type SlashPopup, slashPopupAt } from "./slash";
+import { MODE_BADGE, type SlashCommand, type SlashOffer, type SlashPopup, slashPopupAt, spliceSlash } from "./slash";
 
 /** A composer's popup over its text box (the `/` palette, `@` files): a header row, then the options. */
 export function ComposerPopup({
@@ -60,7 +60,8 @@ export interface SlashPaletteOptions {
   mobile: boolean;
   /**
    * Runs a picked command, or argument choice, that takes no arguments right away (the session
-   * composer). Without it a pick only completes the text, which Enter then sends (Dispatch).
+   * composer); the rest of the draft stays in the box. Without it a pick only completes the text,
+   * which Enter then sends (Dispatch).
    */
   run?(command: string): void;
   /** Which commands and argument choices it offers (default: all). */
@@ -90,33 +91,52 @@ const defaultBadge = (c: SlashCommand): string | null => (c.source === "omp" || 
 /**
  * The `/` command palette of a composer (session and Dispatch): omp's builtins and the
  * session's skills, prompt templates and extension commands with their argument hints, then a
- * command's argument choices once its name is typed; keyboard navigation.
+ * command's argument choices once its name is typed; keyboard navigation. A pick edits only the
+ * command typed before the caret: text written after it stays.
  */
 export function useSlashPalette(o: SlashPaletteOptions): SlashPalette {
   const [popup, setPopup] = useState<SlashPopup | null>(null);
   const [sel, setSel] = useState(0);
+  /** The draft and caret the palette shows options for (its latest `update`). */
+  const at = useRef({ value: "", caret: 0 });
 
   const update = (value: string, caret: number): boolean => {
-    const at = slashPopupAt(value, caret, o.custom, o.offer);
-    setPopup(at?.popup ?? null);
-    if (at) setSel(at.sel);
-    return at !== undefined;
+    at.current = { value, caret };
+    const found = slashPopupAt(value, caret, o.custom, o.offer);
+    setPopup(found?.popup ?? null);
+    if (found) setSel(found.sel);
+    return found !== undefined;
   };
 
-  /** Puts `v` in the box with the caret at its end. */
-  const complete = (v: string) => {
-    o.setText(v);
+  /** What a pick edits: the draft the palette follows, or the box's own when something else changed it since. */
+  const draft = () => {
+    const el = o.ta.current;
+    return el && el.value !== at.current.value ? { value: el.value, caret: el.selectionStart } : at.current;
+  };
+
+  /** Puts `insert` in place of the command typed before the caret, the caret after it. */
+  const complete = (insert: string) => {
+    const { value, caret } = draft();
+    const next = spliceSlash(value, caret, insert);
+    at.current = { value: next.text, caret: next.caret };
+    o.setText(next.text);
     requestAnimationFrame(() => {
       o.ta.current?.focus();
-      o.ta.current?.setSelectionRange(v.length, v.length);
+      o.ta.current?.setSelectionRange(next.caret, next.caret);
     });
+  };
+
+  /** Runs `command` now: the typed command leaves the box, the text after it stays. */
+  const runNow = (run: (command: string) => void, command: string) => {
+    const { value, caret } = draft();
+    o.setText(value.slice(caret).trimStart());
+    setPopup(null);
+    run(command);
   };
 
   const pickCommand = (c: SlashCommand) => {
     if (c.instant && !c.subs && o.run) {
-      o.setText("");
-      setPopup(null);
-      o.run(`/${c.name}`);
+      runNow(o.run, `/${c.name}`);
       return;
     }
     const subs = (c.subs ?? []).filter((s) => !o.offer || o.offer.sub(c, s));
@@ -130,8 +150,7 @@ export function useSlashPalette(o: SlashPaletteOptions): SlashPalette {
   const pickSub = (cmd: SlashCommand, s: OmpSubcommand) => {
     setPopup(null);
     if (!s.args && o.run) {
-      o.setText("");
-      o.run(`/${cmd.name} ${s.name}`);
+      runNow(o.run, `/${cmd.name} ${s.name}`);
       return;
     }
     complete(`/${cmd.name} ${s.name}${s.args ? " " : ""}`);

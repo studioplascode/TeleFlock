@@ -17,7 +17,8 @@
 //! same length): a file is read once up to the end of its last complete line, then from there on
 //! when it grows. One that shrank, was replaced (another inode) or whose bytes before that point
 //! changed is read again from the start. A refresh reads within a time budget, the sessions of
-//! agents on the board first, then the newest; what is left waits for the next refresh.
+//! agents on the board first, then the newest; what is left waits for the next refresh. The index
+//! outlives the daemon ([`Saved`], `cache.rs`): after a restart only what changed meanwhile is read.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -29,7 +30,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use memchr::memmem::Finder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use tf_proto::Millis;
 
@@ -726,6 +727,132 @@ impl Index {
     }
 }
 
+// ───────────────────────────── kept across restarts ─────────────────────────────
+
+/// The index as the cache file keeps it (`cache.rs`): each folder once, in `folders`, and the
+/// transcripts naming them by number (a session's subagents name the same folders as it does).
+/// Paths that are not UTF-8 are left out: their files are read again after a restart.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Saved {
+    dir: String,
+    folders: Vec<String>,
+    files: Vec<SavedFile>,
+}
+
+impl Saved {
+    /// Session files it knows.
+    pub(crate) fn files(&self) -> usize {
+        self.files.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedFile {
+    path: String,
+    len: u64,
+    ino: u64,
+    offset: u64,
+    /// The [`MARK`] bytes before `offset`, base64.
+    mark: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    /// The first and last entry's `timestamp`, as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last: Option<String>,
+    /// `[folder number, first, last, entries]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dirs: Vec<(u32, Millis, Millis, u32)>,
+}
+
+impl Index {
+    pub(crate) fn to_saved(&self) -> Saved {
+        use base64::Engine as _;
+        let mut folders: Vec<String> = Vec::new();
+        let mut numbers: HashMap<&Path, u32> = HashMap::new();
+        let mut files = Vec::with_capacity(self.files.len());
+        for (path, t) in &self.files {
+            let Some(path) = path.to_str() else { continue };
+            let mut dirs = Vec::with_capacity(t.dirs.len());
+            for (d, s) in &t.dirs {
+                let Some(name) = d.to_str() else { continue };
+                let n = *numbers.entry(d.as_path()).or_insert_with(|| {
+                    folders.push(name.to_string());
+                    (folders.len() - 1) as u32
+                });
+                dirs.push((n, s.first, s.last, s.n));
+            }
+            files.push(SavedFile {
+                path: path.to_string(),
+                len: t.len,
+                ino: t.ino,
+                offset: t.offset,
+                mark: base64::engine::general_purpose::STANDARD.encode(&t.mark),
+                id: t.id.clone(),
+                cwd: t.cwd.as_deref().and_then(Path::to_str).map(str::to_string),
+                first: t.first_raw.clone(),
+                last: t.last_raw.clone(),
+                dirs,
+            });
+        }
+        Saved { dir: self.dir.to_string_lossy().into_owned(), folders, files }
+    }
+
+    /// The index `saved` describes. A file entry that does not add up (a folder number out of
+    /// range, a mark that is no base64) is left out: that file is read again.
+    pub(crate) fn from_saved(saved: Saved) -> Index {
+        use base64::Engine as _;
+        let folders: Vec<PathBuf> = saved.folders.into_iter().map(PathBuf::from).collect();
+        let mut files = HashMap::with_capacity(saved.files.len());
+        for f in saved.files {
+            let Ok(mark) = base64::engine::general_purpose::STANDARD.decode(&f.mark) else { continue };
+            let Some(dirs) = f
+                .dirs
+                .iter()
+                .map(|&(n, first, last, count)| Some((folders.get(n as usize)?.clone(), Seen { first, last, n: count })))
+                .collect::<Option<HashMap<PathBuf, Seen>>>()
+            else {
+                continue;
+            };
+            let t = Transcript {
+                len: f.len,
+                ino: f.ino,
+                offset: f.offset,
+                mark,
+                id: f.id,
+                cwd: f.cwd.map(PathBuf::from),
+                first_at: f.first.as_deref().and_then(parse_time),
+                last_at: f.last.as_deref().and_then(parse_time),
+                first_raw: f.first,
+                last_raw: f.last,
+                dirs,
+            };
+            files.insert(PathBuf::from(f.path), t);
+        }
+        Index { dir: PathBuf::from(saved.dir), files, pending: 0 }
+    }
+}
+
+/// Takes `saved` (the cache file's index, from before the daemon started) as the host's index,
+/// unless the host's index was refreshed already: then its own is newer.
+pub(crate) fn restore(saved: Saved) {
+    let mut index = INDEX.lock().unwrap_or_else(|e| e.into_inner());
+    if index.dir.as_os_str().is_empty() {
+        *index = Index::from_saved(saved);
+    }
+}
+
+/// The host's index as the cache file keeps it; `None` before its first refresh.
+pub(crate) fn saved() -> Option<Saved> {
+    let index = INDEX.lock().unwrap_or_else(|e| e.into_inner());
+    (!index.dir.as_os_str().is_empty()).then(|| index.to_saved())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,5 +1036,62 @@ mod tests {
         assert_eq!(index.pending, 3, "no time: nothing read");
         index.refresh(&dir, None, &HashSet::new(), Duration::from_secs(10));
         assert_eq!((index.pending, index.files.len()), (0, 3));
+    }
+
+    /// Bench: what reading omp's sessions costs a scan, on a real sessions folder (read only).
+    /// Release build:
+    /// `TF_BENCH_SESSIONS=$HOME/.omp/agent/sessions cargo test --release -p tf-hostd --lib index_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "bench"]
+    fn index_cost() {
+        let Some(dir) = std::env::var_os("TF_BENCH_SESSIONS").map(PathBuf::from) else {
+            eprintln!("TF_BENCH_SESSIONS is not set");
+            return;
+        };
+        let home = crate::paths::home_dir();
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let t = Instant::now();
+        let listed = list(&dir);
+        let bytes: u64 = listed.iter().map(|(_, m)| m.len()).sum();
+        println!("list: {} files, {:.2} GB, {:.0} ms", listed.len(), bytes as f64 / 1e9, ms(t));
+
+        // The floor: every byte read and split into lines, nothing looked at.
+        let t = Instant::now();
+        let (mut lines, mut parsed, mut parsed_bytes) = (0u64, 0u64, 0u64);
+        for (p, _) in &listed {
+            let Ok(data) = std::fs::read(p) else { continue };
+            for line in data.split(|b| *b == b'\n') {
+                lines += 1;
+                if line.len() <= LINE_MAX && (CWD.find(line).is_some() || PATH.find(line).is_some() || COMMAND.find(line).is_some()) {
+                    parsed += 1;
+                    parsed_bytes += line.len() as u64;
+                }
+            }
+        }
+        println!(
+            "read + split + key search: {:.0} ms; {lines} lines, {parsed} parsed as JSON ({:.2} GB)",
+            ms(t),
+            parsed_bytes as f64 / 1e9
+        );
+
+        let mut index = Index::default();
+        let t = Instant::now();
+        index.refresh(&dir, Some(&home), &HashSet::new(), Duration::from_secs(3600));
+        let cold = ms(t);
+        let dirs: usize = index.files.values().map(|t| t.dirs.len()).sum();
+        println!("cold refresh (no budget): {cold:.0} ms ({:.0} MB/s), {} files, {dirs} folders kept", bytes as f64 / 1e6 / (cold / 1e3), index.files.len());
+        let t = Instant::now();
+        index.refresh(&dir, Some(&home), &HashSet::new(), Duration::from_secs(3600));
+        println!("warm refresh (only what grew since): {:.0} ms", ms(t));
+        let roots: Vec<PathBuf> = index.files.values().filter_map(|t| t.cwd.clone()).collect::<HashSet<_>>().into_iter().take(100).collect();
+        let t = Instant::now();
+        let found = index.worked_in(&roots);
+        let facts = index.main_facts();
+        println!("worked_in({} folders) + main_facts ({} mains): {:.0} ms, {} owners found", roots.len(), facts.len(), ms(t), found.iter().map(Vec::len).sum::<usize>());
+
+        let mut fresh = Index::default();
+        let t = Instant::now();
+        fresh.refresh(&dir, Some(&home), &HashSet::new(), Duration::from_secs(15));
+        println!("first scan after a daemon start (15 s budget): {:.0} ms, {} of {} files left for later scans", ms(t), fresh.pending, listed.len());
     }
 }

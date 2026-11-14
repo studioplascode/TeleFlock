@@ -2,16 +2,20 @@
 //!
 //! - **Providers**: `omp auth-broker list --json` (what `omp login` offers, in its `/login` order),
 //!   cached per omp binary.
-//! - **Accounts**: omp's credential rows in `<agent dir>/agent.db`, read-only. Secrets never leave
-//!   SQLite: only the identity fields (`email`, `accountId`, `projectId`, `orgId`, `orgName`,
-//!   `enterpriseUrl`) are taken out of the credential JSON with `json_extract`. Quota windows and plans
-//!   come from `omp usage --json` (`limits.rs`), live sessions per account from omp's session pins.
+//! - **Accounts**: omp's credential rows in `<agent dir>/agent.db`, read-only (but for unlinking an
+//!   expired login, below). Secrets never leave SQLite: only the identity fields (`email`,
+//!   `accountId`, `projectId`, `orgId`, `orgName`, `enterpriseUrl`) are taken out of the credential
+//!   JSON with `json_extract`. Quota windows and plans come from `omp usage --json` (`limits.rs`),
+//!   live sessions per account from omp's session pins.
 //! - **Link**: `omp login <provider>` with piped stdio, driven as an [`AuthFlow`] (`authflow.rs`):
 //!   its printed URL / device code / questions become the flow, the user's answers and pastes go to
 //!   its stdin (every OAuth-code login in omp also reads a pasted code or redirect address there,
 //!   racing its loopback callback server). Its own attempt to open a browser on the host is
 //!   suppressed (a no-op `xdg-open` / `open` first on its `PATH`): the app opens the URL on the device.
-//! - **Unlink**: omp's own RPC `logout` (one credential), in a throwaway headless omp.
+//! - **Unlink**: omp's own RPC `logout` (one credential), in a throwaway headless omp. An expired
+//!   login is beyond it (omp's `logout` only finds active credentials, and a headless omp doesn't
+//!   start when nothing else is linked): its tombstones are deleted from `agent.db`, as omp itself
+//!   purges them when the identity is linked again.
 //! - **Prefer**: omp has no default account; `auth.accountPolicies[].priority` ranks an account first
 //!   for new sessions (after omp's hard safety checks). TeleFlock writes priority
 //!   [`PREFERRED_PRIORITY`] for the preferred account with a selector of its exact identity, after
@@ -574,20 +578,53 @@ pub async fn prefer(ctx: &Ctx, key: &str, preferred: bool) -> Result<AccountsSna
 // ───────────────────────────── unlink ─────────────────────────────
 
 pub async fn unlink(ctx: &Ctx, provider: &str, credential_id: i64) -> Result<AccountsSnapshot, ApiError> {
-    let bin = omp_bin().ok_or_else(no_omp)?;
-    let db = omp_agent_dir().join("agent.db");
-    let rows = tokio::task::spawn_blocking(move || read_credentials(&db)).await.map_err(|e| ApiError::new("internal", e.to_string()))?.map_err(|e| ApiError::new("io_error", e))?;
-    let row = rows.iter().find(|r| r.id == credential_id && r.provider == provider);
-    match row {
-        None => return Err(ApiError::new("not_found", "that account is not linked on this host anymore")),
-        Some(r) if r.disabled.is_some() => return Err(ApiError::new("invalid_params", "omp already stopped using this account").with_hint("Link it again to use it.")),
-        Some(_) => {}
-    }
-    rpc_logout(&bin, provider, credential_id, &[]).await?;
-    tracing::info!(provider, credential_id, "account unlinked");
+    remove_credential(omp_bin(), omp_agent_dir().join("agent.db"), provider, credential_id, &[]).await?;
     accounts_changed().await;
-    // The quota report was just dropped, so it is read again; omp's config didn't change.
+    // The quota report was just dropped (it lists expired logins too), so it is read again; omp's
+    // config didn't change.
     snapshot(ctx, false).await
+}
+
+/// Removes stored credential `credential_id` of `provider` from omp's store `db`: an active one
+/// through omp's RPC `logout`, an expired login (a disabled row) with [`forget_disabled`]. omp has
+/// nothing for those: its `logout` only finds active credentials ("Credential 3 is not stored for
+/// anthropic", omp 18.20), and a headless omp doesn't even start when nothing else is linked.
+/// `env` is for tests.
+async fn remove_credential(bin: Option<PathBuf>, db: PathBuf, provider: &str, credential_id: i64, env: &[(&str, &str)]) -> Result<(), ApiError> {
+    let store = db.clone();
+    let rows = tokio::task::spawn_blocking(move || read_credentials(&store)).await.map_err(|e| ApiError::new("internal", e.to_string()))?.map_err(|e| ApiError::new("io_error", e))?;
+    let row = rows.iter().find(|r| r.id == credential_id && r.provider == provider).ok_or_else(|| ApiError::new("not_found", "that account is not linked on this host anymore"))?;
+    if row.disabled.is_none() {
+        let bin = bin.ok_or_else(no_omp)?;
+        rpc_logout(&bin, provider, credential_id, env).await?;
+        tracing::info!(provider, credential_id, "account unlinked");
+        return Ok(());
+    }
+    let owner = provider.to_string();
+    let removed = tokio::task::spawn_blocking(move || forget_disabled(&db, &owner, credential_id))
+        .await
+        .map_err(|e| ApiError::new("internal", e.to_string()))?
+        .map_err(|e| ApiError::new("io_error", e))?;
+    tracing::info!(provider, credential_id, removed, "expired login unlinked");
+    Ok(())
+}
+
+/// Deletes an expired login from omp's store: its disabled row and every other tombstone of the
+/// same identity (the list shows one row for them all), as omp deletes an identity's tombstones
+/// when it is linked again (`sqlite-credential-store.ts`). Never an active row: those are omp's to
+/// remove. omp's own trigger counts the change (`auth_change_revision`), so running omps reload
+/// their store. Returns how many rows went.
+pub(crate) fn forget_disabled(db: &Path, provider: &str, credential_id: i64) -> Result<usize, String> {
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .map_err(|e| format!("agent.db: {e}"))?;
+    // omp's processes write it too: wait for their write lock rather than fail.
+    conn.busy_timeout(Duration::from_secs(5)).map_err(|e| format!("agent.db: {e}"))?;
+    conn.execute(
+        "DELETE FROM auth_credentials WHERE provider = ?1 AND disabled_cause IS NOT NULL
+           AND (id = ?2 OR identity_key = (SELECT identity_key FROM auth_credentials WHERE id = ?2 AND provider = ?1))",
+        rusqlite::params![provider, credential_id],
+    )
+    .map_err(|e| format!("agent.db: {e}"))
 }
 
 /// What a linked or unlinked credential changes elsewhere: the quota report, and the models omp
@@ -1583,6 +1620,29 @@ mod tests {
         assert_eq!(out.iter().map(|a| (a.credential_id, a.disabled)).collect::<Vec<_>>(), [(Some(9), false), (Some(4), false)]);
     }
 
+    #[test]
+    fn forgets_an_expired_login_and_nothing_else() {
+        let td = tempfile::tempdir().unwrap();
+        let db = fixture_db(td.path());
+        // old@example.com expired, was linked again and expired again: #3 is the older tombstone.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(r#"INSERT INTO auth_credentials VALUES (10, 'anthropic', 'oauth', '{"access":"SECRET-F","refresh":"SECRET-FR","email":"old@example.com","orgId":"org-o"}', 'oauth refresh failed: invalid_grant', 'email:old@example.com|org:org-o', 1650000000, 1650000000);"#)
+            .unwrap();
+        let expired = |db: &Path| -> Vec<Option<i64>> {
+            merge(&read_credentials(db).unwrap(), &[], &[], &HashMap::new(), &[], &providers(), false).iter().filter(|a| a.disabled).map(|a| a.credential_id).collect()
+        };
+        assert_eq!(expired(&db), [Some(10)], "one Re-link row for the account");
+        // An active credential, or one asked for under another provider, stays.
+        assert_eq!(forget_disabled(&db, "anthropic", 1).unwrap(), 0);
+        assert_eq!(forget_disabled(&db, "deepseek", 10).unwrap(), 0);
+        assert_eq!(forget_disabled(&db, "anthropic", 10).unwrap(), 2, "the expiry shown and the older one it stands for");
+        assert_eq!(read_credentials(&db).unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2, 4, 5, 6, 7], "other accounts and tombstones stay");
+        assert!(expired(&db).is_empty(), "nothing comes back in its place");
+        let mcp: i64 = rusqlite::Connection::open(&db).unwrap().query_row("SELECT COUNT(*) FROM auth_credentials WHERE provider LIKE 'mcp_oauth%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(mcp, 2, "MCP servers' sign-ins in the same table stay");
+    }
+
     // ── the link flow, against a scripted omp (a shell script: unix only) ──
 
     /// A stand-in `omp` (`login <provider>`): prints what omp prints, reads answers.
@@ -1824,5 +1884,46 @@ exit 1"#,
         // Nothing said: its exit code.
         let bin = fake_omp(&dir("silent"), "exit 3");
         assert_eq!(rpc_logout(&bin, "anthropic", 7, &[]).await.unwrap_err().message, "omp exited with code 3 without answering the logout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unlinks_expired_logins_itself_and_active_ones_through_omp() {
+        let td = tempfile::tempdir().unwrap();
+        let db = fixture_db(td.path());
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(r#"INSERT INTO auth_credentials VALUES (11, 'anthropic', 'oauth', '{"access":"SECRET-H","email":"late@example.com","orgId":"org-l"}', 'oauth refresh failed: invalid_grant', 'email:late@example.com|org:org-l', 1700000700, 1700000700);"#)
+            .unwrap();
+        let dir = |name: &str| {
+            let d = td.path().join(name);
+            std::fs::create_dir(&d).unwrap();
+            d
+        };
+        let stored = |id: i64| read_credentials(&db).unwrap().into_iter().find(|r| r.id == id);
+        // omp 18.20's answer for a disabled credential: its `logout` only finds active ones.
+        let asked = td.path().join("asked");
+        let refusing = fake_omp(
+            &dir("refusing"),
+            &format!(r#"touch {}; read -r line; echo '{{"id":"tf-logout","type":"response","command":"logout","success":false,"error":"Credential 3 is not stored for anthropic"}}'"#, asked.display()),
+        );
+        remove_credential(Some(refusing.clone()), db.clone(), "anthropic", 3, &[]).await.unwrap();
+        assert!(!asked.exists(), "omp is not asked to log out an expired login");
+        assert_eq!(stored(3), None, "the expired login is gone");
+        assert_eq!(remove_credential(Some(refusing), db.clone(), "anthropic", 3, &[]).await.unwrap_err().code, "not_found");
+        // Nor is omp needed (where every login expired, a headless omp doesn't start).
+        remove_credential(None, db.clone(), "anthropic", 11, &[]).await.unwrap();
+        assert_eq!(stored(11), None);
+        // An active credential is omp's to remove (the stand-in only answers): hostd deletes nothing.
+        let log = td.path().join("request");
+        let answering = fake_omp(
+            &dir("answering"),
+            &format!(r#"read -r line; echo "$line" > {}; echo '{{"id":"tf-logout","type":"response","command":"logout","success":true,"data":{{}}}}'"#, log.display()),
+        );
+        remove_credential(Some(answering), db.clone(), "anthropic", 1, &[]).await.unwrap();
+        let req: Value = serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+        assert_eq!(req["credentialId"], 1);
+        assert!(stored(1).is_some_and(|r| r.disabled.is_none()), "an active row is never deleted here");
+        assert_eq!(remove_credential(None, db.clone(), "anthropic", 2, &[]).await.unwrap_err().code, "omp_error", "no omp, no logout");
     }
 }

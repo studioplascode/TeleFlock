@@ -477,6 +477,8 @@ fn progress_agent(p: &Value) -> Subagent {
             .map(str::to_owned)
             .or_else(|| arr(p, "recentOutput").last().and_then(Value::as_str).map(|o| clip(o, 120))),
         completion_pct: completion_pct(p, status),
+        // When the estimate changed: the replica knows (`Replica::tool_view`).
+        completion_at: None,
         context: subagent_context(p),
         tool_count: u(p, "toolCount").map(|n| n as u32),
         parent_id: None,
@@ -484,13 +486,18 @@ fn progress_agent(p: &Value) -> Subagent {
 }
 
 /// omp `AgentProgress.completionPercent`: the subagent's own completion estimate from the
-/// completion probe (omp `task/completion-probe.ts`). The TUI shows it only while the row is live
+/// completion probe (omp `task/completion-probe.ts`), 0..=100.
+pub(super) fn completion_estimate(p: &Value) -> Option<f32> {
+    f(p, "completionPercent").filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 100.0) as f32)
+}
+
+/// [`completion_estimate`] as shown: omp's TUI shows it only while the row is live
 /// (`pi-tui/tools/agent-tree.ts` `renderAgentTreeRow`), so it is dropped once the subagent stops.
 pub(super) fn completion_pct(p: &Value, status: SubagentStatus) -> Option<f32> {
     if status != SubagentStatus::Running {
         return None;
     }
-    f(p, "completionPercent").filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 100.0) as f32)
+    completion_estimate(p)
 }
 
 /// omp `AgentProgress.contextTokens` / `contextWindow`: the subagent's context-window usage,

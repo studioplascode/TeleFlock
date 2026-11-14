@@ -46,6 +46,9 @@ wire_struct! {
         /// asks the running subagent periodically (first after ~2 min); absent until it answers and
         /// once the subagent stops running. omp's TUI shows it as `· 40%` on the task row.
         pub completion_pct: Option<f32>,
+        /// When `completion_pct` last changed (host time): with `started_at` the basis of the
+        /// subagent's time-left estimate. Absent with `completion_pct` (and from hosts < 0.9.5).
+        pub completion_at: Option<Millis>,
         /// The subagent's own context-window usage (omp's TUI: `· 2.4%/272K`).
         pub context: Option<ContextUsage>,
         pub tool_count: Option<u32>,
@@ -459,7 +462,9 @@ wire_struct! {
         /// A progress note: the sender promises a reply later.
         pub progress: bool,
         /// Per recipient: `pending` (in flight), `injected` / `woken` / `revived` (omp's delivery
-        /// outcomes), `received` (the recipient's transcript has it), `failed` (with `error`).
+        /// outcomes; `injected`: queued for a busy recipient, which takes it in when its current
+        /// step ends), `received` (the recipient's transcript has it; tf-hostd ≥ 0.9.5 also turns
+        /// `injected` into it), `failed` (with `error`).
         pub receipts: Vec<IrcReceipt>,
         /// Log revision of its last change (`session.agentChat {after}`).
         pub rev: u64,

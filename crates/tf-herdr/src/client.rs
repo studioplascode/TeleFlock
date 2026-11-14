@@ -262,12 +262,15 @@ impl HerdrClient {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            // SAFETY: setsid is async-signal-safe; it detaches the server from our session
-            // and controlling terminal so it survives us (herdr.md §2: setsid + </dev/null).
-            // systemd-run execs the server in place, so the new session carries over.
+            // SAFETY: setsid and setpriority are async-signal-safe; setsid detaches the server
+            // from our session and controlling terminal so it survives us (herdr.md §2: setsid +
+            // </dev/null). The server and its panes are the agents' work: they run at normal
+            // priority, whatever tf-hostd runs at (`durable::drop_raised_nice`). systemd-run execs
+            // the server in place, so the new session and the priority carry over.
             unsafe {
                 cmd.pre_exec(|| {
                     libc::setsid();
+                    crate::durable::drop_raised_nice();
                     Ok(())
                 });
             }
@@ -485,4 +488,72 @@ pub fn binary_candidates() -> Vec<PathBuf> {
 /// First existing, executable herdr binary.
 pub fn locate_binary() -> Option<PathBuf> {
     binary_candidates().into_iter().find(|p| is_executable(p))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// This thread's nice value (Linux keeps one per thread; a child inherits its forking thread's).
+    fn thread_nice() -> i32 {
+        let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
+        let after_comm = &stat[stat.rfind(')').unwrap() + 2..];
+        after_comm.split_whitespace().nth(16).unwrap().parse().unwrap()
+    }
+
+    fn set_thread_nice(nice: i32) -> bool {
+        // SAFETY: gettid has no preconditions; setpriority changes this thread only.
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, nice) == 0 }
+    }
+
+    /// A server TeleFlock starts runs at normal priority even when the daemon starting it runs
+    /// above normal (tf-hostd raises itself so the host stays responsive): its panes are the
+    /// agents' work. A priority lowered on purpose stays lowered.
+    #[tokio::test]
+    async fn a_started_server_never_inherits_a_raised_priority() {
+        let dir = std::env::temp_dir().join(format!("tf-herdr-nice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("herdr");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = dir.join(".herdr.writing");
+            // Records the nice value it runs at next to itself; `[--session S] server` is ignored.
+            std::fs::write(&tmp, "#!/bin/sh\ncut -d' ' -f19 /proc/$$/stat > \"$0.nice\"\n").unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::rename(&tmp, &script).unwrap();
+        }
+        let opts = DiscoverOptions { bin: Some(script.clone()), socket: Some(dir.join("none.sock")), ..Default::default() };
+        let client = HerdrClient::discover_with(Some("tf-test"), opts).await.unwrap();
+        let before = thread_nice();
+        let started_at = |parent: i32| -> Option<String> {
+            if !set_thread_nice(parent) {
+                return None;
+            }
+            let out = script.with_extension("nice");
+            let _ = std::fs::remove_file(&out);
+            // Another test's child may still hold the new script open for writing (ETXTBSY).
+            let mut tries = 0;
+            let mut child = loop {
+                match client.spawn_server(None, &crate::lifecycle::ServerLaunch::default()) {
+                    Ok(c) => break c,
+                    Err(e) if tries < 100 => {
+                        tries += 1;
+                        eprintln!("retrying the spawn: {e}");
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            assert!(child.wait().unwrap().success());
+            Some(std::fs::read_to_string(&out).unwrap().trim().to_string())
+        };
+        // Raising this thread needs root (CAP_SYS_NICE); without it only the lowered case runs.
+        match started_at(-5) {
+            Some(nice) => assert_eq!(nice, "0", "a raised daemon starts herdr at normal priority"),
+            None => eprintln!("not permitted to raise a thread's priority here: only the lowered case runs"),
+        }
+        assert_eq!(started_at(5).as_deref(), Some("5"), "a lowered priority is kept");
+        set_thread_nice(before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

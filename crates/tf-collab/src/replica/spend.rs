@@ -25,14 +25,23 @@
 //! stream nowhere a guest can see, so each of their finished replies is replayed at its real
 //! decode rate (`usage.output` over `duration − ttft`) from the moment tf-hostd reads it:
 //! the area under the sparkline is exact, its timing one reply late.
+//!
+//! **By model.** Each spender's figure is also split by the model that served it ([`ByModel`],
+//! `CostSplit.models` / `TpsSplit.models`). Assistant turns and `model_usage` calls name theirs
+//! (`model`, `provider`); a subagent's progress and its `task` result name the one it ran on
+//! (`resolvedModelIdentity`). The subagents' split comes from the source that won the `max` (the
+//! next one with a split when it has none), scaled to the figure. Throughput goes to the replayed
+//! reply's model and, for the main agent, to the model of the message it streams. Each model's
+//! part is added up like the totals (calls in file order, transcripts in path order, the main
+//! session's turns and its journal's side calls apart), so a rebuilt replica splits the same way.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
-use tf_proto::{Millis, PresentedArtifact};
+use tf_proto::{Millis, ModelShare, PresentedArtifact, Spender};
 
 use super::subagents::{self, Outcome, TailTurn};
-use super::util::{b, f, s, u};
+use super::util::{b, f, non_empty, s, u};
 
 /// Replies that finished longer ago than this are history, not throughput.
 const PLAYBACK_MAX_AGE_MS: i64 = 60_000;
@@ -50,7 +59,14 @@ pub struct Spend {
 }
 
 impl Spend {
-    /// Adds one omp `Usage` record (`{input, output, cacheRead, cacheWrite, cost: {total}}`).
+    /// One omp `Usage` record (`{input, output, cacheRead, cacheWrite, cost: {total}}`).
+    pub fn of_usage(usage: &Value) -> Spend {
+        let mut spend = Spend::default();
+        spend.add_usage(usage);
+        spend
+    }
+
+    /// Adds one omp `Usage` record.
     pub fn add_usage(&mut self, usage: &Value) {
         self.input += u(usage, "input").unwrap_or(0);
         self.output += u(usage, "output").unwrap_or(0);
@@ -72,6 +88,98 @@ impl Spend {
 
     pub fn is_empty(&self) -> bool {
         *self == Spend::default()
+    }
+}
+
+/// The model that served a call, as omp names it: its id (`claude-opus-4-5`) and provider.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ModelKey {
+    pub model: String,
+    pub provider: Option<String>,
+}
+
+impl ModelKey {
+    /// An assistant message's or a `model_usage` entry's `model` and `provider`.
+    pub(super) fn of_call(v: &Value) -> Option<ModelKey> {
+        let model = non_empty(v, "model")?;
+        Some(ModelKey { model: model.to_owned(), provider: non_empty(v, "provider").map(str::to_owned) })
+    }
+
+    /// omp's session model (`state.model`: `{provider, id}`).
+    pub(super) fn of_session(v: &Value) -> Option<ModelKey> {
+        let id = non_empty(v, "id")?;
+        Some(ModelKey { model: id.to_owned(), provider: non_empty(v, "provider").map(str::to_owned) })
+    }
+
+    /// The model a subagent ran on, as its progress and its `task` result name it:
+    /// `resolvedModelIdentity` (`openai-codex/gpt-6-luna`), else `resolvedModel` without the
+    /// thinking level omp appends to it (`openai-codex/gpt-6-luna:low`).
+    pub(super) fn of_subagent(v: &Value) -> Option<ModelKey> {
+        if let Some(identity) = non_empty(v, "resolvedModelIdentity") {
+            return Some(ModelKey::parse(identity));
+        }
+        let selector = non_empty(v, "resolvedModel")?;
+        let identity = match selector.rsplit_once(':') {
+            Some((identity, level)) if super::parse_thinking(level).is_some() => identity,
+            _ => selector,
+        };
+        Some(ModelKey::parse(identity))
+    }
+
+    /// `provider/model` (the model id may hold more `/`: `openrouter/qwen/qwen3`), or a bare id.
+    fn parse(identity: &str) -> ModelKey {
+        match identity.split_once('/') {
+            Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
+                ModelKey { model: model.to_owned(), provider: Some(provider.to_owned()) }
+            }
+            _ => ModelKey { model: identity.to_owned(), provider: None },
+        }
+    }
+}
+
+/// One figure (USD, output tok/s) by model. Each model's part is added up in the order its
+/// calls come, like the totals (see "Stable sums").
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct ByModel(BTreeMap<ModelKey, f64>);
+
+impl ByModel {
+    /// Adds `value` to `model`'s part. A call that names no model, and a value that is not a
+    /// positive number, add nothing.
+    pub fn add(&mut self, model: Option<&ModelKey>, value: f64) {
+        if let Some(model) = model.filter(|_| value > 0.0 && value.is_finite()) {
+            *self.0.entry(model.clone()).or_default() += value;
+        }
+    }
+
+    /// Adds `other`'s parts, model by model.
+    pub fn merge(&mut self, other: &ByModel) {
+        for (model, value) in &other.0 {
+            *self.0.entry(model.clone()).or_default() += value;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// `spender`'s `figure` in the proportions of these parts, the largest first (equal ones by
+    /// model); empty while no part is known. The shares add up to the figure also where the parts
+    /// fall short of it (calls that named no model, a subagent figure another source won): what
+    /// no model claims is spread over the known ones.
+    pub fn shares(&self, spender: Spender, figure: f64) -> Vec<ModelShare> {
+        let known: f64 = self.0.values().sum();
+        if !(figure > 0.0 && known > 0.0) {
+            return Vec::new();
+        }
+        let scale = figure / known;
+        let mut shares: Vec<ModelShare> = self
+            .0
+            .iter()
+            .map(|(k, v)| ModelShare { spender, model: k.model.clone(), provider: k.provider.clone(), value: v * scale })
+            .collect();
+        // Stable: equal shares stay in model order.
+        shares.sort_by(|a, b| b.value.total_cmp(&a.value));
+        shares
     }
 }
 
@@ -104,6 +212,8 @@ pub struct ArtifactCall {
     pub ended_at: Option<Millis>,
     /// How long its output streamed (`duration − ttft`).
     pub decode_ms: Option<i64>,
+    /// The model that served it (`model`, `provider`), when the line names one.
+    pub model: Option<ModelKey>,
 }
 
 impl ArtifactCall {
@@ -117,19 +227,17 @@ impl ArtifactCall {
                 if s(msg, "role")? != "assistant" {
                     return None;
                 }
-                let mut spend = Spend::default();
-                spend.add_usage(msg.get("usage")?);
+                let spend = Spend::of_usage(msg.get("usage")?);
                 let start = msg.get("timestamp").and_then(Value::as_f64);
                 let duration = f(msg, "duration").filter(|d| d.is_finite() && *d > 0.0);
                 let ttft = f(msg, "ttft").filter(|t| t.is_finite() && *t >= 0.0).unwrap_or(0.0);
                 let ended_at = start.zip(duration).map(|(t, d)| (t + d) as Millis);
                 let decode_ms = duration.map(|d| (if ttft < d { d - ttft } else { d }) as i64);
-                Some(ArtifactCall { kind, spend, ended_at, decode_ms })
+                Some(ArtifactCall { kind, spend, ended_at, decode_ms, model: ModelKey::of_call(msg) })
             }
             "model_usage" if kind == ArtifactKind::Subagent => {
-                let mut spend = Spend::default();
-                spend.add_usage(entry.get("usage")?);
-                Some(ArtifactCall { kind, spend, ended_at: None, decode_ms: None })
+                let spend = Spend::of_usage(entry.get("usage")?);
+                Some(ArtifactCall { kind, spend, ended_at: None, decode_ms: None, model: ModelKey::of_call(entry) })
             }
             _ => None,
         }
@@ -146,6 +254,8 @@ struct FileTail {
     header: Option<bool>,
     /// What the transcript's calls billed, added up in file order.
     spend: Spend,
+    /// The same by model.
+    models: ByModel,
     /// How its subagents' runs ended, as its records say (a parent's transcript records the end
     /// of the children it started); a later record of an agent replaces an earlier one.
     outcomes: BTreeMap<String, Outcome>,
@@ -155,7 +265,16 @@ struct FileTail {
 
 impl FileTail {
     fn new(kind: ArtifactKind) -> FileTail {
-        FileTail { kind, offset: 0, carry: Vec::new(), header: None, spend: Spend::default(), outcomes: BTreeMap::new(), turn: TailTurn::default() }
+        FileTail {
+            kind,
+            offset: 0,
+            carry: Vec::new(),
+            header: None,
+            spend: Spend::default(),
+            models: ByModel::default(),
+            outcomes: BTreeMap::new(),
+            turn: TailTurn::default(),
+        }
     }
 }
 
@@ -206,6 +325,7 @@ impl ArtifactLedger {
             }
             if let Some(call) = ArtifactCall::parse(kind, &entry) {
                 tail.spend.add(&call.spend);
+                tail.models.add(call.model.as_ref(), call.spend.usd);
                 calls.push(call);
             }
             if self.live
@@ -277,6 +397,16 @@ impl ArtifactLedger {
         }
         sum
     }
+
+    /// [`Self::advisor`] or [`Self::subagents`] by model: each transcript's parts, added up in
+    /// path order.
+    pub(super) fn models(&self, kind: ArtifactKind) -> ByModel {
+        let mut all = ByModel::default();
+        for t in self.files.values().filter(|t| t.kind == kind) {
+            all.merge(&t.models);
+        }
+        all
+    }
 }
 
 /// A finished subagent/advisor reply replayed at its decode rate.
@@ -287,6 +417,7 @@ pub(super) struct Playback {
     pub end: Millis,
     /// Output tokens per second.
     pub rate: f32,
+    pub model: Option<ModelKey>,
 }
 
 impl Playback {
@@ -297,7 +428,7 @@ impl Playback {
             return None;
         }
         let ms = call.decode_ms?.clamp(PLAYBACK_MIN_MS, PLAYBACK_MAX_MS);
-        Some(Playback { kind: call.kind, start: now, end: now + ms, rate: call.spend.output as f32 * 1000.0 / ms as f32 })
+        Some(Playback { kind: call.kind, start: now, end: now + ms, rate: call.spend.output as f32 * 1000.0 / ms as f32, model: call.model.clone() })
     }
 }
 
@@ -326,6 +457,19 @@ mod tests {
     fn assistant(cost: f64, output: u64, ts: i64, duration: f64, ttft: f64) -> Value {
         json!({"type": "message", "id": "x", "message": {"role": "assistant", "timestamp": ts, "duration": duration, "ttft": ttft,
             "usage": {"input": 100, "output": output, "cacheRead": 10, "cacheWrite": 0, "cost": {"total": cost}}}})
+    }
+
+    /// `entry` (an assistant message line or a `model_usage` entry) as served by `identity` (`provider/model`).
+    fn served(mut entry: Value, identity: &str) -> Value {
+        let (provider, model) = identity.split_once('/').unwrap();
+        let call = if entry["type"] == "message" { &mut entry["message"] } else { &mut entry };
+        call["provider"] = provider.into();
+        call["model"] = model.into();
+        entry
+    }
+
+    fn key(identity: &str) -> ModelKey {
+        ModelKey::parse(identity)
     }
 
     #[test]
@@ -362,33 +506,87 @@ mod tests {
     /// The totals are the same, bit for bit, however the lines arrive: while omp writes, a scan
     /// reads a reply of one transcript, then of another; after a tf-hostd restart one scan reads
     /// each transcript whole, in the order the directory lists them. Added up as they arrived,
-    /// these costs (real subagent replies) differ in the last digit between the two.
+    /// these costs (real subagent replies) differ in the last digit between the two, the total
+    /// and the part of the model two of the transcripts share alike.
     #[test]
     fn totals_do_not_depend_on_the_order_lines_arrive() {
         let header = line(json!({"type": "session", "id": "s"}));
-        let files: [(&str, [f64; 2]); 3] = [
-            ("Scout.jsonl", [2.8100000000000002e-05, 0.0007311]),
-            ("Probe.jsonl", [2.82e-05, 0.00010804]),
-            ("Scout/Scout.Helper.jsonl", [0.0006979000000000001, 3e-05]),
+        let files: [(&str, &str, [f64; 2]); 3] = [
+            ("Scout.jsonl", "anthropic/claude-sonnet-5", [2.8100000000000002e-05, 0.0007311]),
+            ("Probe.jsonl", "openai-codex/gpt-6-luna", [2.82e-05, 0.00010804]),
+            ("Scout/Scout.Helper.jsonl", "anthropic/claude-sonnet-5", [0.0006979000000000001, 3e-05]),
         ];
-        let reply = |usd: f64| line(assistant(usd, 1, 0, 1_000.0, 0.0));
+        let reply = |usd: f64, model: &str| line(served(assistant(usd, 1, 0, 1_000.0, 0.0), model));
         let mut live = ArtifactLedger::default();
-        for (rel, _) in &files {
+        for (rel, ..) in &files {
             live.ingest(rel, &header);
         }
         for i in 0..2 {
-            for (rel, costs) in &files {
-                live.ingest(rel, &reply(costs[i]));
+            for (rel, model, costs) in &files {
+                live.ingest(rel, &reply(costs[i], model));
             }
         }
         let mut rebuilt = ArtifactLedger::default();
-        for (rel, costs) in files.iter().rev() {
-            rebuilt.ingest(rel, &[header.clone(), reply(costs[0]), reply(costs[1])].concat());
+        for (rel, model, costs) in files.iter().rev() {
+            rebuilt.ingest(rel, &[header.clone(), reply(costs[0], model), reply(costs[1], model)].concat());
         }
         assert_eq!(live.subagents().usd.to_bits(), rebuilt.subagents().usd.to_bits(), "{} vs {}", live.subagents().usd, rebuilt.subagents().usd);
         assert_eq!(live.subagents(), rebuilt.subagents());
-        let sum: f64 = files.iter().flat_map(|(_, c)| c).sum();
+        let sum: f64 = files.iter().flat_map(|(.., c)| c).sum();
         assert!((live.subagents().usd - sum).abs() < 1e-15);
+
+        let (by_model, again) = (live.models(ArtifactKind::Subagent), rebuilt.models(ArtifactKind::Subagent));
+        assert_eq!(by_model, again);
+        let sonnet = by_model.0[&key("anthropic/claude-sonnet-5")];
+        let as_they_came: f64 = 2.8100000000000002e-05 + 0.0006979000000000001 + 0.0007311 + 3e-05;
+        assert_ne!(sonnet.to_bits(), as_they_came.to_bits(), "the costs tell the two orders apart");
+        assert_eq!(sonnet.to_bits(), ((2.8100000000000002e-05 + 0.0007311) + (0.0006979000000000001 + 3e-05_f64)).to_bits(), "transcripts in path order");
+        assert_eq!(by_model.0[&key("openai-codex/gpt-6-luna")], 2.82e-05 + 0.00010804);
+        assert!(live.models(ArtifactKind::Advisor).is_empty());
+    }
+
+    #[test]
+    fn model_keys() {
+        let call = json!({"type": "model_usage", "provider": "openai-codex", "model": "gpt-6-luna", "usage": {}});
+        assert_eq!(ModelKey::of_call(&call), Some(key("openai-codex/gpt-6-luna")));
+        assert_eq!(ModelKey::of_call(&json!({"model": " ", "provider": "x"})), None);
+        assert_eq!(ModelKey::of_session(&json!({"provider": "anthropic", "id": "claude-opus-5", "name": "Opus 5"})), Some(key("anthropic/claude-opus-5")));
+        // A subagent: omp's identity, else the selector it resolved without the thinking level.
+        let both = json!({"resolvedModelIdentity": "openai-codex/gpt-6-luna", "resolvedModel": "openai-codex/gpt-6-luna:low"});
+        assert_eq!(ModelKey::of_subagent(&both), Some(key("openai-codex/gpt-6-luna")));
+        assert_eq!(ModelKey::of_subagent(&json!({"resolvedModel": "anthropic/claude-sonnet-5:high"})), Some(key("anthropic/claude-sonnet-5")));
+        // A `:` that names no thinking level belongs to the id, and so does every `/` after the provider.
+        let routed = ModelKey::of_subagent(&json!({"resolvedModel": "openrouter/qwen/qwen3-coder:free"})).unwrap();
+        assert_eq!((routed.model.as_str(), routed.provider.as_deref()), ("qwen/qwen3-coder:free", Some("openrouter")));
+        assert_eq!(ModelKey::of_subagent(&json!({"resolvedModel": "gpt-5.5"})), Some(ModelKey { model: "gpt-5.5".into(), provider: None }));
+        assert_eq!(ModelKey::of_subagent(&json!({"modelRole": "task"})), None, "not resolved yet");
+    }
+
+    #[test]
+    fn shares_add_up_to_the_figure_largest_first() {
+        let (opus, sonnet, luna) = (key("anthropic/claude-opus-5"), key("anthropic/claude-sonnet-5"), key("openai-codex/gpt-6-luna"));
+        let mut m = ByModel::default();
+        m.add(Some(&luna), 0.25);
+        m.add(Some(&sonnet), 0.75);
+        m.add(Some(&opus), 0.5);
+        m.add(Some(&luna), 0.25);
+        m.add(None, 9.0);
+        m.add(Some(&opus), f64::NAN);
+        m.add(Some(&opus), -1.0);
+        let shares = m.shares(Spender::Main, 1.75);
+        let parts: Vec<(&str, Option<&str>, f64)> = shares.iter().map(|s| (s.model.as_str(), s.provider.as_deref(), s.value)).collect();
+        assert_eq!(
+            parts,
+            [("claude-sonnet-5", Some("anthropic"), 0.75), ("claude-opus-5", Some("anthropic"), 0.5), ("gpt-6-luna", Some("openai-codex"), 0.5)],
+            "the largest first, equal ones by model; calls without a model and non-amounts add nothing"
+        );
+        assert!(shares.iter().all(|s| s.spender == Spender::Main));
+        // A figure the parts fall short of (calls that named no model, another source's subagent
+        // total) is spread over the models in proportion.
+        let shares = m.shares(Spender::Subagents, 3.5);
+        assert_eq!(shares.iter().map(|s| s.value).collect::<Vec<_>>(), [1.5, 1.0, 1.0]);
+        assert!(m.shares(Spender::Main, 0.0).is_empty());
+        assert!(ByModel::default().shares(Spender::Main, 1.0).is_empty(), "no model known: no split");
     }
 
     /// A subagent's `present` results are the session's presented documents, but only those its
@@ -422,11 +620,213 @@ mod tests {
             spend: Spend { output: 100, ..Spend::default() },
             ended_at: Some(10_000),
             decode_ms: Some(2_000),
+            model: Some(key("openai/gpt-5.5")),
         };
         let p = Playback::of(&call, 11_000).unwrap();
         assert_eq!((p.start, p.end), (11_000, 13_000));
         assert!((p.rate - 50.0).abs() < 1e-3);
+        assert_eq!(p.model, call.model);
         assert!(Playback::of(&call, 10_000 + PLAYBACK_MAX_AGE_MS + 1).is_none());
         assert!(Playback::of(&ArtifactCall { ended_at: None, ..call.clone() }, 11_000).is_none());
+    }
+
+    mod replica {
+        use serde_json::{Value, json};
+        use tf_proto::{CostSplit, ModelShare, Spender};
+
+        use super::{assistant, line, served};
+        use crate::frame::{HostFrame, Welcome};
+        use crate::guest::{GuestEvent, Snapshot};
+        use crate::replica::{ArtifactLedger, Replica};
+
+        const NOW: i64 = 1_792_000_000_000;
+
+        fn snapshot(state: Value, entries: Vec<Value>) -> GuestEvent {
+            let welcome: Welcome = serde_json::from_value(json!({
+                "proto": 1, "header": { "id": "s1", "timestamp": "2026-10-21T17:00:00.000Z", "cwd": "/w" }, "state": state,
+                "agents": [], "entryCount": entries.len(),
+            }))
+            .unwrap();
+            GuestEvent::Snapshot(Snapshot { welcome, entries, resync: false })
+        }
+
+        fn frame(r: &mut Replica, v: Value) {
+            r.apply(&GuestEvent::Frame(HostFrame::from_value(v)), NOW);
+        }
+
+        /// A main-session turn that cost `usd`, served by `identity`.
+        fn turn(id: &str, at: i64, identity: &str, usd: f64) -> Value {
+            let msg = json!({ "type": "message", "id": id, "timestamp": "2026-10-21T17:01:00.000Z", "message": { "role": "assistant",
+                "content": [{ "type": "text", "text": "ok" }], "stopReason": "stop", "timestamp": at,
+                "usage": { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "cost": { "total": usd } } } });
+            served(msg, identity)
+        }
+
+        fn side_call(identity: &str, usd: f64) -> Value {
+            served(json!({ "type": "model_usage", "id": "u1", "purpose": "title", "usage": { "output": 3, "cost": { "total": usd } } }), identity)
+        }
+
+        fn progress(r: &mut Replica, id: &str, model: Value, usd: f64) {
+            let mut p = json!({ "id": id, "status": "running", "cost": usd });
+            p.as_object_mut().unwrap().extend(model.as_object().unwrap().clone());
+            frame(r, json!({ "t": "bus", "channel": "task:subagent:progress", "data": { "progress": p } }));
+        }
+
+        fn task_result(id: &str, usd: f64, results: Value) -> Value {
+            json!({ "type": "message", "id": id, "message": { "role": "toolResult", "toolCallId": id, "toolName": "task", "isError": false,
+                "content": [{ "type": "text", "text": "done" }], "details": { "results": results, "usage": { "output": 10, "cost": { "total": usd } } } } })
+        }
+
+        fn of(split: &CostSplit, spender: Spender) -> Vec<(String, f64)> {
+            split.models.iter().filter(|m| m.spender == spender).map(|m| (m.model.clone(), m.value)).collect()
+        }
+
+        fn adds_up(split: &CostSplit) {
+            for (spender, figure) in [(Spender::Main, split.main), (Spender::Subagents, split.subagents), (Spender::Advisor, split.advisor)] {
+                let parts = of(split, spender);
+                if !parts.is_empty() {
+                    let sum: f64 = parts.iter().map(|p| p.1).sum();
+                    assert!((sum - figure).abs() <= 1e-12 * figure, "{spender:?}: {parts:?} add up to {sum}, not {figure}");
+                }
+            }
+        }
+
+        fn close(parts: &[(String, f64)], want: &[(&str, f64)]) -> bool {
+            parts.len() == want.len() && parts.iter().zip(want).all(|(p, w)| p.0 == w.0 && (p.1 - w.1).abs() < 1e-12)
+        }
+
+        /// The main agent's turns and its side calls (judges, titles) by the model that served
+        /// each, the same bit for bit live and rebuilt. Live, the journal's side call is read
+        /// between the turns; a rebuild reads the journal first: added up as they came into one
+        /// sum, Luna would bill (0.1 + 0.2) + 0.0006954 live and (0.0006954 + 0.1) + 0.2 rebuilt.
+        #[test]
+        fn main_spend_by_model_is_the_same_live_and_rebuilt() {
+            let turns = [
+                turn("e1", NOW - 40_000, "anthropic/claude-opus-5", 0.4),
+                turn("e2", NOW - 30_000, "openai-codex/gpt-6-luna", 0.1),
+                turn("e3", NOW - 20_000, "openai-codex/gpt-6-luna", 0.2),
+                turn("e4", NOW - 10_000, "anthropic/claude-opus-5", 0.35),
+            ];
+            let side = side_call("openai-codex/gpt-6-luna", 0.0006954);
+            let mut live = Replica::new("Main");
+            live.apply(&snapshot(json!({}), vec![]), NOW);
+            for (i, entry) in turns.iter().enumerate() {
+                frame(&mut live, json!({ "t": "entry", "entry": entry }));
+                if i == 2 {
+                    live.apply_journal_entries(std::slice::from_ref(&side), 100);
+                }
+            }
+            let mut rebuilt = Replica::new("Main");
+            rebuilt.apply_journal_entries(&[side], 100);
+            rebuilt.apply(&snapshot(json!({}), turns.to_vec()), NOW);
+
+            let cost = live.usage().unwrap();
+            assert_eq!(rebuilt.usage().as_ref(), Some(&cost), "live and rebuilt bill the same, model by model");
+            let split = cost.split.unwrap();
+            assert!(close(&of(&split, Spender::Main), &[("claude-opus-5", 0.75), ("gpt-6-luna", 0.3006954)]), "{:?}", split.models);
+            assert_eq!(split.models[0].provider.as_deref(), Some("anthropic"));
+            adds_up(&split);
+            assert_eq!(live.meta().cost.as_ref().and_then(|c| c.split.as_ref()), Some(&split), "meta carries the split");
+        }
+
+        /// The subagents bill `max(task results, artifact tree, progress)`; their split by model
+        /// is the winner's, else the next source's that has one, scaled to the figure.
+        #[test]
+        fn the_subagent_split_comes_from_the_source_that_wins() {
+            let mut r = Replica::new("Main");
+            r.apply(&snapshot(json!({}), vec![]), NOW);
+            // Without the artifacts dir, live progress: each subagent's cost goes to the model it runs on.
+            progress(&mut r, "Scout", json!({ "resolvedModel": "openai-codex/gpt-6-luna:low" }), 0.02);
+            progress(&mut r, "Probe", json!({ "resolvedModelIdentity": "anthropic/claude-sonnet-5" }), 0.06);
+            let split = r.usage().unwrap().split.unwrap();
+            assert!(close(&of(&split, Spender::Subagents), &[("claude-sonnet-5", 0.06), ("gpt-6-luna", 0.02)]), "{:?}", split.models);
+
+            // A finished call's result bills more: omp sums it from each child's own usage.
+            let results = json!([
+                { "id": "Scout", "exitCode": 0, "resolvedModelIdentity": "openai-codex/gpt-6-luna", "usage": { "cost": { "total": 0.05 } } },
+                { "id": "Probe", "exitCode": 0, "resolvedModel": "anthropic/claude-sonnet-5:high", "usage": { "cost": { "total": 0.1 } } },
+            ]);
+            frame(&mut r, json!({ "t": "entry", "entry": task_result("t1", 0.15, results) }));
+            let split = r.usage().unwrap().split.unwrap();
+            assert!((split.subagents - 0.15).abs() < 1e-12);
+            assert!(close(&of(&split, Spender::Subagents), &[("claude-sonnet-5", 0.1), ("gpt-6-luna", 0.05)]), "{:?}", split.models);
+
+            // The tree bills the most (Probe's side call on another model, Scout's advisor): its split.
+            let header = line(json!({ "type": "session", "id": "s" }));
+            let mut ledger = ArtifactLedger::default();
+            ledger.ingest("Scout.jsonl", &[header.clone(), line(served(assistant(0.05, 10, 0, 1_000.0, 0.0), "openai-codex/gpt-6-luna"))].concat());
+            let probe = [line(served(assistant(0.1, 10, 0, 1_000.0, 0.0), "anthropic/claude-sonnet-5")), line(side_call("google/gemini-3-pro", 0.04))];
+            ledger.ingest("Probe.jsonl", &[header.clone(), probe.concat()].concat());
+            ledger.ingest("Scout/__advisor.jsonl", &[header.clone(), line(served(assistant(0.01, 10, 0, 1_000.0, 0.0), "openai/gpt-5.5"))].concat());
+            ledger.ingest("__advisor.jsonl", &[header.clone(), line(served(assistant(0.03, 10, 0, 1_000.0, 0.0), "openai/gpt-5.5"))].concat());
+            r.apply_artifacts(&ledger, &[], NOW);
+            let split = r.usage().unwrap().split.unwrap();
+            assert!((split.subagents - 0.2).abs() < 1e-12);
+            let want = [("claude-sonnet-5", 0.1), ("gpt-6-luna", 0.05), ("gemini-3-pro", 0.04), ("gpt-5.5", 0.01)];
+            assert!(close(&of(&split, Spender::Subagents), &want), "{:?}", split.models);
+            assert!(close(&of(&split, Spender::Advisor), &[("gpt-5.5", 0.03)]), "the session's own advisor: {:?}", split.models);
+            adds_up(&split);
+
+            // A result that names no child's usage (an older omp) wins again: what it adds is spread
+            // over the task results' own split.
+            frame(&mut r, json!({ "t": "entry", "entry": task_result("t2", 0.15, json!([{ "id": "Late", "exitCode": 0 }])) }));
+            let split = r.usage().unwrap().split.unwrap();
+            assert!((split.subagents - 0.3).abs() < 1e-12);
+            assert!(close(&of(&split, Spender::Subagents), &[("claude-sonnet-5", 0.2), ("gpt-6-luna", 0.1)]), "{:?}", split.models);
+            adds_up(&split);
+            // With no split of their own at all, the tree's stands in, scaled to the task total.
+            let mut older = Replica::new("Main");
+            older.apply(&snapshot(json!({}), vec![task_result("t2", 0.4, json!([{ "id": "Late", "exitCode": 0 }]))]), NOW);
+            older.apply_artifacts(&ledger, &[], NOW);
+            let split = older.usage().unwrap().split.unwrap();
+            let want = [("claude-sonnet-5", 0.2), ("gpt-6-luna", 0.1), ("gemini-3-pro", 0.08), ("gpt-5.5", 0.02)];
+            assert!(close(&of(&split, Spender::Subagents), &want), "{:?}", split.models);
+            adds_up(&split);
+        }
+
+        /// Throughput goes to the model of the message the main agent streams (its session model
+        /// when the message names none) and to each replayed reply's model.
+        #[test]
+        fn throughput_by_model() {
+            let state = json!({ "model": { "provider": "anthropic", "id": "claude-opus-5", "name": "Opus 5" } });
+            let streaming = |model: Option<&str>| {
+                let msg = json!({ "role": "assistant", "content": [{ "type": "text", "text": "x".repeat(120) }], "timestamp": NOW });
+                let msg = model.map_or(msg.clone(), |m| served(json!({ "type": "message", "message": msg }), m)["message"].clone());
+                json!({ "t": "event", "event": { "type": "message_update", "message": msg, "assistantMessageEvent": { "type": "text_delta" } } })
+            };
+            let main_share = |r: &Replica| {
+                let split = r.liveness(NOW + 10).tps_split.unwrap();
+                assert!((split.main - 10.0).abs() < 1e-3, "120 chars in 3 s: {split:?}");
+                split.models
+            };
+            let mut r = Replica::new("Main");
+            r.apply(&snapshot(state.clone(), vec![]), NOW);
+            frame(&mut r, json!({ "t": "event", "event": { "type": "agent_start" } }));
+            frame(&mut r, streaming(None));
+            let share = |model: &str, provider: &str, value: f64| ModelShare { spender: Spender::Main, model: model.into(), provider: Some(provider.into()), value };
+            assert_eq!(main_share(&r), [share("claude-opus-5", "anthropic", 10.0)], "the session's model");
+            let mut r = Replica::new("Main");
+            r.apply(&snapshot(state, vec![]), NOW);
+            frame(&mut r, json!({ "t": "event", "event": { "type": "agent_start" } }));
+            frame(&mut r, streaming(Some("openai-codex/gpt-6-luna")));
+            assert_eq!(main_share(&r), [share("gpt-6-luna", "openai-codex", 10.0)], "a fallback model serves this message");
+
+            // Finished subagent and advisor replies replay at output / (duration − ttft) = n / 2 s.
+            let reply = |out: u64, model: &str| line(served(assistant(0.01, out, NOW - 3_000, 2_500.0, 500.0), model));
+            let header = line(json!({ "type": "session", "id": "s" }));
+            let mut ledger = ArtifactLedger::default();
+            let mut calls = ledger.ingest("Scout.jsonl", &[header.clone(), reply(40, "openai-codex/gpt-6-luna")].concat());
+            calls.extend(ledger.ingest("Probe.jsonl", &[header.clone(), reply(100, "anthropic/claude-sonnet-5")].concat()));
+            calls.extend(ledger.ingest("Scout/Scout.Helper.jsonl", &[header.clone(), reply(80, "openai-codex/gpt-6-luna")].concat()));
+            calls.extend(ledger.ingest("__advisor.jsonl", &[header, reply(60, "openai/gpt-5.5")].concat()));
+            r.apply_artifacts(&ledger, &calls, NOW);
+            let split = r.liveness(NOW + 500).tps_split.unwrap();
+            assert!((split.subagents - 110.0).abs() < 1e-3 && (split.advisor - 30.0).abs() < 1e-3, "{split:?}");
+            let rates: Vec<(Spender, &str, f64)> = split.models.iter().map(|m| (m.spender, m.model.as_str(), m.value)).collect();
+            let want = [(Spender::Main, "gpt-6-luna", 10.0), (Spender::Subagents, "gpt-6-luna", 60.0), (Spender::Subagents, "claude-sonnet-5", 50.0), (Spender::Advisor, "gpt-5.5", 30.0)];
+            assert_eq!(rates.len(), want.len(), "{rates:?}");
+            assert!(rates.iter().zip(&want).all(|(a, b)| a.0 == b.0 && a.1 == b.1 && (a.2 - b.2).abs() < 1e-3), "{rates:?}");
+            assert!(r.liveness(NOW + 2_001).tps_split.unwrap().models.iter().all(|m| m.spender == Spender::Main), "the replays ended");
+        }
     }
 }

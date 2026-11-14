@@ -186,8 +186,9 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
         watch_motion(Arc::clone(&core), tray);
         capture::install(&handle, Arc::clone(&core));
     }
-    // Linux: paste / delete keys a virtual keyboard sends that GTK 3 can't bind (edit_keys.rs);
-    // no WebRTC and no preconnects for presented pages (frames.rs).
+    // Linux: undo / redo, which WebKitGTK binds to no key, and the paste / delete keys a virtual
+    // keyboard sends that GTK 3 can't bind (edit_keys.rs); no WebRTC and no preconnects for
+    // presented pages (frames.rs).
     #[cfg(target_os = "linux")]
     if let Some(main) = app.get_webview_window("main") {
         edit_keys::install(&main);

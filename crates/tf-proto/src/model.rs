@@ -197,6 +197,25 @@ wire_struct! {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[ts(as = "Option<Vec<crate::autoanswer::AutoDecision>>", optional)]
         pub decisions: Vec<crate::autoanswer::AutoDecision>,
+        /// What tf-hostd does so the host stays responsive while agents load it (§3.35, hosts
+        /// ≥ 0.9.5): TeleFlock's own processes, the SSH server and Tailscale run above the agents'
+        /// work. Absent from older daemons.
+        pub priority: Option<PriorityStatus>,
+    }
+}
+
+wire_struct! {
+    /// [`HostInfo::priority`]: what runs above the agents' work on this host, and what could not
+    /// be raised.
+    pub struct PriorityStatus {
+        /// What runs above the agents now, as the user knows it (`TeleFlock`, `SSH server`,
+        /// `Tailscale`).
+        pub raised: Vec<String>,
+        /// Why something could not be raised, in words (e.g. "needs root to raise the SSH
+        /// server"); absent when everything was.
+        pub note: Option<String>,
+        /// When tf-hostd last checked (it checks at start and every few minutes).
+        pub checked_at: Millis,
     }
 }
 
@@ -253,6 +272,28 @@ wire_struct! {
         pub disk_free: u64,
         pub disk_total: u64,
         pub uptime_s: u64,
+        /// Each agent's share of the host (hosts ≥ 0.9.5): agents with a running process, the
+        /// busiest first. Absent from older daemons (and while no agent runs).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<AgentLoad>>", optional)]
+        pub agents: Vec<AgentLoad>,
+    }
+}
+
+wire_struct! {
+    /// One agent's share of the host ([`HostHealth::agents`]): its omp process and every process
+    /// it started (shells, test runs, servers, browsers), measured over the same interval as the
+    /// host's figures.
+    pub struct AgentLoad {
+        pub agent_id: String,
+        /// CPU over the last interval, on the host's scale ([`HostHealth::cpu_pct`]: 0..=100 of
+        /// all cores together), so agents and host compare and add up.
+        pub cpu_pct: f32,
+        /// Resident memory of the process tree, bytes (pages shared between its processes count
+        /// once per process, as `top` sums them).
+        pub mem: u64,
+        /// Processes in the tree.
+        pub procs: u32,
     }
 }
 
@@ -362,6 +403,11 @@ wire_struct! {
         pub subagents: f64,
         /// The main session's advisor(s).
         pub advisor: f64,
+        /// Each spender's `usd` by model (hosts ≥ 0.9.5), the largest first within a spender;
+        /// a spender's shares sum to its figure. Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<ModelShare>>", optional)]
+        pub models: Vec<ModelShare>,
     }
 }
 
@@ -371,6 +417,29 @@ wire_struct! {
         pub main: f32,
         pub subagents: f32,
         pub advisor: f32,
+        /// Each spender's rate by model (hosts ≥ 0.9.5), the largest first within a spender; a
+        /// spender's shares sum to its figure. Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<ModelShare>>", optional)]
+        pub models: Vec<ModelShare>,
+    }
+}
+
+wire_enum! {
+    /// Who a session's spend and throughput go to ([`CostSplit`], [`TpsSplit`]).
+    pub enum Spender { Main, Subagents, Advisor }
+}
+
+wire_struct! {
+    /// One model's part of a spender's figure ([`CostSplit::models`], [`TpsSplit::models`]).
+    pub struct ModelShare {
+        pub spender: Spender,
+        /// The model as omp names it (`claude-opus-4-5`).
+        pub model: String,
+        /// Its provider (`anthropic`), when known.
+        pub provider: Option<String>,
+        /// USD in a [`CostSplit`], output tokens per second in a [`TpsSplit`].
+        pub value: f64,
     }
 }
 
@@ -484,6 +553,25 @@ wire_struct! {
         /// after `recap.idleSeconds` idle), while nothing happened in the session since; absent
         /// otherwise (no recap yet, recaps off, or a newer turn).
         pub recap: Option<IdleRecap>,
+        /// The main agent's own estimate of how far along the task of its current turn is
+        /// (TeleFlock's bridge ≥ 2.6.0 asks it the way omp's completion probe asks subagents).
+        /// Absent until it answers, and once the turn ends.
+        pub progress: Option<AgentProgress>,
+    }
+}
+
+wire_struct! {
+    /// [`OmpInfo::progress`]: one completion estimate of the main agent's current task.
+    pub struct AgentProgress {
+        /// 0..=100.
+        pub pct: f32,
+        /// The agent's current step in its own words (≤ 80 chars).
+        pub stage: Option<String>,
+        /// When the agent made the estimate (host time).
+        pub at: Millis,
+        /// When the task it estimates started (host time; the turn's start): with `at` and `pct`
+        /// the basis of the time-left estimate.
+        pub since: Millis,
     }
 }
 

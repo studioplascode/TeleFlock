@@ -7,6 +7,7 @@ import { Button, Chip, Field, IconButton, Input, Select, type SelectOption, Segm
 import { useBoard } from "@/features/board/boardStore";
 import { ACTIONS } from "@/features/shell/vocab";
 import { AgentRolesSection, rolesSummaryChip } from "@/features/agentRoles/AgentRolesSection";
+import { ModelPresetsSection } from "@/features/agentRoles/ModelPresets";
 import { hostTakesRoles, launchMainText, launchOverrides, overridesSummary } from "@/features/agentRoles/roles";
 import { hostDecides, specAutoAnswer } from "@/features/autoAnswer/format";
 import { AutoAnswerSection, autoAnswerChip } from "@/features/autoAnswer/PolicyEditor";
@@ -515,6 +516,16 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                           </div>
                           {hostId && (
                             <AgentOptions summary={[takesRoles ? rolesSummaryChip(v.roleModels, v.fallbackChains) : null, autoAnswerChip(decides ? v.autoAnswer : undefined)]} className="mt-2.5">
+                              <ModelPresetsSection
+                                hostId={hostId}
+                                value={{ model: v.model, thinking: v.thinking, roleModels: v.roleModels ?? {}, fallbackChains: v.fallbackChains ?? {}, autoAnswer: v.autoAnswer }}
+                                onApply={(patch) => {
+                                  // Undo gives the variant back the template the preset cleared too (its name stays as typed).
+                                  const { templateId, model, thinking, roleModels, fallbackChains, autoAnswer } = v;
+                                  updateVariant(v.id, { ...patch, templateId: null });
+                                  return () => updateVariant(v.id, { templateId, model, thinking, roleModels, fallbackChains, autoAnswer });
+                                }}
+                              />
                               <AgentRolesSection
                                 hostId={hostId}
                                 roles={v.roleModels ?? {}}

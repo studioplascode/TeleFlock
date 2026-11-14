@@ -228,8 +228,14 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt | command, images?, roleModels?, fallbackChains?, autoAnswer? } }`
   (in place: `agent.start { target: { kind: "cwd", cwd: root, label: slug }, spec }` with that agent spec).
   The footer's More options chip (what is set, when anything is) opens "More agent options" (dialog, sheet on phones):
+  model presets (`features/agentRoles` `ModelPresetsSection`: the saved presets, one click sets the main model,
+  thinking, roles and chains and clears a selected template; Save as preset…, One model for every role…, and Reset
+  all beside the heading: host defaults for the main model, thinking, roles, chains and decide for me, plan mode
+  stays; each with Undo in a toast, which also brings a cleared template back), then
   the agent's own model roles and fallback chains (`features/agentRoles`) and decide for me (`features/autoAnswer`),
-  kept with the options; picking a template keeps them. The policy goes only to a host with decide for me, checked
+  kept with the options; picking a template keeps them. The agent options menu (the model pill) lists the saved
+  presets under the templates too (`PresetRows`), and the pill shows the name of the preset the options are. The
+  policy goes only to a host with decide for me, checked
   as each task goes to its host (Auto: the host picked; an older tf-hostd gets none and never decides); the dialog
   and the chip go by the composer's host (Auto: the next pick). A template's prompt frames the message (as in Fan out). With
   Settings → AI naming on (and the host's omp able to answer), the entry first goes through
@@ -245,7 +251,8 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   omp's builtins, the folder's skills (`skills.list` for the repository, user level for a chat; switched-off ones left
   out) and the prompt templates and extension commands a live session there lists (`agent.commands` of a bridged agent
   in the repository, a chat for a chat), with argument hints and argument choices; ↑↓, Tab or Enter picks, Esc closes.
-  A pick only completes the text (Enter then dispatches). It offers what makes sense as a brand-new agent's first
+  A pick only completes the text (Enter then dispatches), in place of what is typed before the caret: a task written
+  after it stays (`/pl` typed in front of it gives `/plan <task>`). It offers what makes sense as a brand-new agent's first
   message (`NEW_AGENT_OFFER`), and only such argument choices: not what works on what a session already has
   (`/compact`, `/retry`, `/fork`, `/btw`, `/todo`, `/goal pause`), leaves or replaces the session (`/new`, `/resume`,
   `/exit`), acts on a running turn (`/queue`) or on omp for every agent (`/logout`, `/reload-plugins`), nor what omp
@@ -269,7 +276,9 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   once the agent's link has been up 10 s. The thread has no reply box: later messages to the agent go through its session.
 - Sends never wait for each other: up to 3 creates per thread run at once, more wait as "Queued".
   The composer clears and keeps focus. Enter dispatches on desktop (Shift+Enter newline); on phones
-  Enter is a newline and the send button dispatches.
+  Enter is a newline and the send button dispatches. Ctrl/⌘+Z and Ctrl/⌘+Shift+Z (Ctrl+Y) undo and redo every edit
+  of the task, the palette's, paste chips' and dictation's included (the session composer's `useUndoHistory`); a
+  dispatch starts the history over.
 - Reply card: (Naming…) → Queued → Creating worktree → Starting agent (agent present, no turn yet)
   → live status from host state (orb, state pill from `vocab.agentStateWord`, streaming line / tool
   chip, elapsed, quiet chip), Needs-you answered inline with the board's `QuickAnswer`, To review /

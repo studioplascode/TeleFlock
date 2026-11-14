@@ -10,10 +10,14 @@
 //! report is older than [`FRESH`] (or with `refresh`) and waits up to `waitMs` for it. First the
 //! git facts, the board and the owners are published (a status per worktree, its last use, a
 //! detached HEAD's reachability), then sizes and pull requests fill in as they arrive; earlier
-//! values stay shown until replaced. Sizes are kept [`SIZE_TTL`], pull requests by state
-//! (`prs::ttl`); `refresh` asks again for all of them. gh missing or signed out stops pull
-//! request lookups host-wide for [`GH_DOWN_FOR`]; a repository without a GitHub remote is not
-//! asked again for [`NOT_GITHUB_FOR`].
+//! values stay shown until replaced. A size holds for [`SIZE_TTL`]; then the fingerprint of the
+//! tree's folders (`size.rs`) is taken first, and the tree is walked again only when an entry came
+//! or went anywhere in it, or its last walk is older than [`SIZE_WALKED_FOR`] (a file grown in
+//! place leaves the fingerprint as it was). Pull requests hold by state (`prs::ttl`). `refresh`
+//! walks and asks again for all of them. Sizes, pull requests and omp's session index outlive the
+//! daemon (`cache.rs`): the first scan after a restart has them at once. gh missing or signed out
+//! stops pull request lookups host-wide for [`GH_DOWN_FOR`]; a repository without a GitHub remote
+//! is not asked again for [`NOT_GITHUB_FOR`].
 //!
 //! **Last use** (`activeAt`, `activeBy`) is the newest real use, never a read: the last entry of an
 //! omp session or subagent transcript that worked in it (`sessions.rs`), the newest entry of its
@@ -45,9 +49,10 @@ use tf_proto::{
 };
 use tokio::sync::{Semaphore, watch};
 
+use super::cache::{self, PrMemo, SizeMemo};
 use super::prs::{self, Lookup};
 use super::sessions::{self, MainFacts, WorkedIn};
-use super::size::{self, Budget, DirSize};
+use super::size::{self, Budget, DirSize, Fingerprint};
 use crate::ops::host::{id_from_file_name, omp_agent_dir, read_head, session_titles};
 use crate::ops::worktree::same_path;
 use crate::ops::{Ctx, git};
@@ -58,7 +63,11 @@ use crate::util::now_ms;
 const FRESH: Duration = Duration::from_secs(60);
 /// Longest `waitMs` (the app's request timeout is 30 s).
 pub(crate) const WAIT_MAX_MS: u32 = 20_000;
+/// A size this young is shown as it is.
 const SIZE_TTL: Duration = Duration::from_secs(10 * 60);
+/// A size whose tree was walked longer ago is walked again even when its folders' fingerprint is
+/// unchanged: files grown in place (logs, databases) don't change it.
+const SIZE_WALKED_FOR: Duration = Duration::from_secs(6 * 3600);
 /// One worktree's size walk: a `node_modules` tree of a few hundred thousand files fits.
 const SIZE_ENTRIES: u64 = 3_000_000;
 const SIZE_TIME: Duration = Duration::from_secs(20);
@@ -81,19 +90,15 @@ const BEFORE_CREATED_MS: Millis = 60_000;
 /// Subagent names kept per worktree.
 const SUBAGENTS_SHOWN: usize = 6;
 
-struct PrMemo {
-    at: Instant,
-    checked_at: Millis,
-    found: Result<Option<CleanupPr>, String>,
-}
-
 #[derive(Default)]
 struct Inner {
     report: Option<CleanupReport>,
     running: bool,
     finished: Option<Instant>,
-    /// Worktree path → when measured and what.
-    sizes: HashMap<String, (Instant, DirSize)>,
+    /// What the cache file kept was taken (the first scan of this daemon takes it).
+    restored: bool,
+    /// Worktree path → its size.
+    sizes: HashMap<String, SizeMemo>,
     /// `path \0 branch \0 head` → its pull request.
     prs: HashMap<String, PrMemo>,
     /// Repository root → why its pull requests are unknown.
@@ -214,6 +219,19 @@ pub(crate) fn forget(session: &str, path: &Path) {
 
 async fn run(ctx: Arc<Ctx>, sc: Arc<Scanner>, refresh: bool) {
     let started = Instant::now();
+    // The first scan of this daemon starts from what the last one kept.
+    cache::open(&ctx.paths.home).await;
+    {
+        let mut g = sc.inner.lock().unwrap();
+        if !g.restored {
+            g.restored = true;
+            if let Some(kept) = cache::claim(&ctx.herdr_session) {
+                g.sizes = kept.sizes;
+                g.prs = kept.prs;
+            }
+        }
+    }
+    let open_ms = started.elapsed().as_millis() as u64;
     let board = ctx.state.snapshot();
     // Chats (§3.31) are never repositories: git is not asked about their folders.
     let parked: Vec<ParkedRecord> = ctx.state.parked_all().into_iter().filter(|r| r.cwd.as_deref().is_none_or(|c| !ctx.chats.holds(Path::new(c)))).collect();
@@ -237,7 +255,10 @@ async fn run(ctx: Arc<Ctx>, sc: Arc<Scanner>, refresh: bool) {
         .filter_map(|a| a.omp.as_ref()?.session_file.as_deref())
         .map(PathBuf::from)
         .collect();
-    let sessions = tokio::task::spawn_blocking(move || read_sessions(paths, first));
+    let sessions = tokio::task::spawn_blocking(move || {
+        let t = Instant::now();
+        (read_sessions(paths, first), t.elapsed())
+    });
 
     let mut repos: Vec<CleanupRepo> = Vec::new();
     let mut clues: HashMap<String, Clues> = HashMap::new();
@@ -298,7 +319,8 @@ async fn run(ctx: Arc<Ctx>, sc: Arc<Scanner>, refresh: bool) {
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.root.cmp(&b.root))
     });
-    let sessions = sessions.await.unwrap_or_default();
+    let git_ms = started.elapsed().as_millis() as u64 - open_ms;
+    let (sessions, sessions_took) = sessions.await.unwrap_or_default();
     let extra = Extra {
         owners: attribute(&mut repos, &clues, &sessions, &board.agents),
         pending: sessions.pending,
@@ -307,13 +329,24 @@ async fn run(ctx: Arc<Ctx>, sc: Arc<Scanner>, refresh: bool) {
     // Cached sizes and pull requests now; the due ones are asked below.
     let (size_jobs, pr_jobs) = {
         let g = sc.inner.lock().unwrap();
-        plan(&g, &mut repos, refresh)
+        plan(&g, &mut repos, refresh, now_ms())
     };
+    let (walks, checks, lookups) = (
+        size_jobs.iter().filter(|j| j.unchanged.is_none()).count(),
+        size_jobs.iter().filter(|j| j.unchanged.is_some()).count(),
+        pr_jobs.len(),
+    );
     publish(&sc, &repos, &extra, false);
+    let first_ms = started.elapsed().as_millis() as u64;
     fill(&sc, &mut repos, &extra, size_jobs, pr_jobs).await;
     publish(&sc, &repos, &extra, true);
+    cache::scanned();
     let count: usize = repos.iter().map(|r| r.worktrees.len()).sum();
-    tracing::info!(session = %ctx.herdr_session, repos = repos.len(), worktrees = count, owners = extra.owners.len(), sessions_pending = extra.pending, ms = started.elapsed().as_millis() as u64, "cleanup scan");
+    tracing::info!(
+        session = %ctx.herdr_session, repos = repos.len(), worktrees = count, owners = extra.owners.len(), sessions_pending = extra.pending,
+        open_ms, git_ms, sessions_ms = sessions_took.as_millis() as u64, first_ms, size_walks = walks, size_checks = checks, pr_lookups = lookups,
+        ms = started.elapsed().as_millis() as u64, "cleanup scan"
+    );
 }
 
 /// What a report carries beside its repositories.
@@ -356,6 +389,42 @@ fn publish(sc: &Scanner, repos: &[CleanupRepo], extra: &Extra, done: bool) {
 /// `(repo index, worktree index)`.
 type At = (usize, usize);
 
+/// A worktree whose size is due.
+struct SizeJob {
+    at: At,
+    path: PathBuf,
+    /// The fingerprint its last walk took: while the tree's is still this one, it is not walked.
+    unchanged: Option<Fingerprint>,
+}
+
+/// What a worktree's size needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeDue {
+    /// Nothing: shown as it is.
+    No,
+    /// Its folders' fingerprint; a walk when it is not this one any more.
+    Check(Fingerprint),
+    Walk,
+}
+
+/// How long ago `at` was. A time ahead of the clock (the clock was set back) counts as long ago:
+/// what it stamped is asked again.
+fn age(at: Millis, now: Millis) -> Duration {
+    if at > now + 60_000 {
+        return Duration::MAX;
+    }
+    Duration::from_millis(now.saturating_sub(at).max(0) as u64)
+}
+
+/// What a size needs ([`SIZE_TTL`], [`SIZE_WALKED_FOR`]); `refresh` walks every tree.
+fn size_due(m: Option<&SizeMemo>, refresh: bool, now: Millis) -> SizeDue {
+    match m {
+        Some(m) if !refresh && age(m.at, now) < SIZE_TTL => SizeDue::No,
+        Some(m) if !refresh && !m.partial && age(m.measured_at, now) < SIZE_WALKED_FOR => SizeDue::Check(m.fingerprint),
+        _ => SizeDue::Walk,
+    }
+}
+
 struct PrJob {
     at: At,
     key: String,
@@ -367,7 +436,7 @@ struct PrJob {
 }
 
 /// Fills cached sizes and pull requests in, and lists what is due.
-fn plan(g: &Inner, repos: &mut [CleanupRepo], refresh: bool) -> (Vec<(At, PathBuf)>, Vec<PrJob>) {
+fn plan(g: &Inner, repos: &mut [CleanupRepo], refresh: bool, now: Millis) -> (Vec<SizeJob>, Vec<PrJob>) {
     let gh_down = g
         .gh_down
         .as_ref()
@@ -385,11 +454,16 @@ fn plan(g: &Inner, repos: &mut [CleanupRepo], refresh: bool) -> (Vec<(At, PathBu
         for (wi, w) in repo.worktrees.iter_mut().enumerate() {
             if !w.missing {
                 let cached = g.sizes.get(&w.path);
-                if let Some((_, s)) = cached {
-                    (w.size, w.size_partial) = (Some(s.bytes), s.partial);
+                if let Some(m) = cached {
+                    (w.size, w.size_partial) = (Some(m.bytes), m.partial);
                 }
-                if refresh || cached.is_none_or(|(at, _)| at.elapsed() >= SIZE_TTL) {
-                    sizes.push(((ri, wi), PathBuf::from(&w.path)));
+                let unchanged = match size_due(cached, refresh, now) {
+                    SizeDue::No => None,
+                    SizeDue::Check(fp) => Some(Some(fp)),
+                    SizeDue::Walk => Some(None),
+                };
+                if let Some(unchanged) = unchanged {
+                    sizes.push(SizeJob { at: (ri, wi), path: PathBuf::from(&w.path), unchanged });
                 }
             }
             let Some(branch) = w.branch.clone() else {
@@ -402,7 +476,7 @@ fn plan(g: &Inner, repos: &mut [CleanupRepo], refresh: bool) -> (Vec<(At, PathBu
             }
             if gh_down
                 || not_github.is_some()
-                || memo.is_some_and(|m| !refresh && m.at.elapsed() < prs::ttl(&m.found))
+                || memo.is_some_and(|m| !refresh && age(m.checked_at, now) < prs::ttl(&m.found))
             {
                 continue;
             }
@@ -433,8 +507,18 @@ fn show_pr(w: &mut CleanupWorktree, m: &PrMemo) {
     }
 }
 
+/// A tree's size, walked (blocking); `None` without a walk when its folders' fingerprint is still
+/// `unchanged`.
+fn walk_unless(path: &Path, unchanged: Option<Fingerprint>) -> Option<DirSize> {
+    if unchanged.is_some() && size::fingerprint(path, Budget::new(SIZE_ENTRIES, SIZE_TIME)) == unchanged {
+        return None;
+    }
+    Some(size::measure(path, Budget::new(SIZE_ENTRIES, SIZE_TIME)))
+}
+
 enum Filled {
-    Size(At, String, DirSize),
+    /// A size walked, or (`None`) found unchanged by its fingerprint.
+    Size(At, String, Option<DirSize>),
     Pr(PrJob, Lookup),
 }
 
@@ -443,23 +527,21 @@ async fn fill(
     sc: &Arc<Scanner>,
     repos: &mut [CleanupRepo],
     extra: &Extra,
-    sizes: Vec<(At, PathBuf)>,
+    sizes: Vec<SizeJob>,
     pr_jobs: Vec<PrJob>,
 ) {
     let size_slots = Arc::new(Semaphore::new(SIZE_PARALLEL));
     let pr_slots = Arc::new(Semaphore::new(PR_PARALLEL));
     let mut set: tokio::task::JoinSet<Option<Filled>> = tokio::task::JoinSet::new();
-    for (at, path) in sizes {
+    for job in sizes {
         let slots = size_slots.clone();
         set.spawn(async move {
             let _slot = slots.acquire_owned().await;
-            let key = path.display().to_string();
-            let s = tokio::task::spawn_blocking(move || {
-                size::measure(&path, Budget::new(SIZE_ENTRIES, SIZE_TIME))
-            })
-            .await
-            .ok()?;
-            Some(Filled::Size(at, key, s))
+            let key = job.path.display().to_string();
+            let s = tokio::task::spawn_blocking(move || walk_unless(&job.path, job.unchanged))
+                .await
+                .ok()?;
+            Some(Filled::Size(job.at, key, s))
         });
     }
     for job in pr_jobs {
@@ -490,10 +572,19 @@ async fn fill(
         {
             let mut g = sc.inner.lock().unwrap();
             match filled {
-                Filled::Size((ri, wi), key, s) => {
+                Filled::Size((ri, wi), key, Some(s)) => {
                     let w = &mut repos[ri].worktrees[wi];
                     (w.size, w.size_partial) = (Some(s.bytes), s.partial);
-                    g.sizes.insert(key, (Instant::now(), s));
+                    let now = now_ms();
+                    let memo = SizeMemo { bytes: s.bytes, files: s.files, partial: s.partial, fingerprint: s.fingerprint, measured_at: now, at: now };
+                    g.sizes.insert(key, memo);
+                }
+                Filled::Size(_, key, None) => {
+                    // Shown already: nothing to publish.
+                    if let Some(m) = g.sizes.get_mut(&key) {
+                        m.at = now_ms();
+                    }
+                    continue;
                 }
                 Filled::Pr(_, Lookup::GhDown(e)) => {
                     tracing::info!("cleanup: no pull requests from gh on this host: {e}");
@@ -519,14 +610,31 @@ fn remember(
     job: PrJob,
     found: Result<Option<CleanupPr>, String>,
 ) {
-    let memo = PrMemo {
-        at: Instant::now(),
-        checked_at: now_ms(),
-        found,
-    };
+    let memo = PrMemo { checked_at: now_ms(), found };
     let (ri, wi) = job.at;
     show_pr(&mut repos[ri].worktrees[wi], &memo);
     g.prs.insert(job.key, memo);
+}
+
+/// Every herdr session's sizes and pull requests, for the cache file: of the scanners that took
+/// theirs from it (one that has not scanned since the daemon started leaves the file's as they are).
+pub(crate) fn facts() -> Vec<(String, cache::Facts)> {
+    let scanners: Vec<(String, Arc<Scanner>)> = SCANNERS.lock().unwrap().iter().map(|(s, sc)| (s.clone(), sc.clone())).collect();
+    scanners
+        .into_iter()
+        .filter_map(|(s, sc)| {
+            let g = sc.inner.lock().unwrap();
+            g.restored.then(|| (s, cache::Facts { sizes: g.sizes.clone(), prs: g.prs.clone() }))
+        })
+        .collect()
+}
+
+/// Test seam (`cache.rs`): herdr session `session`'s scanner holding `facts`, as after its first scan.
+#[cfg(test)]
+pub(crate) fn hold(session: &str, facts: cache::Facts) {
+    let sc = scanner(session);
+    let mut g = sc.inner.lock().unwrap();
+    (g.restored, g.sizes, g.prs) = (true, facts.sizes, facts.prs);
 }
 
 // ───────────────────────────── discovery ─────────────────────────────
@@ -1649,6 +1757,108 @@ mod tests {
         assert!(git_facts(root, Some(&common), rec).await.0.orphan_commits);
     }
 
+    fn size_memo(bytes: u64, at: Millis, measured_at: Millis) -> SizeMemo {
+        SizeMemo { bytes, files: 1, partial: false, fingerprint: Fingerprint { dirs: 1, hash: 42 }, measured_at, at }
+    }
+
+    #[test]
+    fn sizes_hold_then_are_checked_then_walked_again() {
+        let now = 1_800_000_000_000;
+        let min = 60_000;
+        let fp = Fingerprint { dirs: 1, hash: 42 };
+        assert_eq!(size_due(None, false, now), SizeDue::Walk, "never measured");
+        assert_eq!(size_due(Some(&size_memo(1, now - 5 * min, now - 5 * min)), false, now), SizeDue::No, "within SIZE_TTL: as it is");
+        assert_eq!(size_due(Some(&size_memo(1, now - 5 * min, now - 5 * min)), true, now), SizeDue::Walk, "Rescan walks every tree");
+        assert_eq!(size_due(Some(&size_memo(1, now - 11 * min, now - 3 * 60 * min)), false, now), SizeDue::Check(fp), "then its fingerprint first");
+        assert_eq!(size_due(Some(&size_memo(1, now - 11 * min, now - 7 * 60 * min)), false, now), SizeDue::Walk, "walked over SIZE_WALKED_FOR ago");
+        let partial = SizeMemo { partial: true, ..size_memo(1, now - 11 * min, now - 11 * min) };
+        assert_eq!(size_due(Some(&partial), false, now), SizeDue::Walk, "a partial walk has no complete fingerprint");
+        assert_eq!(size_due(Some(&size_memo(1, now + 9 * 60 * min, now + 9 * 60 * min)), false, now), SizeDue::Walk, "stamped ahead of the clock (set back)");
+    }
+
+    /// After a daemon restart the scanner starts from the cache file: sizes and pull requests are
+    /// shown at once and nothing is measured or asked again while they hold.
+    #[test]
+    fn a_restart_keeps_sizes_and_pull_requests() {
+        let now = now_ms();
+        let pr = CleanupPr { number: 9, url: "https://github.com/o/r/pull/9".into(), title: "Ship it".into(), state: "MERGED".into(), draft: false, closed_at: Some(now - 86_400_000) };
+        let kept = cache::Facts {
+            sizes: [("/wt/a".to_string(), size_memo(5 << 30, now - 120_000, now - 120_000))].into(),
+            prs: [("/wt/a\0b\0".to_string(), PrMemo { checked_at: now - 120_000, found: Ok(Some(pr.clone())) })].into(),
+        };
+        let saved = serde_json::to_vec(&kept).unwrap();
+        let back: cache::Facts = serde_json::from_slice(&saved).unwrap();
+        let g = Inner { restored: true, sizes: back.sizes, prs: back.prs, ..Default::default() };
+        let mut repos = vec![CleanupRepo { root: "/r".into(), name: "r".into(), error: None, pr_error: None, worktrees: vec![blank("/wt/a")] }];
+        let (sizes, prs) = plan(&g, &mut repos, false, now);
+        assert!(sizes.is_empty() && prs.is_empty(), "nothing due");
+        let w = &repos[0].worktrees[0];
+        assert_eq!((w.size, w.pr.as_ref(), w.pr_checked_at), (Some(5 << 30), Some(&pr), Some(now - 120_000)));
+    }
+
+    /// Past SIZE_TTL a worktree's folders are looked at first: one where a file came is walked
+    /// again, one where nothing came or went is not (a file grown in place is only seen once its
+    /// walk is older than SIZE_WALKED_FOR).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_changed_worktrees_are_walked_again() {
+        let td = tempfile::tempdir().unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let (a, b) = (td.path().join("wt-a"), td.path().join("wt-b"));
+        for wt in [&a, &b] {
+            std::fs::create_dir_all(wt.join("src")).unwrap();
+            std::fs::write(wt.join("src/lib.rs"), "x").unwrap();
+            for d in [wt.clone(), wt.join("src")] {
+                std::fs::File::open(&d).unwrap().set_modified(old).unwrap();
+            }
+        }
+        let path = |p: &Path| p.display().to_string();
+        let sc = Arc::new(Scanner::default());
+        sc.inner.lock().unwrap().restored = true;
+        let mut repos = vec![CleanupRepo { root: "/r".into(), name: "r".into(), error: None, pr_error: None, worktrees: vec![blank(&path(&a)), blank(&path(&b))] }];
+        let scan = |repos: &mut Vec<CleanupRepo>| {
+            let sc = sc.clone();
+            let mut repos = std::mem::take(repos);
+            async move {
+                let (sizes, _) = plan(&sc.inner.lock().unwrap(), &mut repos, false, now_ms());
+                let due: Vec<(PathBuf, bool)> = sizes.iter().map(|j| (j.path.clone(), j.unchanged.is_some())).collect();
+                fill(&sc, &mut repos, &Extra::default(), sizes, Vec::new()).await;
+                (repos, due)
+            }
+        };
+        let (r, due) = scan(&mut repos).await;
+        repos = r;
+        assert_eq!(due, [(a.clone(), false), (b.clone(), false)], "never measured: walked");
+        let memo = |p: &Path| sc.inner.lock().unwrap().sizes[&path(p)];
+        let (first_a, first_b) = (memo(&a), memo(&b));
+
+        // 20 minutes later: a file grew in wt-a, a file came to wt-b.
+        let earlier = |m: SizeMemo, by: Millis| SizeMemo { at: m.at - by, measured_at: m.measured_at - by, ..m };
+        for (p, m) in [(&a, first_a), (&b, first_b)] {
+            sc.inner.lock().unwrap().sizes.insert(path(p), earlier(m, 20 * 60_000));
+        }
+        let mut log = std::fs::OpenOptions::new().append(true).open(a.join("src/lib.rs")).unwrap();
+        std::io::Write::write_all(&mut log, &[b'x'; 200_000]).unwrap();
+        std::fs::write(b.join("src/new.rs"), vec![b'y'; 300_000]).unwrap();
+        let (r, due) = scan(&mut repos).await;
+        repos = r;
+        assert_eq!(due, [(a.clone(), true), (b.clone(), true)], "past SIZE_TTL: fingerprints first");
+        let (now_a, now_b) = (memo(&a), memo(&b));
+        assert_eq!((now_a.bytes, now_a.measured_at), (first_a.bytes, first_a.measured_at - 20 * 60_000), "wt-a: not walked again");
+        assert!(now_a.at > now_a.measured_at, "…its size confirmed now");
+        assert!(now_b.bytes >= first_b.bytes + 300_000 && now_b.measured_at >= first_b.measured_at, "wt-b: walked again");
+        assert_eq!(repos[0].worktrees[1].size, Some(now_b.bytes));
+
+        // wt-a's walk is now 7 hours old: walked again whatever its fingerprint says.
+        sc.inner.lock().unwrap().sizes.insert(path(&a), SizeMemo { at: now_ms() - 20 * 60_000, measured_at: now_ms() - 7 * 3_600_000, ..now_a });
+        let (r, due) = scan(&mut repos).await;
+        assert_eq!(due, [(a.clone(), false)]);
+        // (the file's first block was counted before: it grew by less than the 200 000 bytes written)
+        let walked = size::measure(&a, Budget::new(u64::MAX, Duration::from_secs(60))).bytes;
+        assert!(walked > first_a.bytes + 150_000 && memo(&a).bytes == walked, "the file grown in place is counted now");
+        assert_eq!(r[0].worktrees[0].size, Some(memo(&a).bytes));
+    }
+
     #[tokio::test]
     async fn discovery_dedupes_and_probes_parked_folders() {
         let td = fixture();
@@ -1667,5 +1877,59 @@ mod tests {
         let roots = discover(&[ws], &parked, None).await;
         assert_eq!(roots.len(), 1);
         assert!(same_path(&roots[0], &root));
+    }
+
+    /// Bench: the git facts a scan asks for every worktree (`git worktree list`, `git status`, the
+    /// admin dir), on a synthetic repository of 3 000 files with 40 linked worktrees, a quarter of
+    /// them with changes. `TF_BENCH_TMP` puts it on another disk than the temp dir. Release build:
+    /// `cargo test --release -p tf-hostd --lib git_facts_cost -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "bench"]
+    async fn git_facts_cost() {
+        let base = std::env::var_os("TF_BENCH_TMP").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let td = tempfile::tempdir_in(base).unwrap();
+        let root = td.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        sh(&root, &["init", "-q", "-b", "main"]);
+        for d in 0..100 {
+            let dir = root.join(format!("src/mod{d}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in 0..30 {
+                std::fs::write(dir.join(format!("file{f}.rs")), format!("// {d}/{f}\nfn f() {{}}\n")).unwrap();
+            }
+        }
+        sh(&root, &["add", "."]);
+        sh(&root, &["commit", "-q", "-m", "init"]);
+        for i in 0..40 {
+            let wt = td.path().join(format!("wt{i}"));
+            sh(&root, &["worktree", "add", "-q", "-b", &format!("wt-{i}"), wt.to_str().unwrap(), "main"]);
+            if i % 4 == 0 {
+                std::fs::write(wt.join("src/mod1/file1.rs"), "changed").unwrap();
+                std::fs::write(wt.join("notes.md"), "new").unwrap();
+            }
+        }
+        let t = Instant::now();
+        let records = list_linked(&root).await.unwrap();
+        let listed = t.elapsed();
+        let common = common_dir(&root).await;
+        let slots = Arc::new(Semaphore::new(GIT_PARALLEL));
+        let t = Instant::now();
+        let mut set = tokio::task::JoinSet::new();
+        for rec in records {
+            let (root, common, slots) = (root.clone(), common.clone(), slots.clone());
+            set.spawn(async move {
+                let _slot = slots.acquire_owned().await;
+                git_facts(&root, common.as_deref(), rec).await
+            });
+        }
+        let mut n = 0;
+        while let Some(r) = set.join_next().await {
+            n += usize::from(r.is_ok());
+        }
+        println!(
+            "git worktree list: {:.0} ms; git facts of {n} worktrees ({GIT_PARALLEL} at a time): {:.0} ms",
+            listed.as_secs_f64() * 1e3,
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
 }

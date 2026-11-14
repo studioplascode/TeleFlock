@@ -19,6 +19,9 @@ globalThis.localStorage = {
 } as Storage;
 const { MAX_SEEN_SESSIONS, markRead, readMark, seenScope, useIrcSeen } = await import("./seen");
 const { agentKey } = await import("@/core/keys");
+// Another test file in the same run may have loaded the store first (transcript rows import it), so it
+// hydrated from whatever storage there was then: hydrate again from the stand-in, as an app start does.
+await useIrcSeen.persist.rehydrate();
 
 describe("read marks of the message board", () => {
   test("the Chat card's per-peer marks carry over as the newest one of each session", () => {

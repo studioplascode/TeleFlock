@@ -149,6 +149,14 @@ impl Replica {
         // chat → "Chat about this"; multi-select → checkbox toggle loop (from the ticks it has) + "Next →", with
         // text: toggles, then "Other"; back → the request's `nav.back`; cancel → None
     pub fn usage(&self) -> Option<CostInfo>;
+        // Spend by model (`replica/spend.rs`): `split.models` = each spender's usd by the model that served it
+        // (`ModelShare {spender, model, provider, value}`, largest first, a spender's shares sum to its figure).
+        // Main: assistant turns' and journal `model_usage` calls' `model`/`provider`, the two kept apart so live and
+        // rebuilt add up bit for bit. Subagents: the `max` source's split (artifact calls; `task` results'
+        // `results[].usage` + `resolvedModelIdentity`; progress `resolvedModelIdentity`/`resolvedModel` sans thinking
+        // level), else the next source's that has one, scaled to the figure. Advisor: its transcripts' calls.
+        // `liveness().tps_split.models`: the main agent's rate to its streaming message's model (else `state.model`),
+        // each replayed reply (`ArtifactCall.model`) to its own. `ModelKey {model, provider}` is re-exported.
     pub fn is_streaming(&self) -> bool;  pub fn turn_started_at(&self) -> Option<Millis>;
     pub fn read_only(&self) -> bool;     pub fn ended(&self) -> bool;
     // Journal: omp's collab host mirrors neither `mode_change` nor `custom` entries, so goal / plan mode /
@@ -210,6 +218,9 @@ rows across tf-hostd restarts, so a later replica never reuses these ids.
   ask (question/options/answer), web_search, image blocks (eval/browser screenshots).
 - Subagent status (`replica/subagents.rs`): a recorded outcome (bus frames, settled `task` results, the
   `async-result` messages' `details.jobs[]`) wins over the roster's `parked`; `parked` without one reads as `done`.
+- Subagent completion estimates (omp `completionPercent`, shown only while running): `completion_at` is the host
+  time the estimate took its value (bus progress or the task card, whichever first), the same on every frame that
+  repeats it and across snapshot reloads of the session; absent with the estimate.
 - User rows: `author` = collab guest name (`collab-prompt`), `synthetic` for developer reminders and
   custom messages (`author` = customType, e.g. `async-result`); our own join/leave notices are not rows.
 

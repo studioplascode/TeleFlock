@@ -440,6 +440,7 @@ export const DEFAULT_SETTINGS: Settings = {
   templates: [],
   autoUpdate: true,
   closeDone: true,
+  modelPresets: [],
 };
 
 export interface SettingsView extends Settings {

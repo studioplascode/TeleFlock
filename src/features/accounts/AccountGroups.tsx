@@ -95,10 +95,17 @@ function UnlinkConfirm({ account, providerName, host, lastOne, onOpenChange, onC
   };
   const body = (
     <div className="flex flex-col gap-3 text-sm text-mute">
-      <p>
-        omp on <b className="text-ink-2">{host}</b> stops using this {providerName} {account.kind === "apiKey" ? "key" : "account"} and removes its sign-in there.
-      </p>
-      {account.sessions > 0 && (
+      {account.disabled ? (
+        <p>
+          This {providerName} login on <b className="text-ink-2">{host}</b> expired, so omp no longer uses it. Unlinking removes it from omp's sign-ins there.
+        </p>
+      ) : (
+        <p>
+          omp on <b className="text-ink-2">{host}</b> stops using this {providerName} {account.kind === "apiKey" ? "key" : "account"} and removes its sign-in there.
+        </p>
+      )}
+      {/* Sessions on an expired login lost it already: unlinking changes nothing for them. */}
+      {account.sessions > 0 && !account.disabled && (
         <p data-status="needs-you" className="rounded-lg st-soft px-3 py-2 text-xs font-semibold">
           {account.sessions} live session{account.sessions === 1 ? " uses" : "s use"} it now.{" "}
           {lastOne ? `They stop working until you link ${providerName} again.` : `Their next request moves to another ${providerName} account.`}
@@ -149,7 +156,8 @@ function AccountRow({ account, index, providerName, host, hostId, lastOne, singl
   const [confirm, setConfirm] = useState(false);
   const [preferring, setPreferring] = useState(false);
   const key = account.kind === "apiKey";
-  const canUnlink = account.credentialId != null && !account.disabled && !broker;
+  // Expired logins too: omp can't remove those itself, the host deletes them from omp's store.
+  const canUnlink = account.credentialId != null && !broker;
   const canPrefer = !key && !account.disabled && (account.preferred || !single);
   const prefer = (preferred: boolean) => {
     if (preferring) return;
@@ -166,7 +174,7 @@ function AccountRow({ account, index, providerName, host, hostId, lastOne, singl
     unlinkAccount(hostId, account).then(
       () => {
         setConfirm(false);
-        toast({ title: `Unlinked ${account.label}`, description: `omp on ${host} no longer uses it.`, status: "done" });
+        toast({ title: `Unlinked ${account.label}`, description: account.disabled ? `Its expired login is gone from ${host}.` : `omp on ${host} no longer uses it.`, status: "done" });
       },
       (e: unknown) => {
         const d = describeError(e);

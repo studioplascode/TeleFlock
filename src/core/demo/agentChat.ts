@@ -12,6 +12,8 @@ import { poolTurn, type SubagentSpec } from "./scripts";
  * and summary, the nested sweep orchestrating one bench per size, scouts asking each other, a
  * broadcast, replies and a send refused because its recipient had ended. Other sessions' logs are
  * their transcript's IRC rows. What the user sends a subagent from the app joins as `user`.
+ * What omp queued for a busy recipient (`injected`) is `received` once the recipient takes it in,
+ * when its current step ends (QueryScout takes Main's answer in only after a long run).
  * Messages get ids in the order they appear and a log revision on every change, like tf-hostd's.
  */
 
@@ -29,6 +31,10 @@ const SETTLE_MS = 700;
 const REFUSE_MS = 120;
 /** The user's broadcast arrives as one request per subagent: requests this close with the same text are one message. */
 const BROADCAST_SLACK_MS = 30_000;
+/** A busy recipient takes in what omp queued for it when its current step ends: this long after it was queued, unless `SLOW_TAKE_IN` says otherwise. */
+const TAKE_IN_MS = 1_800;
+/** Messages a busy recipient takes in late, by key: QueryScout is tracing `db.Open` call sites when Main answers it. */
+const SLOW_TAKE_IN: Record<string, number> = { "irc:QueryScout:0:reply": 12_000 };
 
 /** One message before it has an id: `key` names it across syncs (and in `replyTo`). */
 interface Draft {
@@ -117,51 +123,83 @@ const POOL_TREE: TreeLine[] = [
 /** pool's task: the subagents whose `IrcSpec`s Main's transcript shows. */
 const POOL_SUBS: SubagentSpec[] = poolTurn().flatMap((s) => (s.t === "tool" && s.spec.subagents ? s.spec.subagents : []));
 
-/** Receipts of a send at `at` to `to`, as of `now`: pending until omp settles it. */
-function settled(to: readonly string[], at: number, now: number, running: (id: string, at: number) => boolean, outcome = "injected"): IrcReceipt[] {
+/**
+ * When recipient `to` takes in what omp queued for it at `queuedAt`: `takeIn` later (its current
+ * step ends), or when it ends if that comes first. Main's transcript shows what reaches it at once.
+ */
+function takenAt(to: string, queuedAt: number, takeIn: number, ended: (id: string) => number | undefined): number {
+  if (to === MAIN) return queuedAt;
+  const end = ended(to);
+  return Math.max(queuedAt, Math.min(queuedAt + takeIn, end ?? Number.POSITIVE_INFINITY));
+}
+
+/** Who of a session's tree is running, and when one ended. */
+interface Tree {
+  running(id: string, at: number): boolean;
+  ended(id: string): number | undefined;
+}
+
+/** The tree of a session's subagents (by omp id: their names), Main always running. */
+function treeOf(subs: readonly Subagent[]): Tree {
+  const rows = new Map(subs.map((s) => [s.name, s]));
+  return {
+    running: (id, at) => {
+      if (id === MAIN) return true;
+      const r = rows.get(id);
+      return r?.startedAt !== undefined && r.startedAt <= at && (r.endedAt === undefined ? r.status === "running" : r.endedAt > at);
+    },
+    ended: (id) => (id === MAIN ? undefined : rows.get(id)?.endedAt),
+  };
+}
+
+/**
+ * Receipts of a send at `at` to `to`, as of `now`: pending until omp settles it, then omp's
+ * outcome; what it queued (`injected`) is `received` once the recipient takes it in (`takenAt`).
+ */
+function settled(to: readonly string[], at: number, now: number, tree: Tree, outcome = "injected", takeIn = TAKE_IN_MS): IrcReceipt[] {
   return to.map((t) => {
-    if (!running(t, at)) return now >= at + REFUSE_MS ? { to: t, outcome: "failed", error: `Failed: ${t} is not running.` } : { to: t, outcome: "pending" };
-    return { to: t, outcome: now >= at + SETTLE_MS ? outcome : "pending" };
+    if (!tree.running(t, at)) return now >= at + REFUSE_MS ? { to: t, outcome: "failed", error: `Failed: ${t} is not running.` } : { to: t, outcome: "pending" };
+    if (now < at + SETTLE_MS) return { to: t, outcome: "pending" };
+    return { to: t, outcome: outcome === "injected" && now >= takenAt(t, at + SETTLE_MS, takeIn, tree.ended) ? "received" : outcome };
   });
 }
 
 /** pool's conversation so far, once its task runs (from `t0`, its first subagent's start). */
-function poolDrafts(subs: readonly Subagent[], now: number): { t0: number; drafts: Draft[] } | undefined {
+function poolDrafts(subs: readonly Subagent[], now: number, tree: Tree): { t0: number; drafts: Draft[] } | undefined {
   const first = POOL_SUBS[0];
   const t0 = subs.find((s) => s.name === first?.name && s.parentId === undefined)?.startedAt;
   if (t0 === undefined) return undefined;
-  const rows = new Map(subs.map((s) => [s.name, s]));
-  const running = (id: string, at: number): boolean => {
-    if (id === MAIN) return true;
-    const r = rows.get(id);
-    return r?.startedAt !== undefined && r.startedAt <= at && (r.endedAt === undefined ? r.status === "running" : r.endedAt > at);
-  };
   const out: Draft[] = [];
   for (const sub of POOL_SUBS) {
     sub.irc?.forEach((m, j) => {
       const key = `irc:${sub.name}:${j}`;
       const at = t0 + m.at;
       if (at > now) return;
-      const to = m.broadcast ? [MAIN, ...subs.filter((s) => s.name !== sub.name && running(s.name, at)).map((s) => s.name)] : [MAIN];
+      const to = m.broadcast ? [MAIN, ...subs.filter((s) => s.name !== sub.name && tree.running(s.name, at)).map((s) => s.name)] : [MAIN];
       // A wake relay answers what Main last told it.
       const asked = m.relay ? out.filter((d) => d.from === MAIN && d.to[0] === sub.name && d.at < at).at(-1)?.key : undefined;
-      out.push({ key, from: sub.name, to, broadcast: m.broadcast ?? false, text: m.text, at, replyTo: asked, wakeRelay: m.relay ?? false, progress: false, receipts: settled(to, at, now, running) });
+      out.push({ key, from: sub.name, to, broadcast: m.broadcast ?? false, text: m.text, at, replyTo: asked, wakeRelay: m.relay ?? false, progress: false, receipts: settled(to, at, now, tree) });
       const r = m.reply;
       if (r && at + r.after <= now) {
-        out.push({ key: `${key}:reply`, from: MAIN, to: [sub.name], broadcast: false, text: r.text, at: at + r.after, replyTo: key, wakeRelay: false, progress: false, receipts: settled([sub.name], at + r.after, now, running) });
+        const reply = `${key}:reply`;
+        out.push({ key: reply, from: MAIN, to: [sub.name], broadcast: false, text: r.text, at: at + r.after, replyTo: key, wakeRelay: false, progress: false, receipts: settled([sub.name], at + r.after, now, tree, "injected", SLOW_TAKE_IN[reply]) });
       }
     });
   }
   for (const l of POOL_TREE) {
     const at = t0 + l.at;
-    if (at > now || !running(l.from, at)) continue;
-    out.push({ key: l.key, from: l.from, to: [l.to], broadcast: false, text: l.text, at, replyTo: l.replyTo, wakeRelay: false, progress: l.progress ?? false, receipts: settled([l.to], at, now, running, l.outcome) });
+    if (at > now || !tree.running(l.from, at)) continue;
+    out.push({ key: l.key, from: l.from, to: [l.to], broadcast: false, text: l.text, at, replyTo: l.replyTo, wakeRelay: false, progress: l.progress ?? false, receipts: settled([l.to], at, now, tree, l.outcome) });
   }
   return { t0, drafts: out };
 }
 
-/** A session's log from its transcript's IRC rows before `before` (what Main sent and what reached it). */
-function transcriptDrafts(items: readonly TranscriptItem[], before = Number.POSITIVE_INFINITY): Draft[] {
+/**
+ * A session's log from its transcript's IRC rows before `before` (what Main sent and what reached
+ * it), as of `now`: what reached Main is in its transcript; what it sent a busy subagent is
+ * received once the subagent takes it in.
+ */
+function transcriptDrafts(items: readonly TranscriptItem[], now: number, tree: Tree, before = Number.POSITIVE_INFINITY): Draft[] {
   const keyOf = new Map<string, string>();
   const out: Draft[] = [];
   for (const row of items) {
@@ -172,13 +210,14 @@ function transcriptDrafts(items: readonly TranscriptItem[], before = Number.POSI
     if (m.messageId) keyOf.set(m.messageId, key);
     const replyTo = m.replyTo ? keyOf.get(m.replyTo) : undefined;
     if (m.direction === "in") {
-      out.push({ key, from: m.peer, to: [MAIN], broadcast: m.broadcast, text: m.text, at: e.at, replyTo, wakeRelay: m.wakeRelay, progress: false, receipts: [{ to: MAIN, outcome: "injected" }] });
+      out.push({ key, from: m.peer, to: [MAIN], broadcast: m.broadcast, text: m.text, at: e.at, replyTo, wakeRelay: m.wakeRelay, progress: false, receipts: [{ to: MAIN, outcome: "received" }] });
       continue;
     }
     const to = m.peer === "all" ? m.receipts.map((r) => r.to) : [m.peer];
     const pending = e.status === "pending" || e.status === "running";
     const failed = e.status === "error" || e.status === "aborted" || e.status === "denied";
-    const receipts = pending ? to.map((t) => ({ to: t, outcome: "pending" })) : failed ? to.map((t) => ({ to: t, outcome: "failed", error: e.error })) : m.receipts;
+    const settledReceipts = m.receipts.map((r) => (r.outcome === "injected" && now >= takenAt(r.to, e.at + SETTLE_MS, TAKE_IN_MS, tree.ended) ? { ...r, outcome: "received" } : r));
+    const receipts = pending ? to.map((t) => ({ to: t, outcome: "pending" })) : failed ? to.map((t) => ({ to: t, outcome: "failed", error: e.error })) : settledReceipts;
     out.push({ key, from: MAIN, to, broadcast: m.broadcast || m.peer === "all", text: m.text, at: e.at, replyTo, wakeRelay: m.wakeRelay, progress: false, receipts });
   }
   return out;
@@ -226,10 +265,12 @@ export class DemoAgentChat {
     const log = this.logOf(sim);
     const now = this.deps.now();
     // pool's own rows from its task on are the script's; any before it (and other sessions') are as the transcript has them.
-    const pool = poolDrafts(sim.subagents, now);
-    const drafts = [...transcriptDrafts(sim.items, pool?.t0), ...(pool?.drafts ?? [])];
+    const tree = treeOf(sim.subagents);
+    const pool = poolDrafts(sim.subagents, now, tree);
+    const drafts = [...transcriptDrafts(sim.items, now, tree, pool?.t0), ...(pool?.drafts ?? [])];
     for (const u of log.user) {
-      drafts.push({ key: `user:${u.n}`, from: USER, to: u.to, broadcast: u.broadcast, text: u.text, at: u.at, wakeRelay: false, progress: false, receipts: u.to.map((t) => ({ to: t, outcome: "injected" })) });
+      const receipts = u.to.map((t) => ({ to: t, outcome: now >= takenAt(t, u.at, TAKE_IN_MS, tree.ended) ? "received" : "injected" }));
+      drafts.push({ key: `user:${u.n}`, from: USER, to: u.to, broadcast: u.broadcast, text: u.text, at: u.at, wakeRelay: false, progress: false, receipts });
     }
     drafts.sort((a, b) => a.at - b.at);
     for (const d of drafts) if (!log.ids.has(d.key)) log.ids.set(d.key, `m${log.next++}`);
@@ -270,6 +311,12 @@ export class DemoAgentChat {
     const seq = (id: string) => Number(id.slice(1));
     const messages = [...log.messages.values()].filter((m) => after === undefined || m.rev > after).sort((a, b) => a.at - b.at || seq(a.id) - seq(b.id));
     return { epoch: log.epoch, rev: log.rev, messages, reset: after === undefined, truncated: false, live: true };
+  }
+
+  /** Subagent `to` took in Main's message sent at `at`, so its own transcript shows it (as omp writes it when the subagent takes it in). */
+  reached(sim: AgentSim, to: string, at: number): boolean {
+    const m = [...this.sync(sim).messages.values()].find((x) => x.from === MAIN && x.at === at && x.to.includes(to));
+    return m === undefined || m.receipts.some((r) => r.to === to && r.outcome === "received");
   }
 
   /** The user sent subagent `to` a message from the app; `broadcast`: one of a message to every running subagent. */

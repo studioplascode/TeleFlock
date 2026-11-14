@@ -2,6 +2,7 @@
 //! for loaded rows (`src/features/session/find/rowText.ts`) lists the same fields, so a row counts
 //! the same before and after the client loads it.
 
+use serde_json::Value;
 use tf_proto::{SessionFindResult, FindHit, ToolItem, ToolView, TranscriptItem};
 
 use super::text::{strip_ansi, Needle};
@@ -51,9 +52,29 @@ fn tool(t: &ToolItem, f: &mut dyn FnMut(&str)) {
     if let Some(i) = &t.intent {
         f(i);
     }
+    let cells = eval_cells(t);
     match &t.view {
+        // The eval card: each cell's code (under its title when there are several), the output, a
+        // screenshot's caption.
+        None | Some(ToolView::Image(_)) if !cells.is_empty() => {
+            for (title, code) in &cells {
+                if cells.len() > 1
+                    && let Some(title) = title
+                {
+                    f(title);
+                }
+                f(code);
+            }
+            if let Some(o) = &t.output {
+                f(&strip_ansi(o));
+            }
+            if let Some(ToolView::Image(i)) = &t.view {
+                for s in [&i.alt, &i.url].into_iter().flatten() {
+                    f(s);
+                }
+            }
+        }
         None => {
-            // The generic card: pretty-printed arguments, then the output.
             match &t.args {
                 serde_json::Value::Null => {}
                 serde_json::Value::String(s) => f(s),
@@ -76,12 +97,14 @@ fn tool(t: &ToolItem, f: &mut dyn FnMut(&str)) {
         }
         Some(ToolView::Bash(b)) => {
             f(b.command.split('\n').next().unwrap_or_default());
-            // A multi-line command is shown whole under the header too.
-            if b.command.contains('\n') {
-                f(&b.command);
-            }
             if let Some(cwd) = &b.cwd {
                 f(cwd);
+            }
+            // A multi-line command is shown whole under the header too. (A one-line command the
+            // header cuts off shows whole there instead: the header's copy is left out, so it still
+            // counts once.)
+            if b.command.contains('\n') {
+                f(&b.command);
             }
             // Streaming output arrives on the item; the view carries the final text.
             let out = match &t.output {
@@ -161,6 +184,28 @@ fn tool(t: &ToolItem, f: &mut dyn FnMut(&str)) {
     if let Some(e) = &t.error {
         f(e);
     }
+}
+
+/// The cells of an omp `eval` call, as its card shows them (`src/features/session/tools/evalArgs.ts`):
+/// `(title, code)` from `{code, title}`, or older omp's `{cells: [{code, title}, …]}`. A cell
+/// needs code that isn't blank; other tools have none.
+fn eval_cells(t: &ToolItem) -> Vec<(Option<&str>, &str)> {
+    if t.tool != "eval" {
+        return Vec::new();
+    }
+    let cells: Vec<&Value> = match t.args.get("cells").and_then(Value::as_array) {
+        Some(cells) => cells.iter().collect(),
+        None if t.args.get("code").is_some_and(Value::is_string) => vec![&t.args],
+        None => Vec::new(),
+    };
+    cells
+        .into_iter()
+        .filter_map(|cell| {
+            let code = cell.get("code")?.as_str().filter(|c| !c.trim().is_empty())?;
+            let title = cell.get("title").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
+            Some((title, code))
+        })
+        .collect()
 }
 
 /// Occurrences of `needle` in `item`'s searchable text.
@@ -258,6 +303,35 @@ mod tests {
         assert_eq!(count(&refused, &Needle::new("cyber", true).unwrap()), 2);
         let notice = TranscriptItem::Notice(NoticeItem { id: "n1.1".into(), at: 3, level: NoticeLevel::Warn, text: "Retrying".into(), source: Some("retry".into()) });
         assert_eq!(count(&notice, &Needle::new("retry", false).unwrap()), 2);
+    }
+
+    #[test]
+    fn eval_calls_count_their_code_as_written() {
+        let eval = |title: &str, args: serde_json::Value, view: Option<ToolView>, output: Option<&str>| {
+            let TranscriptItem::Tool(mut t) = tool_item(view, output, args) else { unreachable!() };
+            t.tool = "eval".into();
+            t.title = title.into();
+            t.intent = None;
+            TranscriptItem::Tool(t)
+        };
+        let texts = |item: &TranscriptItem| {
+            let mut out = Vec::new();
+            visit(item, &mut |s| out.push(s.to_owned()));
+            out
+        };
+        // the same rows as src/features/session/find/find.test.ts
+        let code = "name = \"panic\"\nprint(f\"{name}!\")";
+        let single = eval("Say it", json!({ "language": "py", "code": code, "title": "Say it" }), None, Some("\x1b[1mpanic!\x1b[0m"));
+        assert_eq!(texts(&single), ["Say it", code, "panic!"]);
+        assert_eq!(count(&single, &Needle::new("\"panic\"", false).unwrap()), 1, "the JSON escaped the quotes");
+        assert_eq!(count(&single, &Needle::new("panic", false).unwrap()), 2);
+        let cells = eval("eval", json!({ "cells": [{ "language": "py", "code": "a = 1", "title": "Load" }, { "language": "js", "code": "b()" }] }), None, None);
+        assert_eq!(texts(&cells), ["eval", "Load", "a = 1", "b()"]);
+        let image = serde_json::from_value(json!({ "type": "image", "image": { "mime": "image/png" }, "alt": "Shot", "url": "https://x.dev" })).unwrap();
+        let shot = eval("Shot", json!({ "language": "js", "code": "await tab.goto(url)" }), Some(image), Some("saved"));
+        assert_eq!(texts(&shot), ["Shot", "await tab.goto(url)", "saved", "Shot", "https://x.dev"]);
+        // no code yet (the model is still writing the call): its arguments, as any call's
+        assert_eq!(texts(&eval("eval", json!({ "language": "py" }), None, None)), ["eval", "{\n  \"language\": \"py\"\n}"]);
     }
 
     #[test]

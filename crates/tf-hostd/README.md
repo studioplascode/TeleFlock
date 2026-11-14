@@ -15,7 +15,9 @@ tf-hostd --version                                           # "tf-hostd 0.1.0 p
   for the socket. stdout carries protocol lines only; diagnostics go to stderr as `tf-hostd: …`.
   On Linux with systemd the daemon runs in its own transient scope (`teleflock-hostd-<pid>-<ms>.scope`,
   `tf_herdr::durable`; root, or a lingering user), so tearing down the attaching login session spares it;
-  if `systemd-run` cannot create the unit, `attach` starts the daemon plainly.
+  if `systemd-run` cannot create the unit, `attach` starts the daemon plainly. `attach` raises itself
+  first where it may (`priority::raise_attach`: nice −10 as root, above-normal class on Windows); the
+  daemon inherits that until its own check takes over.
 - Several devices share one daemon, and their apps update at different times, so a host only moves
   forward (`tf_proto::version::cmp_lines`: semver, then protocol):
   - `attach --replace` (the app just installed its build) stops a running daemon whose binary identity
@@ -77,12 +79,14 @@ fn activity_page(&self, before: Option<Millis>, limit: usize, agent_id: Option<&
 fn record_activity(&self, agent_id: &str, kind: ActivityKind, title: String, detail: Option<String>)
 fn refresh(&self)                            // re-pull the herdr snapshot soon (after workspace/tab ops)
 fn refresh_repo(&self, cwd: &str)            // re-read git info for a folder (after commits)
-fn set_info(&self, info: HostInfo)            // keeps `info.tools` (owned by set_tools)
+fn set_info(&self, info: HostInfo)            // keeps `info.tools` (owned by set_tools) and `info.priority`
 fn set_tools(&self, tools: Option<ToolUpdates>)
+fn set_priority(&self, p: Option<PriorityStatus>) // what runs above the agents (crate::priority)
 fn set_auto_answer(&self, aa: AutoAnswers)    // once per context: rebuilds call `aa.observe(agent, now, apps)`
 fn decisions_changed(&self)                   // publishes decide for me's unreviewed review items (HostInfo.decisions)
 fn set_chats(&self, root: ChatRoot)           // once per context: chat agents/workspaces marked, HostInfo.chats
 fn usage_today(&self) -> UsageTotals
+fn agent_loads(&self) -> Vec<AgentLoad>      // the latest health tick's per-agent loads (`host.health` answers with them)
 ```
 ### `OmpHandle` (`src/omp.rs`, `Clone`)
 `relay_listening()`, `relay_port()`, `session(sid)`, `repoll()`, `usage_today()`.
@@ -111,6 +115,19 @@ while nothing is in it (`undo_chat_launch`).
   replicas, bridge, git (per worktree; on turn ends, cwd changes and connects, 5 min while clients are
   connected) → `HostState`; patches ≤ 10 Hz, one rev per message; pulses per 100 ms. Columns, needs and
   notifications per §3.5; archive/turns/activity/usage in `state.json` (compact; usage-only changes ≤ 1/min).
+  The main agent's own progress estimate (bridge ≥ 2.6.0 `state.progress`, asked because hostd's `welcome`
+  says `caps.progress`) is `OmpInfo.progress` while the board's turn runs (herdr working, or the replica's
+  turn), gone with the turn or the bridge.
+- **Agent loads** (`state/loads.rs`, `HostHealth.agents`, hosts ≥ 0.9.5): every health tick (5 s, while
+  clients are connected; a connect takes a fresh baseline) samples the process table once and gives each
+  board agent with a running process its tree's CPU (on the host's scale: 100 % = every core), resident
+  memory and process count, busiest first. The tree starts at the agent's omp (`OmpInfo.pid`) when that runs
+  in its pane, else at the pane's shell; parent links find what omp's tools start in sessions of their own,
+  and a process counts for the nearest agent above it. CPU deltas are keyed by (pid, start time); a process
+  born since the last sample counts its whole life; on Linux reaped children's time (`cutime`/`cstime`) counts
+  minus what earlier samples saw of them, so short commands are not lost and an exit adds no spike. Linux
+  reads `/proc/stat` and one `/proc/<pid>/stat` per process; macOS and Windows refresh `sysinfo`'s processes
+  with CPU time and memory only.
 - **omp** (`omp.rs`): relay on `127.0.0.1:<relay-port>`, registry poll every 1.5 s, one guest + replica per
   room on our relay (rooms on other relays are `notShared`), session events coalesced to one flush / 50 ms
   (`meta` ≤ 2/s per session, the tree only when it changed for apps ≥ 0.5.1)
@@ -233,6 +250,23 @@ while nothing is in it (`undo_chat_launch`).
   `idleMinutes` (live handoff, else stop + start; `idle.rs` lists what blocks). Servers TeleFlock starts read
   `<home>/herdr-config.toml` (`HERDR_CONFIG_PATH`: the user's config with `resume_agents_on_restore = false`).
   `subscribe` / `current` for agent recovery, `down_error` for requests, `HostInfo.herdrHealth` for apps.
+- **Keeping the host responsive** (`priority/`, §3.36): at daemon start and every 5 min tf-hostd runs
+  TeleFlock, the SSH server and Tailscale above the agents' work and publishes `HostInfo.priority`
+  `{raised, note?, checkedAt}` (every session context follows it, `priority::follow`). Linux with systemd
+  and cgroup v2 CPU control: `CPUWeight`/`IOWeight` 1000 (`systemctl set-property --runtime`, never
+  lowering a higher one) on its own `teleflock-hostd-*.scope`, the sshd listener's unit and
+  `tailscaled.service` (system units as root; a user only its own manager's scope). Elsewhere nice −10
+  on every thread (+ the autogroup where tasks sit in the root CPU group), macOS as root; Windows the
+  above-normal class (sshd/tailscaled only elevated). Agents' work never rides on it: herdr servers
+  (`tf_herdr::durable::drop_raised_nice`) and forwarded commands drop a raised nice in their own session;
+  forwarded commands start held (`priority/work.rs`: a `/bin/sh` trampoline reads its release on fd 3)
+  and are moved into their own `teleflock-forward-*.scope` (`busctl … StartTransientUnit` with their pid,
+  then seen in `/proc/<pid>/cgroup`) while tf-hostd's unit is raised; a failed move still runs them, once
+  (and triggers a re-check), tf-hostd dying first makes them exit 125 unrun. tf-hostd raises its own unit
+  only after a probe made that same move (hourly while it works, at once after a failed move) and not
+  while a herdr server shares its cgroup (then nice, and the weights it raised go back). Only the real
+  home touches sshd/tailscaled; `TF_HOSTD_PRIORITY_SERVICES=ssh=<unit>,tailscale=<unit>` names stand-in
+  units (labs), `none` touches neither. `tf-forward` relays run inside panes: agent work, not raised.
 
 ## Forwarding (`src/forward/`, architecture §3.30)
 - `Forwarder` (`Daemon::forward`, `Clone`): `offer(client, offers)` (`fwdOffer`; newest offer per name wins), `fwd(client, sid, ev)` (`fwd` events: even sids are streams this host opened, odd ones streams an app opened here), `client_gone(id)` (its offers go, its streams end, what ran for it is killed). `clients.rs` negotiates the `forward` feature and routes the messages only for clients that speak it.
@@ -244,6 +278,16 @@ while nothing is in it (`undo_chat_launch`).
 `cargo test -p tf-hostd` (unit + `tests/attach.rs` lifecycle through the real binary, no herdr needed).
 Lab e2e: `examples/e2e.rs` (see its header); decide for me: `examples/e2e_autoanswer.rs` (real omp in a lab; its mock model and omp settings in `src/autoanswer/testdata/`).
 Agent recovery: `cargo test -p tf-hostd restart recovery` (session facts, the decision table and note, the ledger, never-double-launch, names, start-timeout rename, herdr's argv rules, ticket policy); lab `examples/e2e_lifeboat.rs` (see its header).
+Main-agent progress (`OmpInfo.progress`, bridge 2.6.0): lab `examples/e2e_progress.rs` with its mock model `examples/e2e_progress_mock.ts` (see its header: real omp and herdr with herdr's omp integration, the bridge on a seconds schedule; the estimate on the agent while its turn runs, gone after it, each question billed in the session file; nothing with omp's `task.completionProbe` off).
 herdr lifecycle: `cargo test -p tf-hostd herdr_health` (state machine, idle gating, managed config, stale saved sessions).
 Chat tasks: `cargo test -p tf-hostd chat` (names, folders, path matching, what keeps a folder, removal safety, the chats workspace, launch mapping, `chat.delete`'s target, other herdr sessions' chats, the board marker).
 Subscription limits: `cargo test -p tf-hostd ops::limits` (parsing, omp's cached reports over the snapshot, recent readings kept whole, full reports giving way to header readings, session pins).
+Agent loads: `cargo test -p tf-hostd state::loads` (trees per pane, the omp-or-shell root, nested agents,
+CPU deltas on the host's scale, new and missed processes, pid reuse, reaped children and grandchildren, the
+gap baseline, stale Windows parents, `/proc/<pid>/stat` parsing, a real process tree); the scan's cost:
+`cargo test -p tf-hostd --release state::loads -- --ignored --nocapture` (`TF_LOADS_SPAWN=2000` adds sleeping
+processes).
+Process priority: `cargo test -p tf-hostd priority` (the planner on cgroup/nice/root/user/lab/Windows/macOS
+facts, probe reuse and failure, undoing tf-hostd's weights, notes, the trampoline from any descriptor:
+released, failed move, never released) and `cargo test -p tf-hostd forward::exec` (held commands through
+pipes and a terminal; a raised daemon's commands start at nice 0, root only); against a recording `System`.

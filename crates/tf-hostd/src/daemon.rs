@@ -299,6 +299,8 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     tools.spawn(shutdown.child_token());
     // omp's stats index for `host.usage`: synced on demand; warmed every 30 min on the real daemon.
     crate::ops::usage::start(&paths, persist.clone(), shutdown.child_token());
+    // TeleFlock, the SSH server and Tailscale above the agents' work (§3.36): now and every 5 min.
+    crate::priority::start(&paths, shutdown.child_token());
     let notify = crate::notify::Notifier::load(&paths.home, shutdown.child_token());
     let forward = crate::forward::Forwarder::start(&paths, shutdown.child_token());
     let mut listener = Listener::start(bound, &paths).with_context(|| format!("bind {}", paths.endpoint()))?;

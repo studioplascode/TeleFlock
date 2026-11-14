@@ -23,6 +23,7 @@ import { AgentCard } from "./AgentCard";
 import { archiveWithUndo, openAgent, setArchived } from "./agentActions";
 import { useBoard } from "./boardStore";
 import { LANES, LANE_BY_COLUMN, type LaneMeta } from "./lanes";
+import { QueueAllButton } from "./QueueAllDialog";
 
 export type LaneKeys = Record<Column, string[]>;
 
@@ -170,6 +171,7 @@ function Lane({
         <span className="ml-auto min-w-0 truncate text-2xs font-semibold text-mute-2" title={meta.legend}>
           {meta.legend}
         </span>
+        {meta.column === "running" && <QueueAllButton />}
       </header>
       {refused && isOver && (
         <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mx-3 mb-2 rounded-md bg-error/10 px-3 py-2 text-2xs font-semibold text-error-ink">

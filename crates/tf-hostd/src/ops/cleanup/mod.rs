@@ -9,6 +9,7 @@ pub mod scan;
 pub mod shells;
 pub mod storage;
 
+mod cache;
 mod prs;
 mod sessions;
 mod size;
