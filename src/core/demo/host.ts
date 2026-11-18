@@ -1872,9 +1872,12 @@ export class DemoHost implements SimHost {
     const requested = this.requestedName(spec);
     const name = requested ?? this.uniqueName(fallbackName);
     // A `default` role of the agent's own is its main model; `model` / `thinking` aren't passed then.
-    const main = own?.roles.default ? selectorParts(own.roles.default) : undefined;
+    // A main model `@<role>` runs that role's model (the agent's own binding first), as omp's `--model @<role>`.
+    const role = typeof spec.model === "string" && spec.model.startsWith("@") ? spec.model.slice(1) : null;
+    const bound = role ? (own?.roles[role] ?? this.ompSettings.roles().find((r) => r.role === role)?.model) : undefined;
+    const main = own?.roles.default ? selectorParts(own.roles.default) : bound ? selectorParts(bound) : undefined;
     const model = main ? modelByRef(main.model)?.label : typeof spec.model === "string" ? modelByRef(spec.model)?.label : undefined;
-    const thinking = main ? main.thinking : (spec.thinking as AgentDef["thinking"]);
+    const thinking = own?.roles.default ? main?.thinking : ((spec.thinking as AgentDef["thinking"]) ?? main?.thinking);
     const prompt = demoFirstPrompt(spec);
     // A launch's command (`AgentSpec.command`, a Dispatch message that is one).
     const command = demoLaunchCommand(spec);

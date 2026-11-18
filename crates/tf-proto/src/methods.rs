@@ -435,6 +435,8 @@ wire_struct! {
         pub name: Option<String>,
         /// herdr agent kind (`omp`).
         pub kind: String,
+        /// Main model: `provider/id`, or one of omp's model roles as `@<role>` (`@slow`; hosts ≥ 0.9.6,
+        /// resolved by omp at start like `--model @<role>`, the agent's own `role_models` included).
         pub model: Option<String>,
         pub thinking: Option<ThinkingLevel>,
         pub plan: bool,

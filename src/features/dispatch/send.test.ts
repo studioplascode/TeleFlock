@@ -120,6 +120,35 @@ describe("planSend: commands", () => {
   });
 });
 
+describe("planSend: goal mode and model roles", () => {
+  const w = {
+    profiles: [profile("new"), profile("mid"), profile("old")],
+    status: online("new", "mid", "old"),
+    states: { new: state({ version: "0.9.6" }), mid: state({ version: "0.9.1" }), old: state({ version: "0.9.0" }) },
+    dispatch: memory,
+  };
+  const req = { target: "new", repo: "/home/a/app", prompt: "fix the flaky test", images: [], options };
+
+  test("goal mode needs a daemon that runs commands; a message that is a command starts no goal", () => {
+    const goal = { ...options, goal: true };
+    expect(planSend(w, { ...req, target: "mid", options: goal })).toMatchObject({ ok: true, hostId: "mid" });
+    expect(planSend(w, { ...req, target: "old", options: goal })).toMatchObject({ ok: false, title: "OLD can't start agents in goal mode yet" });
+    expect(planSend(w, { ...req, target: "old" })).toMatchObject({ ok: true });
+  });
+
+  test("a role as the main model goes only to a daemon that starts agents on roles", () => {
+    const slow = { ...options, model: "@slow" };
+    expect(planSend(w, { ...req, options: slow })).toMatchObject({ ok: true, hostId: "new", args: { options: slow } });
+    const refused = planSend(w, { ...req, target: "mid", options: slow });
+    expect(refused).toMatchObject({ ok: false, title: "MID can't start agents on the @slow role yet" });
+    expect(refused.ok ? "" : refused.description).toContain("0.9.6");
+    // Auto leaves such hosts out of the pick.
+    const pool = { ...w, profiles: ["new", "mid"].map((id) => profile(id, "pool")), states: { new: state({ version: "0.9.6", agents: running("new", 3) }), mid: state({ version: "0.9.1" }) } };
+    expect(planSend(pool, { ...req, target: "auto:pool", repo: CHAT_REPO, options: slow })).toMatchObject({ ok: true, hostId: "new" });
+    expect(planSend(pool, { ...req, target: "auto:pool", repo: CHAT_REPO, options })).toMatchObject({ ok: true, hostId: "mid" });
+  });
+});
+
 describe("planSend: in this folder", () => {
   const branches = { branches: [{ name: "main", current: true, remote: false }, { name: "origin/fix-ci", current: false, remote: true }], defaultBranch: "main", defaultBase: "origin/main" };
 

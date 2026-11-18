@@ -1,14 +1,15 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowUp, Check, ClipboardList, Cpu, Layers, LayoutTemplate, Lock, Mic, MicOff, Paperclip, Slash, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { ArrowUp, Check, ClipboardList, Cpu, Goal, Layers, LayoutTemplate, Lock, Mic, MicOff, Paperclip, Slash, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { type DraftImage, useAiNaming, useAiSuggestion, useDraft, useDraftImages, useSettings } from "@/core";
+import { type DraftImage, useAiNaming, useAiSuggestion, useCore, useDraft, useDraftImages, useHosts, useSettings } from "@/core";
 import { attachImages, dragHasFiles, isVideoFile, mediaFiles } from "@/core/clipboardImages";
 import { attachVideos, detachDraftVideos, MAX_DRAFT_VIDEOS, removeDraftVideo, retryVideos, useDraftVideos } from "@/core/draftVideos";
-import type { ThinkingLevel } from "@/core/gen";
+import type { ModelInfo, RoleBinding } from "@/core/gen";
 import { expandPastes } from "@/core/pastes";
 import { Button, IconButton, Kbd, Lightbox, LightboxTrigger, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn, spring, toast } from "@/design";
 import { AgentRolesSection, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
-import { launchMainText, overridesSummary } from "@/features/agentRoles/roles";
+import { launchMainText, overridesSummary, selectorLabel } from "@/features/agentRoles/roles";
+import { hostTakesRoleModel, mainRoles, mainSelector, ROLE_MODEL_MIN_HOSTD, roleName, roleOf, thinkingChoices } from "@/features/agentRoles/mainModel";
 import { ModelPresetsSection, PresetRows, useMatchingPreset } from "@/features/agentRoles/ModelPresets";
 import { type PresetPatch, withPreset } from "@/features/agentRoles/presets";
 import { policyChipText } from "@/features/autoAnswer/format";
@@ -30,7 +31,8 @@ import { type DispatchOptions, suggestDispatchName } from "./store";
 import { commandTask, prefetchKey, rambleAbout } from "./thread";
 
 const DEFAULT = "default";
-const LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const NO_MODELS: readonly ModelInfo[] = [];
+const NO_ROLES: readonly RoleBinding[] = [];
 
 export interface DispatchComposerHandle {
   focus(): void;
@@ -240,6 +242,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
               ? [
                   `Runs ${routed.command.line.split(/\s/, 1)[0]} in the new agent`,
                   routed.command.replacesPlan && options.plan && "it picks the mode, so the Plan option is left off",
+                  options.goal && "a command starts no goal, so Goal mode is left off",
                   template?.prompt.trim() && "the template's text isn't added to a command",
                 ]
                   .filter(Boolean)
@@ -317,7 +320,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
               type="button"
               role="switch"
               aria-checked={options.plan}
-              onClick={() => onOptionsChange({ ...options, plan: !options.plan })}
+              onClick={() => onOptionsChange({ ...options, plan: !options.plan, goal: options.plan ? options.goal : false })}
               title="Plan mode: the agent proposes a plan before editing"
               className={cn(
                 "inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-2xs font-bold pressable focus-ring [&_svg]:size-3.5",
@@ -326,6 +329,21 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
             >
               <ClipboardList />
               Plan
+            </button>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={!!options.goal}
+              aria-label="Goal mode"
+              onClick={() => onOptionsChange({ ...options, goal: !options.goal, plan: options.goal ? options.plan : false })}
+              title="Goal mode: the task becomes the agent's goal, and it keeps working until the goal is met"
+              className={cn(
+                "inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-2xs font-bold pressable focus-ring [&_svg]:size-3.5",
+                options.goal ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "text-mute hover:bg-ink/6 hover:text-ink",
+              )}
+            >
+              <Goal />
+              {!mobile && "Goal"}
             </button>
             {disabledReason ? (
               <span className="flex min-w-0 items-center gap-1.5 truncate text-2xs font-semibold text-mute-2">
@@ -362,24 +380,48 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
   const templates = useSettings((s) => s.templates);
   const catalog = useModelCatalog(hostId);
   const template = templates.find((t) => t.id === options.templateId);
+  // Roles as main models need a daemon that starts agents on them (the demo host always does).
+  const takesRoles = useCore((s) => (hostId ? hostTakesRoleModel(s.hosts[hostId]?.state.info) : false));
+  const demo = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.kind === "demo");
   // A saved model preset these options are (not over a template, whose model wins).
   const fields = { model: options.model, thinking: options.thinking, roleModels: options.roleModels ?? {}, fallbackChains: options.fallbackChains ?? {} };
   const matched = useMatchingPreset(fields);
   const preset = template ? undefined : matched;
+  const models = catalog?.models ?? NO_MODELS;
+  const hostRoles = catalog?.roles ?? NO_ROLES;
   const modelLabel = (id: string) => {
     if (id === DEFAULT) return "Default model";
-    const m = catalog?.models.find((x) => `${x.provider}/${x.id}` === id);
+    if (roleOf(id)) return id;
+    const m = models.find((x) => `${x.provider}/${x.id}` === id);
     return m?.label ?? id.split("/").pop() ?? id;
   };
   const label = template ? template.name : preset ? preset.name : [modelLabel(options.model), options.thinking !== DEFAULT && options.thinking].filter(Boolean).join(" · ");
 
   const modelOptions = useMemo<SelectOption[]>(() => {
-    const opts: SelectOption[] = [{ value: DEFAULT, label: "Host default", icon: <Sparkles /> }];
-    for (const m of catalog?.models ?? []) opts.push({ value: `${m.provider}/${m.id}`, label: m.label ?? m.id, hint: m.provider });
+    const defaultRole = mainSelector(DEFAULT, hostRoles, options.roleModels);
+    const opts: SelectOption[] = [{ value: DEFAULT, label: "Host default", hint: defaultRole ? selectorLabel(models, defaultRole) : "omp's default role", icon: <Sparkles /> }];
+    for (const r of mainRoles(hostRoles, options.roleModels)) {
+      const can = takesRoles || demo;
+      opts.push({
+        value: `@${r.role}`,
+        label: `@${r.role} · ${roleName(r.role)}`,
+        hint: can ? selectorLabel(models, r.model) : `Update the host (TeleFlock ${ROLE_MODEL_MIN_HOSTD}+) to start on a role`,
+        icon: <Layers />,
+        disabled: !can,
+      });
+    }
+    for (const m of models) opts.push({ value: `${m.provider}/${m.id}`, label: m.label ?? m.id, hint: m.provider });
     if (options.model !== DEFAULT && !opts.some((o) => o.value === options.model)) opts.push({ value: options.model, label: options.model });
     return opts;
-  }, [catalog, options.model]);
-  const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...LEVELS.map((l) => ({ value: l, label: l }))];
+  }, [models, hostRoles, options.roleModels, options.model, takesRoles, demo]);
+  // The levels of the model the choice runs (a role's, the host default's), `max` and `auto` included where it has them.
+  const levels = thinkingChoices(models, mainSelector(options.model, hostRoles, options.roleModels));
+  const thinking = options.thinking === DEFAULT || levels.includes(options.thinking) ? options.thinking : DEFAULT;
+  const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...levels.map((l) => ({ value: l, label: l }))];
+  const pickModel = (model: string) => {
+    const next = thinkingChoices(models, mainSelector(model, hostRoles, options.roleModels));
+    onChange({ ...options, model, thinking: options.thinking !== DEFAULT && !next.includes(options.thinking) ? DEFAULT : options.thinking });
+  };
 
   const row = "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-left text-sm font-semibold text-ink-2 hover:bg-ink/7 hover:text-ink focus-ring";
   return (
@@ -394,7 +436,7 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
         {template ? <LayoutTemplate /> : preset ? <Layers /> : <Cpu />}
         <span className="truncate">{label}</span>
       </PopoverTrigger>
-      <PopoverContent side="top" align="start" className="flex w-[min(340px,calc(100vw-24px))] flex-col gap-3">
+      <PopoverContent side="top" align="start" className="flex w-[min(360px,calc(100vw-24px))] flex-col gap-3">
         {templates.length > 0 && (
           <div className="flex flex-col gap-0.5">
             <span className="kicker px-1 pb-1">Template</span>
@@ -403,7 +445,7 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
                 key={t.id}
                 type="button"
                 className={cn(row, t.id === options.templateId && "bg-accent/14 text-ink")}
-                onClick={() => onChange({ ...options, templateId: t.id, model: t.model ?? DEFAULT, thinking: t.thinking ?? DEFAULT, plan: t.plan })}
+                onClick={() => onChange({ ...options, templateId: t.id, model: t.model ?? DEFAULT, thinking: t.thinking ?? DEFAULT, plan: t.plan, goal: t.plan ? false : options.goal })}
               >
                 <LayoutTemplate className="size-4 shrink-0 text-mute" />
                 <span className="flex min-w-0 flex-1 flex-col">
@@ -423,9 +465,9 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
         <PresetRows hostId={hostId} value={fields} onApply={(patch) => onChange(withPreset(options, patch))} rowClassName={row} />
         {!template && (
           <div className="grid grid-cols-[minmax(0,1fr)_112px] gap-2">
-            <Select value={options.model} onValueChange={(model) => onChange({ ...options, model })} options={modelOptions} className="w-full min-w-0" aria-label="Model" />
+            <Select value={options.model} onValueChange={pickModel} options={modelOptions} className="w-full min-w-0" aria-label="Model" />
             <Select
-              value={options.thinking}
+              value={thinking}
               onValueChange={(t) => onChange({ ...options, thinking: t as DispatchOptions["thinking"] })}
               options={thinkingOptions}
               className="w-full min-w-0"
@@ -433,9 +475,14 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
             />
           </div>
         )}
+        {/* omp starts in one mode: plan mode and goal mode exclude each other. */}
         <label className="flex items-center gap-2.5 px-1 text-xs font-semibold text-mute">
-          <Switch checked={options.plan} onCheckedChange={(plan) => onChange({ ...options, plan })} label="Plan mode" />
+          <Switch checked={options.plan} onCheckedChange={(plan) => onChange({ ...options, plan, goal: plan ? false : options.goal })} label="Plan mode" />
           Plan mode — propose a plan before editing
+        </label>
+        <label className="flex items-center gap-2.5 px-1 text-xs font-semibold text-mute">
+          <Switch checked={!!options.goal} onCheckedChange={(goal) => onChange({ ...options, goal, plan: goal ? false : options.plan })} label="Goal mode" />
+          Goal mode — the task is its goal; it keeps going until the goal is met
         </label>
       </PopoverContent>
     </Popover>

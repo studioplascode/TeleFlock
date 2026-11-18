@@ -528,6 +528,17 @@ pub(crate) fn check_model(model: &str) -> Result<(), ApiError> {
     if ok { Ok(()) } else { Err(ApiError::new("invalid_params", format!("model must be `provider/id`, got `{model}`"))) }
 }
 
+/// A launch's main model: `provider/id`, or one of omp's model roles as `@<role>` (`@slow`,
+/// `@smol`, hosts ≥ 0.9.6), which omp resolves at start like its own `--model @<role>`, the
+/// agent's own roles (`AgentSpec.roleModels`) included.
+pub(crate) fn check_launch_model(model: &str) -> Result<(), ApiError> {
+    let Some(role) = model.strip_prefix('@') else { return check_model(model) };
+    let ok = role.len() <= 32
+        && role.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && role.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if ok { Ok(()) } else { Err(ApiError::new("invalid_params", format!("model must be `provider/id` or `@<role>`, got `{model}`"))) }
+}
+
 async fn set_model(ctx: &Ctx, p: SetModelParams) -> Result<(), ApiError> {
     check_model(&p.model)?;
     crate::limit_resume::intervened(ctx, &p.agent_id, "model changed");
@@ -1395,7 +1406,7 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
         }
     }
     if let Some(m) = &spec.model {
-        check_model(m)?;
+        check_launch_model(m)?;
     }
     let kind = if spec.kind.trim().is_empty() { "omp".to_string() } else { spec.kind.trim().to_string() };
     let own = Some(AgentOmp::of(spec)).filter(|o| kind == "omp" && !o.is_empty());
@@ -1872,6 +1883,12 @@ mod tests {
         assert!(check_model("openai-codex/gpt-6-luna").is_ok());
         assert!(check_model("gpt").is_err());
         assert!(check_model("a/ b").is_err());
+        assert!(check_launch_model("@slow").is_ok());
+        assert!(check_launch_model("@my-role_2").is_ok());
+        assert!(check_launch_model("anthropic/claude-opus-5-5").is_ok());
+        assert!(check_launch_model("@").is_err());
+        assert!(check_launch_model("@2fast").is_err());
+        assert!(check_launch_model("@slow --yolo").is_err());
     }
 
     #[test]

@@ -11,7 +11,12 @@ name?: string,
 /**
  * herdr agent kind (`omp`).
  */
-kind: string, model?: string, thinking?: ThinkingLevel, plan: boolean, 
+kind: string, 
+/**
+ * Main model: `provider/id`, or one of omp's model roles as `@<role>` (`@slow`; hosts ≥ 0.9.6,
+ * resolved by omp at start like `--model @<role>`, the agent's own `role_models` included).
+ */
+model?: string, thinking?: ThinkingLevel, plan: boolean, 
 /**
  * Initial prompt, submitted once the agent is ready.
  */

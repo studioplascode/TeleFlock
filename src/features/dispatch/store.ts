@@ -44,9 +44,12 @@ const NAME_TAKEN = /agent_name_taken|agent name .* already (taken|used)/i;
 /** Per-dispatch agent options (`"default"` = the host's default for model / thinking). */
 export interface DispatchOptions {
   templateId: string | null;
+  /** `default`, `@<role>` (one of omp's model roles, hosts ≥ 0.9.6) or `provider/id`. */
   model: string;
   thinking: ThinkingLevel | "default";
   plan: boolean;
+  /** Goal mode: the task is the agent's goal (`/goal set <task>`, hosts ≥ 0.9.1), so it keeps working until it is met; plan is off then. Absent = off. */
+  goal?: boolean;
   /** The agent's own omp model roles; absent (options saved before them) = none. */
   roleModels?: Record<string, string>;
   /** The agent's own omp `retry.fallbackChains`; absent = none. */
@@ -398,6 +401,11 @@ function slot(key: string): Promise<() => void> {
   });
 }
 
+/** omp's `/goal set <objective>` for a task: one line, its whitespace and line breaks folded into single spaces (omp's composer takes one line). */
+export function goalCommand(task: string): string {
+  return `/goal set ${task.split(/\s+/).filter(Boolean).join(" ")}`;
+}
+
 /**
  * The agent spec of an entry for `hostId`, the host it goes to: its images read back from storage
  * (an entry whose images are gone fails), a reference line per uploaded video after the task, and
@@ -412,14 +420,17 @@ async function specOf(e: DispatchEntry, hostId: string): Promise<AgentSpec> {
   if (e.images && !images) {
     throw apiError("images_missing", "The task's images are no longer stored on this device", { hint: "Dismiss it and send the task again with its images" });
   }
+  const framed = template?.prompt.trim() ? (task ? `${template.prompt.trim()}\n\n${task}` : template.prompt.trim()) : task;
+  const goalOn = !!e.options.goal && !e.command && !!framed;
   return {
     kind: "omp",
     name: e.name,
     model: e.options.model === DEFAULT ? undefined : e.options.model,
     thinking: e.options.thinking === DEFAULT ? undefined : e.options.thinking,
-    plan: e.options.plan,
+    plan: e.options.plan && !goalOn,
     // A command runs as typed; a task gets a template's own instructions framing it (as in Fan out).
-    ...(e.command ? { command: e.command } : { prompt: template?.prompt.trim() ? (task ? `${template.prompt.trim()}\n\n${task}` : template.prompt.trim()) : task }),
+    // In goal mode the framed task is the goal (one line: omp's `/goal set` takes one), its images follow it.
+    ...(e.command ? { command: e.command } : goalOn ? { command: goalCommand(framed) } : { prompt: framed }),
     ...(images ? { images } : {}),
     ...launchOverrides(e.options.roleModels, e.options.fallbackChains, hostTakesRoles(getHostStates()[hostId]?.info)),
     ...specAutoAnswer(e.options.autoAnswer, hostDecides(getHostStates()[hostId]?.info)),

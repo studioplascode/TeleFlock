@@ -331,8 +331,13 @@ After submitting, re-read the pane. If the composer still holds the text, send o
 herdr --session S agent start <name> --kind omp --pane <pane> -- \
   --config ~/.teleflock/omp-overlay.yml [--config ~/.teleflock/agent-config/<id>.yml] \
   -e ~/.teleflock/ext/teleflock-bridge.ts \
-  [--model <provider/id>] [--thinking <level>] [--resume=<file>]
+  [--model <provider/id | @role>] [--thinking <level>] [--resume=<file>]
 ```
+
+`AgentSpec.model` is `provider/id` or, hosts ≥ 0.9.6, one of omp's model roles as `@<role>` (`check_launch_model`: a
+letter, then letters, digits, `_` or `-`, ≤ 32): omp resolves it at start like its own `--model @slow`, with the
+agent's own `--config` roles over the host's; a role omp doesn't know fails the start. `agent.setModel` stays
+`provider/id`. Goal mode (Dispatch) is a launch `command`, `/goal set <task>` (below).
 
 Once the agent is idle and `link=live`:
 - `plan: true` → bridge `setPlan`, or inject `/plan`;

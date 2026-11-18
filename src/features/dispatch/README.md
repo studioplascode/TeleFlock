@@ -31,7 +31,8 @@ export function isInFlight(entryId: string): boolean;               // request q
 export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create (in place or a chat: agent.start) settles
 export interface DispatchEntry { id; prompt; command?; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed?; chat?; inPlace? } // phase: naming | queued | creating | started | failed | unknown; branch: `<slug>` (entries from before 0.9.4: `dispatch/<slug>`, kept); sessionId: omp session captured while live; chat: a chat (branch "", no base / repo); inPlace: its agent runs in `repo` itself (branch "", no base); command: the line its agent ran (a message that is a command; prompt = the text as typed)
 export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries (any thread, Auto included) of agents whose omp session was deleted and of deleted chats (HostInfo.pruned), and their images
-export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean; roleModels?; fallbackChains?; autoAnswer? } // the agent's own omp roles / chains and decide-for-me policy; absent (options saved before them) = none / the host default
+export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean; goal?: boolean; roleModels?; fallbackChains?; autoAnswer? } // model: "default", "@<role>" (one of omp's model roles) or "provider/id"; goal: Goal mode (absent = off); the agent's own omp roles / chains and decide-for-me policy; absent (options saved before them) = none / the host default
+export function goalCommand(task: string): string;               // "/goal set <task on one line>": the command a goal-mode task's agent runs
 
 // src/features/dispatch/images.ts — images of sent tasks (IndexedDB "tf.dispatch"/"images", keyed by entry id; memory fallback)
 export const MAX_TASK_IMAGES = 8; // their total: MAX_PROMPT_IMAGE_CHARS (@/core/clipboardImages, 12 MiB base64; relay messages cap at 16 MiB)
@@ -57,7 +58,7 @@ export function sendTask(world, req): { ok: true; hostId; entry } | { ok: false;
 export function dispatchTarget(profiles, hostIds, lastHost): { target; group }; // last host or group, else the first host
 export function dispatchOptions(stored, settings): DispatchOptions;             // last used, else the Settings defaults
 export function dispatchDraftKey(target, repo): string;                         // the composer draft of a thread
-export function dispatchedRepos(threads, folders); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); takesCommands(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo); // chats and folder threads count as no repository; autoRepoOf(…, CHAT_REPO): the group's hosts that start chats; takesCommands: hostd ≥ COMMANDS_MIN_HOSTD ("0.9.1"), the demo host
+export function dispatchedRepos(threads, folders); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); takesCommands(world, hostId); takesRoleModel(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo); // chats and folder threads count as no repository; autoRepoOf(…, CHAT_REPO): the group's hosts that start chats; takesCommands: hostd ≥ COMMANDS_MIN_HOSTD ("0.9.1"), the demo host; takesRoleModel: hostd ≥ ROLE_MODEL_MIN_HOSTD ("0.9.6", `@/features/agentRoles/mainModel`), the demo host
 export function threadLaunch(memory, key): { inPlace; folder };                 // how thread key's messages start their agent: in the folder itself (picked, or a folder that is no repository root), else a new worktree each
 export function dispatchBranches(threads, hostId, root): Set<string>;           // branches of Dispatch's worktrees of root on hostId (the base menu leaves them out)
 export function chatHostsOf(states, ids): string[];                             // the hosts of ids whose daemon starts chats (HostInfo.chats)
@@ -227,6 +228,23 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
 - A dispatch is one `worktree.create { cwd: root, branch: "<slug>", base?, label: slug,
   existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt | command, images?, roleModels?, fallbackChains?, autoAnswer? } }`
   (in place: `agent.start { target: { kind: "cwd", cwd: root, label: slug }, spec }` with that agent spec).
+  The agent options menu (the model pill) picks the main model: **Host default** (its hint: what the host's default role
+  runs), each of omp's **model roles** as `@<role>` (`@smol · Fast`, `@slow · Thinking`, `@plan · Architect`, custom
+  roles; the host's bindings with the agent's own from More options over them, never `default` or the kind roles such
+  as image or web search; `features/agentRoles/mainModel.ts` `mainRoles`), or a model of the catalog. A role goes as
+  `model: "@slow"` and omp resolves it when the agent starts, as its own `--model @slow` (tf-hostd ≥ 0.9.6: an older
+  daemon refuses it, so the role rows are disabled with "Update the host" there, a single such host refuses the send and
+  Auto leaves such hosts out; Auto's quota term follows each host's binding of the role). The **Thinking** select offers
+  the levels of the model the choice runs (`thinkingChoices(models, mainSelector(model, roles, own))`): the host
+  default's and a role's model too, so `max` shows wherever the model has it (Opus 5.5), `auto` with any reasoning
+  model, every level while the catalog doesn't say; a level the new model lacks falls back to Default when the model
+  changes. New worktree / New agent (`AgentFields`) offer the same, Automations and Fan out the full level list.
+  **Plan** and **Goal** (footer toggles, also in the menu; omp starts in one mode, so each turns the other off):
+  in Goal mode the task (a template's framing included, video lines too) becomes the agent's goal, `command:
+  "/goal set <task>"` (`goalCommand`: one line, line breaks folded into spaces; images follow it as the next prompt),
+  so omp keeps working until the goal is met; it needs tf-hostd ≥ 0.9.1 like any command ("can't start agents in
+  goal mode yet" otherwise). A message that is itself a command runs as typed and starts no goal (the command line
+  above the text says so).
   The footer's More options chip (what is set, when anything is) opens "More agent options" (dialog, sheet on phones):
   model presets (`features/agentRoles` `ModelPresetsSection`: the saved presets, one click sets the main model,
   thinking, roles and chains and clears a selected template; Save as preset…, One model for every role…, and Reset
