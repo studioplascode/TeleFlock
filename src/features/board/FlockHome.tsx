@@ -41,7 +41,7 @@ import { FilterChip } from "./FilterChip";
 import { SelectionBar } from "./SelectionBar";
 import { useTodayUsage } from "./BentoRow";
 import { useBoard } from "./boardStore";
-import { FlockFab, HostChip, RepoChip } from "./FlockActions";
+import { FlockFab, HostChip, RepoChip, SortChip } from "./FlockActions";
 import { LANE_BY_COLUMN, QUIET_AFTER_MS } from "./lanes";
 import { AutoResumeBadge } from "./AutoResumeBadge";
 import { JobsMeter, WaitingForJobs } from "./JobsMeter";
@@ -488,12 +488,13 @@ function EmptyFlock() {
 export function FlockHome() {
   const hostId = useHosts((s) => s.filter);
   const q = useBoard((s) => s.q.trim()) || undefined;
+  const sort = useBoard((s) => s.sort);
   // shared with the desktop toolbar's repo select
   const repo = useBoard((s) => s.repo) ?? undefined;
-  const needs = useColumnKeys("needs", { hostId, repo, q });
-  const running = useColumnKeys("running", { hostId, repo, q });
-  const review = useColumnKeys("review", { hostId, repo, q });
-  const done = useColumnKeys("done", { hostId, repo, q });
+  const needs = useColumnKeys("needs", { hostId, repo, q, sort });
+  const running = useColumnKeys("running", { hostId, repo, q, sort });
+  const review = useColumnKeys("review", { hostId, repo, q, sort });
+  const done = useColumnKeys("done", { hostId, repo, q, sort });
   const doneOpen = useBoard((s) => s.doneOpen);
   const toggleDone = useBoard((s) => s.toggleDone);
   const empty = needs.length + running.length + review.length + done.length === 0;
@@ -506,6 +507,7 @@ export function FlockHome() {
         <h1 className="shrink-0 font-display text-2xl font-bold text-ink">Flock</h1>
         <div className="flex min-w-0 items-center gap-1.5">
           <RepoChip />
+          <SortChip />
           <HostChip />
         </div>
       </header>

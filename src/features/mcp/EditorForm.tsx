@@ -13,6 +13,8 @@ function SecretInput({ value, onChange, stored, placeholder, label, leading, inv
     <Input
       id={id}
       type={shown ? "text" : "password"}
+      // a secret: Ctrl+Z never brings back what was typed (shell/fieldUndo)
+      data-no-undo=""
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={stored ? "Unchanged" : placeholder}

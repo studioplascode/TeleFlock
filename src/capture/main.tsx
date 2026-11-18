@@ -4,6 +4,7 @@ import "@/design/styles/index.css";
 import { answerFlushRequests } from "@/core/draftFlush";
 import { applyInitialMotionAttribute, DesignProvider, startTheme } from "@/design";
 import { CaptureWindow } from "@/features/capture/CaptureWindow";
+import { installFieldUndo } from "@/features/shell/fieldUndo";
 
 /*
  * The Quick capture window's page (`capture.html`). It never starts the app's core: the main
@@ -16,6 +17,8 @@ applyInitialMotionAttribute();
 startTheme({ owner: false });
 // The box's own text and images are written out when the shell is about to end the process.
 answerFlushRequests();
+// Ctrl/Cmd+Z in its other text fields (the box has its own history).
+installFieldUndo();
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root missing from capture.html");

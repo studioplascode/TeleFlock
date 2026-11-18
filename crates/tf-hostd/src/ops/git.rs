@@ -903,7 +903,15 @@ pub async fn repo_info_at(t: &RepoTop) -> RepoInfo {
         ahead: st.as_ref().filter(|s| s.upstream.is_some()).map(|s| s.ahead),
         behind: st.as_ref().filter(|s| s.upstream.is_some()).map(|s| s.behind),
         remote_url,
+        worktree_created_at: if top == root { None } else { worktree_created_at(top) },
     }
+}
+
+/// When `git worktree add` made the linked worktree at `top`: its `.git` file (`gitdir: …`), which
+/// git writes once.
+fn worktree_created_at(top: &Path) -> Option<tf_proto::Millis> {
+    let meta = std::fs::symlink_metadata(top.join(".git")).ok().filter(|m| m.is_file())?;
+    Some(meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as tf_proto::Millis)
 }
 
 // ───────────────────────────── methods ─────────────────────────────

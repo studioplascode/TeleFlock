@@ -1872,9 +1872,12 @@ export class DemoHost implements SimHost {
     const requested = this.requestedName(spec);
     const name = requested ?? this.uniqueName(fallbackName);
     // A `default` role of the agent's own is its main model; `model` / `thinking` aren't passed then.
-    const main = own?.roles.default ? selectorParts(own.roles.default) : undefined;
+    // A main model `@<role>` runs that role's model (the agent's own binding first), as omp's `--model @<role>`.
+    const role = typeof spec.model === "string" && spec.model.startsWith("@") ? spec.model.slice(1) : null;
+    const bound = role ? (own?.roles[role] ?? this.ompSettings.roles().find((r) => r.role === role)?.model) : undefined;
+    const main = own?.roles.default ? selectorParts(own.roles.default) : bound ? selectorParts(bound) : undefined;
     const model = main ? modelByRef(main.model)?.label : typeof spec.model === "string" ? modelByRef(spec.model)?.label : undefined;
-    const thinking = main ? main.thinking : (spec.thinking as AgentDef["thinking"]);
+    const thinking = own?.roles.default ? main?.thinking : ((spec.thinking as AgentDef["thinking"]) ?? main?.thinking);
     const prompt = demoFirstPrompt(spec);
     // A launch's command (`AgentSpec.command`, a Dispatch message that is one).
     const command = demoLaunchCommand(spec);
@@ -2241,7 +2244,7 @@ export class DemoHost implements SimHost {
     this.closeWs(m);
     // PRs are keyed by workspace here: drop it with the workspace
     this.prs.delete(m.ws.id);
-    this.forgetParkedWorktree(m.path);
+    this.dropParkedIn(m.path);
     return {};
   }
 
@@ -2254,17 +2257,17 @@ export class DemoHost implements SimHost {
     const dirty = owners.reduce((n, s) => n + s.files.length, 0);
     if (dirty > 0 && !force) throw apiError("dirty_worktree", `'${path}' contains modified or untracked files, use --force to delete it`, { hint: "Remove it with “force” to discard them (the branch is kept)." });
     this.parkedPrs.delete(path);
-    this.forgetParkedWorktree(path);
+    this.dropParkedIn(path);
     return {};
   }
 
-  /** The checkout is gone: parked cards that ran there stop offering to delete it. */
-  private forgetParkedWorktree(path: string): void {
-    for (const s of this.sims.values()) {
+  /** The checkout is gone: parked cards that ran there leave the board (their sessions stay in Past sessions). */
+  private dropParkedIn(path: string): void {
+    for (const s of [...this.sims.values()]) {
       const parked = s.agent.parked;
-      if (parked?.worktree?.path !== path) continue;
-      s.agent.parked = { at: parked.at, sessionFile: parked.sessionFile };
-      this.agentChanged(s.agent.id);
+      if (!parked || parked.moved?.state === "moving" || parked.moved?.state === "interrupted") continue;
+      const cwd = s.agent.cwd ?? "";
+      if (parked.worktree?.path === path || cwd === path || cwd.startsWith(`${path}/`)) this.removeAgent(s.agent.id);
     }
   }
 

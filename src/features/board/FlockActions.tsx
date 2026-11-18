@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronDown, FolderGit2, FolderOpen, GitBranchPlus, GitFork, History, MessagesSquare, Plus, Send, Server } from "lucide-react";
+import { ArrowDownUp, Bot, Check, ChevronDown, FolderGit2, FolderOpen, GitBranchPlus, GitFork, History, MessagesSquare, Plus, Send, Server } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { ReactNode } from "react";
 import { navigate, useCore, useHostIds, useHosts, useUi } from "@/core";
@@ -11,7 +11,7 @@ import { closeSheet, openSheet } from "@/features/shell/sheets";
 import { connSummary, hostsHealth, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
 import { ACTIONS } from "@/features/shell/vocab";
 import { useRepoNames } from "./BoardToolbar";
-import { useBoard } from "./boardStore";
+import { SORTS, useBoard } from "./boardStore";
 import { repoAccent } from "./RepoTag";
 
 /**
@@ -281,6 +281,48 @@ export function RepoChip() {
       <FolderGit2 className={cn("size-3.5 shrink-0", repo === null && "text-mute")} style={repo !== null ? { color: repoAccent(repo) } : undefined} aria-hidden />
       <span className="min-w-0 truncate">{repo ?? "Repos"}</span>
       <ChevronDown className="size-3.5 shrink-0 text-mute" aria-hidden />
+    </button>
+  );
+}
+
+function SortList() {
+  const sort = useBoard((s) => s.sort);
+  const check = <Check className="size-5 shrink-0 text-accent-hi" aria-hidden />;
+  return (
+    <div className="flex flex-col gap-1">
+      {SORTS.map((o) => (
+        <SheetRow
+          key={o.value}
+          icon={<ArrowDownUp />}
+          label={o.label}
+          hint={o.value === "lane" ? "Each section's own order" : o.value === "project" ? "By repository name" : "Newest worktree first"}
+          selected={sort === o.value}
+          trailing={sort === o.value ? check : undefined}
+          onClick={() => {
+            haptic("select");
+            useBoard.getState().setSort(o.value);
+            closeSheet();
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Flock header sort, the phone twin of the board toolbar's sort select (both drive `useBoard().sort`); named while not the lane order. */
+export function SortChip() {
+  const sort = useBoard((s) => s.sort);
+  const label = sort === "lane" ? null : SORTS.find((o) => o.value === sort)?.label;
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      aria-label={`Sort: ${SORTS.find((o) => o.value === sort)?.label ?? "Lane order"}`}
+      onClick={() => openSheet({ title: "Sort", description: "Order the agents in each section by", content: <SortList /> })}
+      className="relative flex min-h-9 min-w-0 items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring touch-hit"
+    >
+      <ArrowDownUp className={cn("size-3.5 shrink-0", !label && "text-mute")} aria-hidden />
+      {label && <span className="min-w-0 truncate">{label}</span>}
     </button>
   );
 }

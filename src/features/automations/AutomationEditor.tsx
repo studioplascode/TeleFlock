@@ -2,6 +2,7 @@ import { ArrowLeft, ClipboardList, Clock3, FolderGit2, FolderOpen, FolderSearch,
 import { type ReactNode, useMemo, useState } from "react";
 import { core, toApiError, useHostState } from "@/core";
 import type { Automation, AutomationDraft, AutoAnswer, ThinkingLevel } from "@/core/gen";
+import { mainSelector, thinkingChoices } from "@/features/agentRoles/mainModel";
 import { Button, Field, Input, SegmentedControl, Select, type SelectOption, Switch, Textarea, toast, useIsMobile } from "@/design";
 import { AgentRolesSection, rolesSummaryChip, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
 import { ModelPresetsSection } from "@/features/agentRoles/ModelPresets";
@@ -19,7 +20,6 @@ import { ScheduleField } from "./ScheduleField";
 import { useSchedulePreview } from "./useAutomations";
 
 const DEFAULT = "default";
-const LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 interface Form {
   name: string;
@@ -159,8 +159,8 @@ export function AutomationEditor({ hostId, automation, timezone, open, onOpenCha
     if (form.model !== DEFAULT && !opts.some((o) => o.value === form.model)) opts.push({ value: form.model, label: form.model, hint: "saved" });
     return opts;
   }, [catalog, defaultRole, form.model]);
-  const levels = catalog?.models.find((m) => `${m.provider}/${m.id}` === form.model)?.thinking ?? [];
-  const thinkingLevels = levels.length > 0 ? levels : LEVELS;
+  // The levels of the model it runs (the host default's when Default), `max` and `auto` included where it has them.
+  const thinkingLevels = thinkingChoices(catalog?.models ?? [], mainSelector(form.model, catalog?.roles ?? []));
   const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...thinkingLevels.map((l) => ({ value: l, label: l[0]?.toUpperCase() + l.slice(1) }))];
   // A level the picked model lacks reads (and saves) as Default.
   const thinking = form.thinking === DEFAULT || thinkingLevels.includes(form.thinking) ? form.thinking : DEFAULT;

@@ -637,6 +637,33 @@ describe("a message that is a command", () => {
     }
   });
 
+  test("goal mode: the task, on one line, becomes the agent's goal; plan is off, a role main model goes as is", async () => {
+    // Dynamic, as above: the store hydrates from localStorage at module load.
+    const { core } = await import("@/core");
+    const { dispatchTask } = await import("./store");
+    const calls: Call[] = [];
+    const realHost = core.host;
+    core.host = (hostId) => ({
+      call: (method, params) => {
+        if (hostId === "hgoal") calls.push({ method, params });
+        return Promise.resolve({ path: "/w", branch: "b", workspaceId: "w", agentId: "a", paneId: "p" } as never);
+      },
+    });
+    try {
+      const goal = { ...options, model: "@slow", thinking: "max" as const, goal: true };
+      const task = dispatchTask({ hostId: "hgoal", repo: "/r/goal", prompt: "Fix the flaky tests:\n- auth\n- billing", options: goal, taken: [], suggest: null });
+      // A command typed in goal mode runs as typed and starts no goal.
+      const cmd = dispatchTask({ hostId: "hgoal", repo: "/r/goal", prompt: "/fast on", command: { line: "/fast on", replacesPlan: false }, options: goal, taken: [], suggest: null });
+      await settle([task.id, cmd.id]);
+      const agentOf = (label: string) => (calls.find((c) => c.method === "worktree.create" && (c.params as WorktreeCreateParams).label === label)?.params as WorktreeCreateParams | undefined)?.agent;
+      expect(agentOf(task.name)).toMatchObject({ command: "/goal set Fix the flaky tests: - auth - billing", plan: false, model: "@slow", thinking: "max" });
+      expect(agentOf(task.name)?.prompt).toBeUndefined();
+      expect(agentOf(cmd.name)).toMatchObject({ command: "/fast on", plan: true });
+    } finally {
+      core.host = realHost;
+    }
+  });
+
   test("omp's tiny model names a command after its task, and only a command that gives one", async () => {
     // Dynamic, as above: the store and the prefs read localStorage at module load.
     const { core } = await import("@/core");

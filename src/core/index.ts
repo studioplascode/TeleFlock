@@ -36,6 +36,7 @@ export type {
 } from "./store/state";
 export {
   DEFAULT_SETTINGS,
+  createdAtOf,
   getAgentViews,
   getHostStates,
   getWorkspacesSnapshot,
@@ -72,7 +73,7 @@ export {
   onBrowserStatus,
   useWorkspaces,
 } from "./hooks";
-export type { AgentFilter, HostsView, NotificationsView, SessionView, SettingsView } from "./hooks";
+export type { AgentFilter, BoardSort, HostsView, NotificationsView, SessionView, SettingsView } from "./hooks";
 export { ircOf } from "./irc";
 export type { IrcEntry } from "./irc";
 export {

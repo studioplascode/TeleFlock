@@ -2010,6 +2010,7 @@ mod tests {
                 ahead: None,
                 behind: None,
                 remote_url: None,
+                worktree_created_at: None,
             };
             for (cwd, name) in [(home.display().to_string(), "dotfiles"), (chat.clone(), "dotfiles"), (app.clone(), "app")] {
                 m.repos.insert(cwd, RepoEntry { info: Some(repo(name)), top: None, at: Some(Instant::now()) });

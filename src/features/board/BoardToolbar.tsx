@@ -1,8 +1,8 @@
-import { FolderGit2 } from "lucide-react";
+import { ArrowDownUp, FolderGit2 } from "lucide-react";
 import type { Ref } from "react";
-import { useCore, useHosts } from "@/core";
+import { type BoardSort, useCore, useHosts } from "@/core";
 import { Input, Kbd, SegmentedControl, Select, cn } from "@/design";
-import { type GroupBy, useBoard } from "./boardStore";
+import { type GroupBy, SORTS, useBoard } from "./boardStore";
 import { FilterChip } from "./FilterChip";
 import { repoAccent } from "./RepoTag";
 
@@ -33,6 +33,8 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
   const setQ = useBoard((s) => s.setQ);
   const groupBy = useBoard((s) => s.groupBy);
   const setGroupBy = useBoard((s) => s.setGroupBy);
+  const sort = useBoard((s) => s.sort);
+  const setSort = useBoard((s) => s.setSort);
   const repos = useRepoNames(filter);
 
   return (
@@ -71,6 +73,13 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
         trailing={<Kbd>/</Kbd>}
       />
       <SegmentedControl<GroupBy> size="sm" value={groupBy} onValueChange={setGroupBy} options={GROUPS} aria-label="Group by" className="shrink-0" />
+      <Select
+        value={sort}
+        onValueChange={(v) => setSort(v as BoardSort)}
+        className="h-9 w-44 min-w-32 shrink"
+        aria-label="Sort cards"
+        options={SORTS.map((o) => ({ value: o.value, label: o.label, icon: <ArrowDownUp className="text-mute" aria-hidden /> }))}
+      />
       <FilterChip />
       <span className="ml-auto hidden items-center gap-1.5 text-2xs font-semibold text-mute-2 min-[1700px]:flex">
         <Kbd>J</Kbd>

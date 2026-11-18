@@ -291,6 +291,28 @@ fn forget(s: &mut SessionData, agent_id: &str, session_id: Option<&str>) {
     s.activity.retain(|e| e.agent_id != agent_id);
 }
 
+/// Not in the middle of a move: no move, or one that finished (`moving` / `interrupted` records
+/// carry the move's state and must stay).
+fn settled(r: &ParkedRecord) -> bool {
+    r.moved.as_ref().is_none_or(|m| m.state == tf_proto::ParkedMoveState::Moved)
+}
+
+/// The folder a parked agent ran in: its linked worktree (with the repository's main worktree),
+/// else its cwd. Linux reports a deleted cwd as `<path> (deleted)`; that suffix is not part of it.
+pub fn folder_of(r: &ParkedRecord) -> Option<(&str, Option<&str>)> {
+    if let Some(w) = &r.worktree {
+        return Some((w.path.as_str(), Some(w.repo_root.as_str())));
+    }
+    let cwd = r.cwd.as_deref()?;
+    Some((cwd.strip_suffix(" (deleted)").unwrap_or(cwd), None))
+}
+
+/// The parked agent ran in `dir` (its worktree is `dir`, or its folder is `dir` or inside it).
+/// `same` compares two paths (canonical when both exist).
+pub fn ran_in(r: &ParkedRecord, dir: &Path, same: impl Fn(&str) -> bool) -> bool {
+    r.worktree.as_ref().is_some_and(|w| same(&w.path)) || folder_of(r).is_some_and(|(f, _)| same(f) || Path::new(f).starts_with(dir))
+}
+
 // ───────────────────────────── store side ─────────────────────────────
 
 /// In-memory lifecycle bookkeeping of one store (not persisted).
@@ -458,22 +480,26 @@ impl StateHandle {
         found
     }
 
-    /// The linked worktree at `path` is gone (removed on request): parked records that ran there
-    /// forget it, so their cards stop offering to delete it. `same` compares two paths.
-    pub fn forget_parked_worktree(&self, same: impl Fn(&str) -> bool) {
-        let mut changed = false;
-        self.inner.persist.session(&self.inner.session, |s| {
-            for r in s.parked.values_mut() {
-                if r.worktree.as_ref().is_some_and(|w| same(&w.path)) {
-                    r.worktree = None;
-                    changed = true;
-                }
+    /// The folder parked records ran in is gone (their linked worktree was removed, here or by
+    /// hand): their cards leave the board. Each omp session stays on disk (Past sessions lists
+    /// it), so this is no prune and `HostInfo.pruned` doesn't name them. A record whose move has
+    /// not finished and an agent being resumed are kept. Returns the ids dropped.
+    pub fn drop_parked_where(&self, gone: impl Fn(&ParkedRecord) -> bool) -> Vec<String> {
+        let resuming: HashSet<String> = self.lock().life.resuming.keys().cloned().collect();
+        let dropped = self.inner.persist.session(&self.inner.session, |s| {
+            let ids: Vec<(String, Option<String>)> =
+                s.parked.values().filter(|r| settled(r) && !resuming.contains(&r.agent_id) && gone(r)).map(|r| (r.agent_id.clone(), r.session_id.clone())).collect();
+            for (id, sid) in &ids {
+                forget(s, id, sid.as_deref());
             }
+            ids.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
         });
-        if changed {
+        if !dropped.is_empty() {
+            info!(session = %self.inner.session, agents = ?dropped, "parked cards dropped: the folder they ran in is gone");
             self.inner.persist.save_now();
             self.mark_dirty();
         }
+        dropped
     }
 
     /// Claims resuming a parked agent; `None` while another resume of it is in flight.
@@ -711,6 +737,25 @@ pub fn check_file(path: &Path) -> FileCheck {
     }
 }
 
+/// What a stat says about the folder a parked agent ran in ([`folder_of`]). Only a definite
+/// deletion is `Missing`: `NotFound` while the folder above it still holds something, or while
+/// its repository's main worktree (`repo_root`) is a folder. An unmounted mount point is an empty
+/// folder, and a disk that is gone takes the folder above with it: no verdict then.
+pub fn check_folder(path: &Path, repo_root: Option<&Path>) -> FileCheck {
+    match std::fs::metadata(path) {
+        Ok(_) => FileCheck::Present,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let filled = |d: &Path| std::fs::read_dir(d).is_ok_and(|mut it| it.next().is_some());
+            if path.parent().is_some_and(filled) || repo_root.is_some_and(Path::is_dir) {
+                FileCheck::Missing
+            } else {
+                FileCheck::Unknown(format!("{}: the folders around it are gone or empty too (unmounted?)", path.display()))
+            }
+        }
+        Err(e) => FileCheck::Unknown(format!("{}: {e}", path.display())),
+    }
+}
+
 /// Prune bookkeeping across passes (not persisted).
 #[derive(Debug, Default)]
 pub struct PruneMemory {
@@ -855,6 +900,21 @@ async fn prune_pass(ctx: &Ctx, mem: &mut PruneMemory) {
             Ok(false) => {}
             Err(e) => warn!(agent = %a.id, "prune: closing the pane failed: {e}"),
         }
+    }
+    // Parked cards whose folder was deleted (a worktree removed with git, herdr or by hand) leave
+    // the board; their sessions stay in Past sessions.
+    let folders: Vec<(String, String, Option<String>)> =
+        h.parked_all().iter().filter_map(|r| folder_of(r).map(|(f, root)| (r.agent_id.clone(), f.to_string(), root.map(str::to_string)))).collect();
+    let gone: HashSet<String> = match tokio::task::spawn_blocking(move || {
+        folders.into_iter().filter(|(_, f, root)| check_folder(Path::new(f), root.as_deref().map(Path::new)) == FileCheck::Missing).map(|(id, ..)| id).collect()
+    })
+    .await
+    {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if !gone.is_empty() {
+        h.drop_parked_where(|r| gone.contains(&r.agent_id));
     }
 }
 
@@ -1323,5 +1383,63 @@ mod tests {
         assert!(!h.rekey_parked("term_7", "term_7~ab"), "repeating it changes nothing");
         assert_eq!(h.parked_all().len(), 1);
         assert_eq!(h.parked_all()[0].agent_id, "term_7~ab");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_folder_gone_from_a_healthy_parent_counts_as_deleted() {
+        let td = tempfile::tempdir().unwrap();
+        let wts = td.path().join("worktrees/repo");
+        let wt = wts.join("feat");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(wts.join("other")).unwrap();
+        assert_eq!(check_folder(&wt, None), FileCheck::Present);
+        std::fs::remove_dir(&wt).unwrap();
+        assert_eq!(check_folder(&wt, None), FileCheck::Missing, "its siblings are still there");
+        // The last worktree of the folder: empty parent, like an unmounted mount point.
+        std::fs::remove_dir(wts.join("other")).unwrap();
+        assert!(matches!(check_folder(&wt, None), FileCheck::Unknown(_)));
+        // …unless the repository's main worktree is there.
+        let main = td.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        assert_eq!(check_folder(&wt, Some(&main)), FileCheck::Missing);
+        assert!(matches!(check_folder(&td.path().join("gone/x"), Some(&td.path().join("gone/main"))), FileCheck::Unknown(_)));
+    }
+
+    #[test]
+    fn a_parked_agent_ran_in_its_worktree_or_a_folder_inside() {
+        let mut r = record_from_agent(&live_agent(), 1, 2, None, None).unwrap();
+        let dir = Path::new("/wt/feat");
+        let same = |other: &str| Path::new(other) == dir;
+        r.worktree = None;
+        r.cwd = Some("/wt/feat/src (deleted)".into());
+        assert_eq!(folder_of(&r), Some(("/wt/feat/src", None)));
+        assert!(ran_in(&r, dir, same));
+        r.cwd = Some("/wt/feature".into());
+        assert!(!ran_in(&r, dir, same), "a sibling with the same prefix is another folder");
+        r.worktree = Some(ParkedWorktree { path: "/wt/feat".into(), repo_root: "/repo".into() });
+        assert!(ran_in(&r, dir, same));
+        assert_eq!(folder_of(&r), Some(("/wt/feat", Some("/repo"))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_parked_card_whose_folder_is_gone_leaves_without_a_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = store(dir.path(), "a").await;
+        let rec = record_from_agent(&live_agent(), 1, 2, None, None).unwrap();
+        h.park(rec.clone());
+        let moving = tf_proto::ParkedMove { state: tf_proto::ParkedMoveState::Moving, move_id: "mv".into(), to: "b".into(), host_id: None, agent_id: None, at: 1 };
+        h.park(ParkedRecord { agent_id: "term_8".into(), session_id: Some("sid-2".into()), moved: Some(moving), ..rec });
+        h.rebuild();
+        assert_eq!(h.drop_parked_where(|_| true), vec!["term_7".to_string()], "a move in flight keeps its card");
+        h.rebuild();
+        assert!(h.agent("term_7").is_none());
+        assert!(h.agent("term_8").is_some());
+        assert!(h.snapshot().info.pruned.is_empty(), "its session is not deleted, so no prune");
+        drop(h);
+        let h = store(dir.path(), "b").await;
+        h.rebuild();
+        assert!(h.agent("term_7").is_none(), "gone for good");
     }
 }

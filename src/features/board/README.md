@@ -167,7 +167,9 @@ danger button on the desktop card and "Delete worktree…" in the ⋯/right-clic
 `Agent.parked.worktree` (Mark done closed that workspace; hosts ≥ 0.5.2, older ones omit it and show no button).
 It runs `deleteWorktree`: `removeWorktreeTarget`'s confirm, force confirm when dirty, trust prompt for repos owned by
 another user, toast; a Review agent is marked done afterwards. A parked card's worktree goes by path
-(`worktree.remove {workspaceId: "", path}`), and the card stays in Done with its transcript. The PR state
+(`worktree.remove {workspaceId: "", path}`), and the card leaves the board with it (hosts ≥ 0.9.6; its session stays in
+Past sessions). A parked card whose folder was deleted any other way (git, herdr, Cleanup, by hand) leaves within a
+minute too (architecture §3.5, "A parked card leaves with its folder"). The PR state
 comes from Review's memo (stage merged) or from `worktreePr.tsx`: each such card (not fresh, host online) carries an
 invisible `PrProbe`; after 600 ms on screen it queues `gh.prStatus {cwd: worktree}` (2 in flight per host, none
 while the window is hidden), cached per host + worktree path + branch. Answers hold 30 min (merged/closed), 5 min
@@ -181,6 +183,13 @@ while it resumes) on the card and the phone row; the ⋯ menu offers Open, Resum
 Reopen (resumes too) and, once its worktree's pull request is merged or closed, Delete worktree…; no Review (the
 worktree workspace may be gone), no Connect. Dragging one back to Review
 resumes it; the card then reappears under the new id (the optimistic move clears when the old one leaves).
+
+**Sort** (toolbar select beside Status|Repo; phone: the ↕ chip in the Flock header, a sheet; `useBoard().sort`,
+kept in localStorage "tf.board"): **Lane order** (each lane's own, `LANE_LEGEND`), **Project** (by repository name,
+agents outside a repository last, then the lane's order) or **Worktree created** (newest first: the linked worktree's
+`RepoInfo.worktreeCreatedAt`, hosts ≥ 0.9.6, else the agent's `startedAt`; `createdAtOf` in `@/core`). The lanes'
+legend names the order in its first part ("by project · time waiting"). Repo grouping orders each repository's
+sections the same way. `selectAgentKeys(s, { …, sort })` does the ordering.
 
 **Ended cards** (`Agent.parked.ended`, hosts ≥ 0.7.0, docs/architecture.md §3.25: the agent's omp ended without anyone
 closing it — herdr stopped or crashed, a reboot, omp crashed): the card stays in Review, calm (idle status), its pill

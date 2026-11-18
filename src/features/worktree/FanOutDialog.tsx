@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, Check, GitBranch, LayoutDashboard, Plus, RotateC
 import { useEffect, useRef, useState } from "react";
 import { core, draftKey, navigate, suggestBranch, useAiNaming, useAiSuggestion, useDraft, useDraftState, useHostIds, useHostState, useHosts, useSettings } from "@/core";
 import type { AgentSpec, AgentTemplate, AutoAnswer, Started, ThinkingLevel, WorktreeCreateParams } from "@/core/gen";
+import { THINKING_LEVELS } from "@/features/ompSettings/model";
 import { Button, Chip, Field, IconButton, Input, Select, type SelectOption, SegmentedControl, Shimmer, Switch, Textarea, cn, spring, useIsMobile } from "@/design";
 import { useBoard } from "@/features/board/boardStore";
 import { ACTIONS } from "@/features/shell/vocab";
@@ -316,7 +317,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
     { value: DEFAULT, label: "Host default", icon: <Sparkles /> },
     ...(catalog?.models ?? []).map((m) => ({ value: `${m.provider}/${m.id}`, label: m.label ?? m.id, hint: m.provider })),
   ];
-  const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...(["off", "minimal", "low", "medium", "high", "xhigh"] as const).map((l) => ({ value: l, label: l }))];
+  const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...THINKING_LEVELS.map((l) => ({ value: l, label: l }))];
   const baseChoices = baseOptions(branches.data);
 
   const footer = (

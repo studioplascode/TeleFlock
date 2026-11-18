@@ -269,7 +269,11 @@ pub async fn remove(ctx: &Ctx, p: &WorktreeRemoveParams) -> Result<Empty, ApiErr
         ("", Some(path)) => remove_path(ctx, path, p.force, p.trust, None).await?,
         ("", None) => return Err(ApiError::new("invalid_params", "worktree.remove needs a workspaceId or a path")),
         (workspace_id, _) => {
+            let path = ctx.state.snapshot().workspaces.into_iter().find(|w| w.id == workspace_id).and_then(|w| w.worktree).map(|t| PathBuf::from(t.path));
             ctx.herdr.worktree_remove(workspace_id, p.force, p.trust).await.map_err(map_herdr)?;
+            if let Some(path) = path {
+                ctx.state.drop_parked_where(|r| crate::state::parked::ran_in(r, &path, |other| same_path(Path::new(other), &path)));
+            }
         }
     }
     ctx.state.refresh();
@@ -278,9 +282,9 @@ pub async fn remove(ctx: &Ctx, p: &WorktreeRemoveParams) -> Result<Empty, ApiErr
 
 /// `worktree.remove {path}`: a linked worktree no herdr workspace holds, a parked agent's (Mark done
 /// closed its workspace). A workspace that holds it after all (reopened since) goes through herdr
-/// as usual. Afterwards no parked card offers to delete it any more. `root`: its repository's main
-/// worktree when the caller knows it (a folder already gone is found there), else the parked
-/// record's.
+/// as usual. Afterwards the parked cards that ran in it leave the board (their sessions stay in
+/// Past sessions). `root`: its repository's main worktree when the caller knows it (a folder
+/// already gone is found there), else the parked record's.
 pub(crate) async fn remove_path(ctx: &Ctx, path: &str, force: bool, trust: bool, root: Option<&Path>) -> Result<(), ApiError> {
     let path = resolve_path(path)?;
     let same = |other: &str| same_path(Path::new(other), &path);
@@ -293,7 +297,7 @@ pub(crate) async fn remove_path(ctx: &Ctx, path: &str, force: bool, trust: bool,
         });
         remove_checkout(&path, root.as_deref(), force, trust).await?;
     }
-    ctx.state.forget_parked_worktree(same);
+    ctx.state.drop_parked_where(|r| crate::state::parked::ran_in(r, &path, same));
     tracing::info!(path = %path.display(), force, "removed worktree by path");
     Ok(())
 }

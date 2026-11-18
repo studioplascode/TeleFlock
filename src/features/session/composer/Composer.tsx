@@ -682,6 +682,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           placeholder={placeholder}
           aria-label="Message"
           data-composer=""
+          data-own-undo=""
           autoFocus={autoFocus}
           // Phone: Enter is a newline (the button sends; Ctrl/Meta+Enter from a hardware keyboard), so the keyboard shows a return key.
           enterKeyHint={mobile ? "enter" : undefined}

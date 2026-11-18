@@ -1,12 +1,13 @@
-import { ClipboardList, Cpu, Sparkles } from "lucide-react";
+import { ClipboardList, Cpu, Layers, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useMemo, useState } from "react";
-import { useDraftState } from "@/core";
+import { useCore, useDraftState, useHosts } from "@/core";
 import type { AgentSpec, AutoAnswer, ModelCatalog, Settings, ThinkingLevel } from "@/core/gen";
 import { Field, Input, Select, type SelectOption, Switch, Textarea, cn, spring } from "@/design";
 import { AgentRolesSection, rolesSummaryChip, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
 import { ModelPresetsSection, presetChip, useMatchingPreset } from "@/features/agentRoles/ModelPresets";
-import { launchMainText, launchOverrides } from "@/features/agentRoles/roles";
+import { launchMainText, launchOverrides, selectorLabel } from "@/features/agentRoles/roles";
+import { hostTakesRoleModel, mainRoles, mainSelector, ROLE_MODEL_MIN_HOSTD, roleName, thinkingChoices } from "@/features/agentRoles/mainModel";
 import { specAutoAnswer } from "@/features/autoAnswer/format";
 import { useHostAutoAnswer } from "@/features/autoAnswer/hooks";
 import { AutoAnswerSection, autoAnswerChip } from "@/features/autoAnswer/PolicyEditor";
@@ -22,7 +23,7 @@ export interface AgentDraft {
   name: string;
   /** The user typed a name; stop deriving it. */
   nameTouched: boolean;
-  /** `provider/id`, or "default" for the host's default role. */
+  /** `provider/id`, `@<role>` (one of omp's model roles, hosts ≥ 0.9.6), or "default" for the host's default role. */
   model: string;
   thinking: ThinkingLevel | "default";
   plan: boolean;
@@ -36,7 +37,6 @@ export interface AgentDraft {
 }
 
 const DEFAULT = "default";
-const ALL_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 export function initialAgentDraft(settings: Pick<Settings, "defaultModel" | "defaultThinking" | "defaultPlan"> | undefined): AgentDraft {
   return {
@@ -135,16 +135,29 @@ export function AgentFields({ hostId, draft, onChange, derivedName, suggestedNam
   const decides = !!useHostAutoAnswer(hostId);
   const takesRoles = useHostTakesRoles(hostId);
   const preset = useMatchingPreset(draft);
+  // Roles as main models need a daemon that starts agents on them (the demo host always does).
+  const roleDaemon = useCore((s) => hostTakesRoleModel(s.hosts[hostId]?.state.info));
+  const demo = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.kind === "demo");
+  const takesRoleModel = roleDaemon || demo;
 
   const modelOptions = useMemo<SelectOption[]>(() => {
     const opts: SelectOption[] = [{ value: DEFAULT, label: "Host default", hint: defaultRole ?? "omp's default role", icon: <Sparkles /> }];
+    for (const r of mainRoles(catalog?.roles ?? [], draft.roleModels)) {
+      opts.push({
+        value: `@${r.role}`,
+        label: `@${r.role} · ${roleName(r.role)}`,
+        hint: takesRoleModel ? selectorLabel(catalog?.models ?? [], r.model) : `Update the host (TeleFlock ${ROLE_MODEL_MIN_HOSTD}+) to start on a role`,
+        icon: <Layers />,
+        disabled: !takesRoleModel,
+      });
+    }
     for (const m of catalog?.models ?? []) opts.push({ value: `${m.provider}/${m.id}`, label: m.label ?? m.id, hint: m.provider });
     if (draft.model !== DEFAULT && !opts.some((o) => o.value === draft.model)) opts.push({ value: draft.model, label: draft.model, hint: "from settings" });
     return opts;
-  }, [catalog, defaultRole, draft.model]);
+  }, [catalog, defaultRole, draft.model, draft.roleModels, takesRoleModel]);
 
-  const selectedModel = catalog?.models.find((m) => `${m.provider}/${m.id}` === draft.model);
-  const levels = selectedModel?.thinking.length ? selectedModel.thinking : ALL_LEVELS;
+  // The levels of the model the choice runs (the host default's, a role's), `max` and `auto` included where it has them.
+  const levels = thinkingChoices(catalog?.models ?? [], mainSelector(draft.model, catalog?.roles ?? [], draft.roleModels));
   const thinkingOptions: SelectOption[] = [
     { value: DEFAULT, label: "Default" },
     ...levels.map((l) => ({ value: l, label: l[0]?.toUpperCase() + l.slice(1) })),

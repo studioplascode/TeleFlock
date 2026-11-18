@@ -410,7 +410,7 @@ describe("demo engine", () => {
     await expect(r.call("forge", "agent.start", { target: { kind: "workspace", workspaceId: "w1" }, spec: { kind: "omp", plan: false, command: "plan it" } })).rejects.toMatchObject({ code: "invalid_params" });
   });
 
-  test("a parked agent's merged PR: the card keeps its worktree, gh.prStatus says MERGED, worktree.remove {path} deletes it; foreign repos need trust", async () => {
+  test("a parked agent's merged PR: the card keeps its worktree, gh.prStatus says MERGED, worktree.remove {path} deletes it and the card; foreign repos need trust", async () => {
     const r = rig();
     r.clock.advance(2000);
     // Mark done closed gobump's pane and, with it, its worktree workspace: the card remembers the checkout
@@ -424,10 +424,8 @@ describe("demo engine", () => {
     expect(st.pr).toMatchObject({ number: 91, state: "MERGED" });
     await r.call("forge", "worktree.remove", { workspaceId: "", path, force: false, trust: false });
     r.clock.advance(1000);
-    // the agent stays done with its transcript; only the checkout is gone
-    const after = r.state.agents[agentKey("forge", "gobump")];
-    expect(after).toMatchObject({ column: "done", parked: { sessionFile: expect.any(String) } });
-    expect(after?.parked?.worktree).toBeUndefined();
+    // the checkout is gone, and with it the card (its session stays in Past sessions)
+    expect(r.state.agents[agentKey("forge", "gobump")]).toBeUndefined();
     // the checkout is gone: gh has nothing to look at there any more
     await expect(r.call("forge", "gh.prStatus", { cwd: path })).rejects.toMatchObject({ message: expect.stringContaining("not a git repository") });
 

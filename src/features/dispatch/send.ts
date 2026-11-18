@@ -5,6 +5,7 @@ import { IMAGES_TOO_LARGE, imageChars, MAX_PROMPT_IMAGE_CHARS } from "@/core/cli
 import { explainPick, type HostLoad, hostLoad, pickHost, type QuotaReading, rankHosts } from "@/core/workload";
 import { hostGroups, versionBelow } from "@/features/hosts/kinds";
 import { basename } from "@/features/workspace/shared/paths";
+import { ROLE_MODEL_MIN_HOSTD, roleOf } from "@/features/agentRoles/mainModel";
 import { autoTarget, findGroupRepo, groupHosts, groupOf, groupRepos } from "./auto";
 import type { FirstCommand } from "./commands";
 import { type DispatchEntry, type DispatchOptions, dispatchTask, entryHost, entryRepo, pendingByHost, threadKey } from "./store";
@@ -150,6 +151,11 @@ export function takesCommands(w: Pick<DispatchWorld, "profiles" | "states">, hos
   return daemonAtLeast(w, hostId, COMMANDS_MIN_HOSTD);
 }
 
+/** A main model that is one of omp's roles (`@slow`) needs a hostd known to be 0.9.6+ (older ones refuse it). */
+export function takesRoleModel(w: Pick<DispatchWorld, "profiles" | "states">, hostId: string): boolean {
+  return daemonAtLeast(w, hostId, ROLE_MODEL_MIN_HOSTD);
+}
+
 /** The hosts of `ids` whose daemon starts chats (`HostInfo.chats`, as last known). */
 export function chatHostsOf(states: Readonly<Record<string, HostState>>, ids: readonly string[]): string[] {
   return ids.filter((h) => hostTakesChats(states[h]?.info));
@@ -232,6 +238,40 @@ export type SendPlan =
   | { ok: true; hostId: string; args: Parameters<typeof dispatchTask>[0] }
   | { ok: false; title: string; description?: string };
 
+/** Something a send needs of the daemon of the host it goes to, in the words its refusal uses. */
+interface SendNeed {
+  has(hostId: string): boolean;
+  /** After "can" / "can't": "take images". */
+  can: string;
+  /** After "that": "takes images". */
+  does: string;
+  /** Before "need": "images". */
+  noun: string;
+  /** Starts the group's description: "Images need". */
+  lead: string;
+  min: string;
+  /** After "update it from Hosts, or": the way around it. */
+  instead: string;
+}
+
+/** What a send needs of its host's daemon: images, a command, goal mode, a main model that is a role. */
+function sendNeeds(w: DispatchWorld, req: SendRequest): SendNeed[] {
+  const out: SendNeed[] = [];
+  if (req.images.length) {
+    out.push({ has: (h) => takesImages(w, h), can: "take images", does: "takes images", noun: "images", lead: "Images need", min: IMAGES_MIN_HOSTD, instead: "send the task without images" });
+  }
+  if (req.command) {
+    out.push({ has: (h) => takesCommands(w, h), can: "run commands in new agents", does: "runs commands", noun: "commands", lead: "That needs", min: COMMANDS_MIN_HOSTD, instead: "start the message with a space to send it as text" });
+  } else if (req.options.goal) {
+    out.push({ has: (h) => takesCommands(w, h), can: "start agents in goal mode", does: "starts goal mode", noun: "goals", lead: "Goal mode needs", min: COMMANDS_MIN_HOSTD, instead: "turn Goal mode off" });
+  }
+  const role = roleOf(req.options.model);
+  if (role) {
+    out.push({ has: (h) => takesRoleModel(w, h), can: `start agents on the @${role} role`, does: "starts agents on roles", noun: "model roles", lead: "Model roles need", min: ROLE_MODEL_MIN_HOSTD, instead: "pick a model instead of a role" });
+  }
+  return out;
+}
+
 /**
  * Where and how a task would be sent, or why it can't be (the text of the toast to show). Pure:
  * every input comes from `w`, so a send outside the Dispatch view decides exactly like the view.
@@ -242,6 +282,7 @@ export type SendPlan =
  */
 export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
   const { target, repo, images, command } = req;
+  const needs = sendNeeds(w, req);
   const key = threadKey(target, repo);
   const nameOf = (id: string) => hostName(w.profiles, id);
   if (imageChars(images) > MAX_PROMPT_IMAGE_CHARS) return { ok: false, title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.` };
@@ -261,26 +302,18 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
     }
     // What the task needs of a host, in words.
     const need = chat ? "that starts chats" : `with ${repoName}`;
-    const able = auto.candidates.filter((h) => (!images.length || takesImages(w, h)) && (!command || takesCommands(w, h)));
+    const able = auto.candidates.filter((h) => needs.every((n) => n.has(h)));
     if (!able.length) {
       const hosts = auto.candidates.map(nameOf).join(", ");
-      return command
-        ? {
-            ok: false,
-            title: `No host of ${group} ${need} can run commands in new agents yet`,
-            description: `That needs TeleFlock host daemon ${COMMANDS_MIN_HOSTD} or newer on ${hosts}: update one from Hosts, or start the message with a space to send it as text.`,
-          }
-        : {
-            ok: false,
-            title: `No host of ${group} ${need} can take images yet`,
-            description: `Images need TeleFlock host daemon ${IMAGES_MIN_HOSTD} or newer on ${hosts}: update one from Hosts, or send the task without images.`,
-          };
+      // The requirement no host of the group meets, else the first one.
+      const n = needs.find((x) => !auto.candidates.some((h) => x.has(h))) ?? (needs[0] as SendNeed);
+      return { ok: false, title: `No host of ${group} ${need} can ${n.can} yet`, description: `${n.lead} TeleFlock host daemon ${n.min} or newer on ${hosts}: update one from Hosts, or ${n.instead}.` };
     }
     // Fresh numbers: the dispatches just sent count against their host right away.
     const ranked = rankHosts(loadsOf(able, w.states, w.status, w.dispatch.threads, w.quotas));
     const pick = pickHost(ranked);
     if (!pick) {
-      const can = images.length ? "takes images" : "runs commands";
+      const can = needs.find((n) => auto.candidates.some((h) => !n.has(h)))?.does ?? "";
       const too = able.length < auto.candidates.length ? (chat ? ` and ${can}` : ` that ${can}`) : "";
       return { ok: false, title: `No host of ${group} ${need}${too} is online`, description: able.map(nameOf).join(", ") };
     }
@@ -289,20 +322,14 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
     placed = explainPick(pick, ranked, nameOf);
   }
   if (!to) return { ok: false, title: "Add a host first" };
-  if (images.length && !takesImages(w, to)) {
+  const at = to;
+  const unmet = needs.find((n) => !n.has(at));
+  if (unmet) {
     const version = w.states[to]?.info.hostdVersion;
     return {
       ok: false,
-      title: `${nameOf(to)} can't take images yet`,
-      description: `${version ? `Its TeleFlock host daemon (${version}) is older than ${IMAGES_MIN_HOSTD}` : `Its TeleFlock host daemon version isn't known yet (images need ${IMAGES_MIN_HOSTD} or newer)`}: update it from Hosts, or send the task without images.`,
-    };
-  }
-  if (command && !takesCommands(w, to)) {
-    const version = w.states[to]?.info.hostdVersion;
-    return {
-      ok: false,
-      title: `${nameOf(to)} can't run commands in new agents yet`,
-      description: `${version ? `Its TeleFlock host daemon (${version}) is older than ${COMMANDS_MIN_HOSTD}` : `Its TeleFlock host daemon version isn't known yet (commands need ${COMMANDS_MIN_HOSTD} or newer)`}: update it from Hosts, or start the message with a space to send it as text.`,
+      title: `${nameOf(to)} can't ${unmet.can} yet`,
+      description: `${version ? `Its TeleFlock host daemon (${version}) is older than ${unmet.min}` : `Its TeleFlock host daemon version isn't known yet (${unmet.noun} need ${unmet.min} or newer)`}: update it from Hosts, or ${unmet.instead}.`,
     };
   }
   const agents = (w.states[to]?.agents ?? []).map((a) => a.name);
