@@ -5,6 +5,7 @@ import { App } from "@/app/App";
 import { startCore, startDrafts, startDraftSweep } from "@/core";
 import { applyInitialMotionAttribute, startTheme } from "@/design";
 import { resumeInterruptedNaming } from "@/features/dispatch/store";
+import { installFieldUndo } from "@/features/shell/fieldUndo";
 import { guardStrayFileDrops } from "@/features/shell/fileDrops";
 // Browser recordings attached to composer drafts come back after a restart (before drafts load).
 import "@/features/recording/register";
@@ -20,6 +21,8 @@ startDraftSweep();
 resumeInterruptedNaming();
 // A file dropped outside a drop zone never replaces the app (the webview would open it).
 guardStrayFileDrops();
+// Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (Ctrl+Y) in every text field (WebKitGTK binds no key to undo).
+installFieldUndo();
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root missing from index.html");

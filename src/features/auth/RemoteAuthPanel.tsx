@@ -213,6 +213,8 @@ function AnswerForm({
           }}
           placeholder={placeholder}
           type={secret && !shown ? "password" : "text"}
+          // a secret: Ctrl+Z never brings back what was typed (shell/fieldUndo)
+          data-no-undo={secret ? "" : undefined}
           autoComplete="off"
           autoCapitalize="off"
           autoCorrect="off"

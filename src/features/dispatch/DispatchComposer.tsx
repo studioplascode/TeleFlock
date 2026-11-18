@@ -253,6 +253,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
       )}
       <Textarea
         ref={ta}
+        data-own-undo=""
         value={dictation.listening && dictation.interim ? `${text}${text && !text.endsWith(" ") ? " " : ""}${dictation.interim}` : text}
         onChange={(e) => {
           const r = paste.change(e.target.value, e.target.selectionStart ?? e.target.value.length, (e.nativeEvent as InputEvent).isComposing === true);

@@ -80,6 +80,8 @@ function SecretInput({ spec, value, saved, cleared, error, onChange, onClear }: 
         <Input
           id={id}
           type={shown ? "text" : "password"}
+          // a secret: Ctrl+Z never brings back what was typed (shell/fieldUndo)
+          data-no-undo=""
           autoComplete="off"
           autoCapitalize="off"
           autoCorrect="off"
