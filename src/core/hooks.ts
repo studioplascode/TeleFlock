@@ -185,6 +185,13 @@ export function useSuccessor(key: string): string | undefined {
   return useCore((s) => resolveSuccessor(s.successors, key));
 }
 
+/**
+ * How a board lane orders its cards: `lane` its own order (`compareAgents`), `project` by repository
+ * name (agents outside a repository last), then the lane's order, `created` the newest worktree first
+ * (`createdAtOf`).
+ */
+export type BoardSort = "lane" | "project" | "created";
+
 export interface AgentFilter {
   column?: Column;
   /** Host id, or `"all"` / undefined for every host. */
@@ -193,6 +200,8 @@ export interface AgentFilter {
   repo?: string;
   kind?: string;
   q?: string;
+  /** Board order; absent = `lane`. */
+  sort?: BoardSort;
 }
 
 function matches(a: AgentView, f: AgentFilter, q: string): boolean {
@@ -222,17 +231,36 @@ export function compareAgents(s: CoreState, column: Column | undefined): (a: Age
     order.indexOf(a.hostId) - order.indexOf(b.hostId) || wsOrder(a) - wsOrder(b) || a.name.localeCompare(b.name);
 }
 
+/**
+ * When an agent's work began, for the board's "Worktree created" order: its linked worktree's
+ * creation (`RepoInfo.worktreeCreatedAt`, hosts ≥ 0.9.6), else when its session started, else when
+ * it entered its state. A parked agent has no workspace: its session start.
+ */
+export function createdAtOf(s: CoreState, a: AgentView): number {
+  const ws = a.workspaceId ? s.hosts[a.hostId]?.state.workspaces.find((w) => w.id === a.workspaceId) : undefined;
+  return ws?.repo?.worktreeCreatedAt ?? a.startedAt ?? a.stateSince;
+}
+
 export function selectAgentKeys(s: CoreState, f: AgentFilter = {}): string[] {
   const q = (f.q ?? "").trim().toLowerCase();
   const list = Object.values(s.agents).filter((a) => matches(a, f, q));
-  list.sort(compareAgents(s, f.column));
+  const lane = compareAgents(s, f.column);
+  if (f.sort === "created") {
+    const at = new Map(list.map((a) => [a.key, createdAtOf(s, a)]));
+    list.sort((a, b) => (at.get(b.key) ?? 0) - (at.get(a.key) ?? 0) || lane(a, b));
+  } else if (f.sort === "project") {
+    // No repository (a chat, a plain folder) sorts after every repository.
+    list.sort((a, b) => (a.repo ? (b.repo ? a.repo.localeCompare(b.repo) : -1) : b.repo ? 1 : 0) || lane(a, b));
+  } else {
+    list.sort(lane);
+  }
   return list.map((a) => a.key);
 }
 
 /** Agent keys matching the filter, ordered for display. Re-renders only when the list changes. */
 export function useAgentKeys(filter: AgentFilter = {}): string[] {
-  const { column, hostId, workspaceId, repo, kind, q } = filter;
-  return useCore(useShallow((s) => selectAgentKeys(s, { column, hostId, workspaceId, repo, kind, q })));
+  const { column, hostId, workspaceId, repo, kind, q, sort } = filter;
+  return useCore(useShallow((s) => selectAgentKeys(s, { column, hostId, workspaceId, repo, kind, q, sort })));
 }
 
 export function useColumnKeys(column: Column, filter: Omit<AgentFilter, "column"> = {}): string[] {

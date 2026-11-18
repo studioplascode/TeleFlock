@@ -309,6 +309,9 @@ wire_struct! {
         pub ahead: Option<u32>,
         pub behind: Option<u32>,
         pub remote_url: Option<String>,
+        /// When `git worktree add` made this checkout, for a linked worktree (its `.git` file is
+        /// written once then; hosts ≥ 0.9.6). Absent for a main checkout.
+        pub worktree_created_at: Option<Millis>,
     }
 }
 

@@ -8,4 +8,9 @@ root: string, name: string, branch?: string, head?: string,
 /**
  * Number of changed files (staged + unstaged + untracked).
  */
-dirty?: number, ahead?: number, behind?: number, remoteUrl?: string, };
+dirty?: number, ahead?: number, behind?: number, remoteUrl?: string, 
+/**
+ * When `git worktree add` made this checkout, for a linked worktree (its `.git` file is
+ * written once then; hosts ≥ 0.9.6). Absent for a main checkout.
+ */
+worktreeCreatedAt?: number, };

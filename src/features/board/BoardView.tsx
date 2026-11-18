@@ -44,6 +44,7 @@ export function BoardView() {
   const q = useBoard((s) => s.q);
   const groupBy = useBoard((s) => s.groupBy);
   const moves = useBoard((s) => s.moves);
+  const sort = useBoard((s) => s.sort);
   const selectedKey = useUi((s) => s.selectedKey);
   const searchRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -54,7 +55,7 @@ export function BoardView() {
   const short = useMediaQuery("(min-width: 768px) and (max-height: 820px)");
   const firstSteps = useFirstStepsView();
 
-  const filter = { hostId, repo: repo ?? undefined, q: q.trim() || undefined };
+  const filter = { hostId, repo: repo ?? undefined, q: q.trim() || undefined, sort };
   const running = useColumnKeys("running", filter);
   const needs = useColumnKeys("needs", filter);
   const review = useColumnKeys("review", filter);
@@ -102,7 +103,7 @@ export function BoardView() {
         </div>
       )}
       {groupBy === "repo" ? (
-        <RepoBoard repos={shownRepos} chats={chats} filter={{ hostId, q }} selectedKey={selectedKey} arrangement={arrangementOf(view)} />
+        <RepoBoard repos={shownRepos} chats={chats} filter={{ hostId, q, sort }} selectedKey={selectedKey} arrangement={arrangementOf(view)} />
       ) : (
         <Kanban lanes={lanes} selectedKey={selectedKey} />
       )}

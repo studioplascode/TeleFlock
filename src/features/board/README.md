@@ -184,6 +184,13 @@ Reopen (resumes too) and, once its worktree's pull request is merged or closed, 
 worktree workspace may be gone), no Connect. Dragging one back to Review
 resumes it; the card then reappears under the new id (the optimistic move clears when the old one leaves).
 
+**Sort** (toolbar select beside Status|Repo; phone: the ↕ chip in the Flock header, a sheet; `useBoard().sort`,
+kept in localStorage "tf.board"): **Lane order** (each lane's own, `LANE_LEGEND`), **Project** (by repository name,
+agents outside a repository last, then the lane's order) or **Worktree created** (newest first: the linked worktree's
+`RepoInfo.worktreeCreatedAt`, hosts ≥ 0.9.6, else the agent's `startedAt`; `createdAtOf` in `@/core`). The lanes'
+legend names the order in its first part ("by project · time waiting"). Repo grouping orders each repository's
+sections the same way. `selectAgentKeys(s, { …, sort })` does the ordering.
+
 **Ended cards** (`Agent.parked.ended`, hosts ≥ 0.7.0, docs/architecture.md §3.25: the agent's omp ended without anyone
 closing it — herdr stopped or crashed, a reboot, omp crashed): the card stays in Review, calm (idle status), its pill
 says "Ended" (`agentStateWord`) and its time counts from `ended.at` ("25m ago"; phone rows the same). One chip,

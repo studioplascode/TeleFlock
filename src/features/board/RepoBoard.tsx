@@ -1,6 +1,6 @@
 import { MessagesSquare } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
-import { selectAgentKeys, useCore } from "@/core";
+import { type BoardSort, selectAgentKeys, useCore } from "@/core";
 import { isChat } from "@/core/chats";
 import { AgentGlyph, CardFlight, EmptyState, FlightGroup, StatusOrb, cn } from "@/design";
 import { AgentCard } from "./AgentCard";
@@ -32,6 +32,7 @@ function RepoCard({ agentKey, lane, selected }: { agentKey: string; lane: (typeo
 interface RepoFilter {
   hostId: string;
   q: string;
+  sort?: BoardSort;
 }
 
 /** Whether a chat is on the board in view (the title-bar host filter): Repo grouping then gets one Chats column. */
@@ -45,8 +46,8 @@ function RepoLaneSection({ repo, filter, column, selectedKey }: { repo: string |
   const keys = useCore(
     useShallow((s) =>
       repo === null
-        ? selectAgentKeys(s, { column: column.column, hostId: filter.hostId, q }).filter((k) => isChat(s.agents[k]))
-        : selectAgentKeys(s, { column: column.column, hostId: filter.hostId, repo, q }),
+        ? selectAgentKeys(s, { column: column.column, hostId: filter.hostId, q, sort: filter.sort }).filter((k) => isChat(s.agents[k]))
+        : selectAgentKeys(s, { column: column.column, hostId: filter.hostId, repo, q, sort: filter.sort }),
     ),
   );
   if (keys.length === 0) return null;

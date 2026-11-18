@@ -21,7 +21,7 @@ import { AnimatePresence, CardFlight, CountBadge, EmptyState, FlightGroup, Numbe
 import { ACTIONS } from "@/features/shell/vocab";
 import { AgentCard } from "./AgentCard";
 import { archiveWithUndo, openAgent, setArchived } from "./agentActions";
-import { useBoard } from "./boardStore";
+import { SORTS, useBoard } from "./boardStore";
 import { LANES, LANE_BY_COLUMN, type LaneMeta } from "./lanes";
 import { QueueAllButton } from "./QueueAllDialog";
 
@@ -136,6 +136,9 @@ function Lane({
   // the floating selection bar covers the lane bottoms: leave room (its live height, published by SelectionBar)
   // to scroll the last card above it
   const selecting = useBoard((s) => s.picked.length > 0);
+  // The legend's first part names the order: the chosen sort's words in place of the lane's own.
+  const sortWords = useBoard((s) => SORTS.find((o) => o.value === s.sort)?.legend);
+  const legend = sortWords ? [sortWords, ...meta.legend.split(" · ").slice(1)].join(" · ") : meta.legend;
   return (
     <section
       ref={setNodeRef}
@@ -168,8 +171,8 @@ function Lane({
             <NumberTicker value={keys.length} className="rounded-full bg-ink/6 px-1.5 text-2xs font-bold text-mute" />
           </>
         )}
-        <span className="ml-auto min-w-0 truncate text-2xs font-semibold text-mute-2" title={meta.legend}>
-          {meta.legend}
+        <span className="ml-auto min-w-0 truncate text-2xs font-semibold text-mute-2" title={legend}>
+          {legend}
         </span>
         {meta.column === "running" && <QueueAllButton />}
       </header>
