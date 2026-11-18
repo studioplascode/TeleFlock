@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0, 0.6.1 and 0.7.0 on 2026-10-29, 0.8.0, 0.8.1 and 0.9.0 on 2026-11-01, 0.9.1, 0.9.2 and 0.9.3 on 2026-11-03, 0.9.4 on 2026-11-10, 0.9.5 on 2026-11-14 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0, 0.6.1 and 0.7.0 on 2026-10-29, 0.8.0, 0.8.1 and 0.9.0 on 2026-11-01, 0.9.1, 0.9.2 and 0.9.3 on 2026-11-03, 0.9.4 on 2026-11-10, 0.9.5 on 2026-11-14, 0.9.6 on 2026-11-18 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -9,6 +9,19 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ❌ **missing**: there is no UI path.
 
 **hostd path legend**: C = collab guest · B = tf-bridge extension (since 0.6.0 also the data plane: live frames + the session file) · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.9.6 changed
+
+No lab ran for 0.9.6: the host paths are covered by unit tests, the app by the demo and unit tests.
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| A Done card leaves with its worktree: Delete worktree, Cleanup or `worktree.remove` by workspace drop the parked cards that ran in it; a worktree deleted any other way (git, herdr, by hand) takes its card within a minute; moves in flight and resumes keep theirs; the session stays in Past sessions | board Done lane | Flock Done | hostd `state/parked.rs` `drop_parked_where`, `check_folder`, `ran_in`; `ops/worktree.rs` (G, H) | ✅ tests (`cargo test -p tf-hostd state::parked`: folder verdicts, a sibling with the same prefix, a move in flight, survives a restart, no prune entry); ✅ demo tests (`demo.test.ts`, `cleanup.test.ts`); ⚠️ not run against a real host |
+| Sort the lanes: Lane order, Project (repository name, no repository last), Worktree created (newest first: `RepoInfo.worktreeCreatedAt`, else the session's start); kept per device; the legend names it; Repo grouping too | board toolbar select | Flock ↕ chip → sheet | `core/hooks.ts` `selectAgentKeys({sort})`, `createdAtOf`; `board/boardStore.ts`; hostd `ops/git.rs` (G) | ✅ demo (1600×1000 Project, legends; 400×860 sheet); ⚠️ worktree creation time not checked against a real host |
+| Dispatch starts agents on an omp model role (`@slow`, `@smol`, `@plan`, custom; the agent's own over the host's) as `--model @<role>`; hosts before 0.9.6 refuse it, so the rows are disabled there and Auto leaves them out; also in New worktree / New agent | Dispatch model pill, New worktree / agent | same | `agentRoles/mainModel.ts`; `dispatch/send.ts` `sendNeeds`; hostd `ops/agent.rs` `check_launch_model` | ✅ tests (`mainModel.test.ts`, `send.test.ts`, `store.test.ts`, `cargo test -p tf-hostd model_format`); ✅ demo (role list, a send on `@slow`); ⚠️ `--model @slow` not run against a real omp |
+| Thinking offers the levels of the model the choice runs, Host default and roles included: `max` on Opus 5.5, `auto` on reasoning models; Automations and Fan out list every level | Dispatch, New worktree / agent, Automations, Fan out | same | `agentRoles/mainModel.ts` `thinkingChoices`, `mainSelector` | ✅ tests; ✅ demo (Host default → … xhigh, max, auto) |
+| Goal mode for dispatched tasks: the task becomes `/goal set <task>` (one line), excludes Plan; a message that is a command starts no goal; needs hostd ≥ 0.9.1 | Dispatch footer Goal toggle, options menu | same | `dispatch/store.ts` `goalCommand`, `specOf`; hostd launch `command` (B) | ✅ tests (`store.test.ts`, `send.test.ts`); ✅ demo (goal send); ⚠️ not run against a real omp |
+| Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z and Ctrl+Y in every text field (the composers keep their own history, the terminal is left alone); password and show/hide secret fields get no history, and a value the app sets starts the history over | every text field | every text field (hardware keyboard) | `shell/fieldUndo.ts` (L) | ✅ tests (`fieldUndo.test.ts`); ✅ demo (board filter in headless Chromium); ⚠️ not run in the Linux (WebKitGTK), Windows or Android app |
 
 ## §0 What 0.9.5 changed
 
