@@ -2241,7 +2241,7 @@ export class DemoHost implements SimHost {
     this.closeWs(m);
     // PRs are keyed by workspace here: drop it with the workspace
     this.prs.delete(m.ws.id);
-    this.forgetParkedWorktree(m.path);
+    this.dropParkedIn(m.path);
     return {};
   }
 
@@ -2254,17 +2254,17 @@ export class DemoHost implements SimHost {
     const dirty = owners.reduce((n, s) => n + s.files.length, 0);
     if (dirty > 0 && !force) throw apiError("dirty_worktree", `'${path}' contains modified or untracked files, use --force to delete it`, { hint: "Remove it with “force” to discard them (the branch is kept)." });
     this.parkedPrs.delete(path);
-    this.forgetParkedWorktree(path);
+    this.dropParkedIn(path);
     return {};
   }
 
-  /** The checkout is gone: parked cards that ran there stop offering to delete it. */
-  private forgetParkedWorktree(path: string): void {
-    for (const s of this.sims.values()) {
+  /** The checkout is gone: parked cards that ran there leave the board (their sessions stay in Past sessions). */
+  private dropParkedIn(path: string): void {
+    for (const s of [...this.sims.values()]) {
       const parked = s.agent.parked;
-      if (parked?.worktree?.path !== path) continue;
-      s.agent.parked = { at: parked.at, sessionFile: parked.sessionFile };
-      this.agentChanged(s.agent.id);
+      if (!parked || parked.moved?.state === "moving" || parked.moved?.state === "interrupted") continue;
+      const cwd = s.agent.cwd ?? "";
+      if (parked.worktree?.path === path || cwd === path || cwd.startsWith(`${path}/`)) this.removeAgent(s.agent.id);
     }
   }
 

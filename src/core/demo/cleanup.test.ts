@@ -71,7 +71,7 @@ describe("demo cleanup", () => {
     expect(at(after, locked)).toBeDefined();
   });
 
-  test("a parked agent's merged worktree goes by path and the card stays", async () => {
+  test("a parked agent's merged worktree goes by path and its card with it", async () => {
     const r = rig();
     const report = await r.scanned();
     const gobump = all(report).find((w) => w.lastAgent?.name === "gobump") as CleanupWorktree;
