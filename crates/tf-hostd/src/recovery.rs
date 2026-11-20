@@ -347,7 +347,9 @@ impl Recovery {
     }
 
     /// Opens a ticket for `session_id` (root omp session) of herdr session `session`, or refreshes
-    /// the one it has (a refresh keeps `since`, `attempts` and a Don't). True when it is new.
+    /// the one it has (a refresh keeps `since` and `attempts`; a Don't, and what model access did
+    /// for the stop, only while the model and the refused session stay the same). True when it is
+    /// new.
     pub fn open(&self, session: &str, kind: AutoResumeKind, session_id: &str, init: TicketInit) -> bool {
         let now = now_ms();
         let new = {
@@ -355,6 +357,11 @@ impl Recovery {
             let tickets = d.sessions.entry(session.to_string()).or_default();
             match tickets.get_mut(session_id) {
                 Some(t) if t.kind == kind => {
+                    // Another model, or another session's refusal: the account moved, the user's pin
+                    // and the offer belonged to the old stop, and so did a Don't or a hold.
+                    if t.model != init.model || t.refused_by != init.refused_by {
+                        (t.moved_to, t.user_pin, t.offer, t.manual) = (None, None, None, None);
+                    }
                     t.reason = init.reason;
                     t.session_file = init.session_file.or(t.session_file.take());
                     t.root = init.root;
@@ -1307,6 +1314,34 @@ mod tests {
             basis: Some(ResumeBasis::Hint),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_refresh_for_another_model_or_refuser_drops_the_offer_and_the_dont() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = recovery(dir.path());
+        let refusal = |model: &str, by: Option<&str>| TicketInit {
+            model: Some(model.into()),
+            refused_model: true,
+            refused_by: by.map(|id| RefusedBy { agent_id: id.into(), session_id: format!("{id}-sid") }),
+            ..limit(by.is_none(), &by.into_iter().collect::<Vec<_>>())
+        };
+        let offer = tf_proto::AccountOffer { key: "mocklab|email:yes".into(), label: "yes".into() };
+        // The root session's own pin refused the model: an offer for the root.
+        r.open("s", AutoResumeKind::ProviderError, "sid", refusal("m", None));
+        r.annotate("s", "sid", |t| (t.user_pin, t.offer) = (Some("no".into()), Some(offer.clone())));
+        assert!(crate::limit_resume::offer_applies(&r.ticket("s", "sid").unwrap(), &offer.key));
+        // A subagent's refusal refreshes it: the root's offer is gone, Use can't pin the parent.
+        r.open("s", AutoResumeKind::ProviderError, "sid", refusal("m", Some("0-Sub")));
+        let t = r.ticket("s", "sid").unwrap();
+        assert_eq!((t.offer.as_ref(), t.user_pin.as_deref()), (None, None));
+        assert!(!crate::limit_resume::offer_applies(&t, &offer.key));
+        // The same model and refuser again: the user's Don't stays; another model drops it.
+        assert_eq!(r.dont_or_dismiss("s", "sid", 10), Some(None));
+        r.open("s", AutoResumeKind::ProviderError, "sid", refusal("m", Some("0-Sub")));
+        assert!(r.ticket("s", "sid").unwrap().manual.is_some(), "Don't kept");
+        r.open("s", AutoResumeKind::ProviderError, "sid", refusal("other", Some("0-Sub")));
+        assert!(r.ticket("s", "sid").unwrap().manual.is_none(), "Don't belonged to the old model");
     }
 
     #[test]

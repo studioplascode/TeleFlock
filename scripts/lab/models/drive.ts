@@ -210,12 +210,32 @@ async function main(): Promise<number> {
 		note("pin", `after the resume: ${JSON.stringify(ompPin(sid))}`);
 	} else check(false, "the stop opened a ticket");
 
-	// use
+	// use: the user's own pin first (omp's `/session pin <email>`, typed into omp), then the user picks
+	// mythos@ through TeleFlock (`agent.useAccount`): the pin must change and the choice be recorded
 	await until("the agent to be idle", 120_000, () => idle(id));
-	const used = await call("agent.useAccount", { agentId: id, key: YES }).catch((e) => ({ error: String(e) }));
+	await call("agent.slash", { agentId: id, command: "/session pin no-mythos@example.test" });
+	const before = await until("omp's pin to name no-mythos@", 30_000, () => {
+		const p = ompPin(sid);
+		return (p.email ?? "").includes("no-mythos@example.test") ? p : undefined;
+	}).catch((e) => (note("wait", String(e)), ompPin(sid)));
+	note("pin", `before the choice: ${JSON.stringify(before)}`);
+	check(before.explicit === true && (before.email ?? "").includes("no-mythos@example.test"), "the user's /session pin names no-mythos@ (explicit)", before);
+	from = Date.now();
+	let used: Json;
+	try {
+		used = await call("agent.useAccount", { agentId: id, key: YES });
+	} catch (e) {
+		check(false, "agent.useAccount answers", String(e));
+		note("done", `${failures.length} check(s) failed: ${failures.join("; ")}`);
+		return 2;
+	}
 	note("use", JSON.stringify(used));
 	const pin = ompPin(sid);
-	check(pin.explicit === true && (pin.email ?? "").includes("mythos@example.test") && !(pin.email ?? "").includes("no-mythos"), "omp's pin is mythos@, explicit", pin);
+	note("pin", `after the choice: ${JSON.stringify(pin)}`);
+	check(pin.explicit === true && (pin.email ?? "").includes("mythos@example.test") && !(pin.email ?? "").includes("no-mythos"), "omp's pin moved to mythos@, explicit", pin);
+	const chose = (await activity(id, from)).filter((e) => String(e.title).startsWith("Pinned ") && String(e.title).includes("mythos@example.test"));
+	for (const e of chose) note("activity", `${e.title} — ${e.detail ?? ""}`);
+	check(chose.length === 1, "Activity records the user's choice once (only agent.useAccount writes it)", chose);
 	from = await prompt(id, "MODELS-LAB use: one more hello.");
 	await until("the turn to end", 120_000, () => mockRequests(from).some((r) => r.verdict === "ANSWERS") && idle(id)).catch((e) => note("wait", String(e)));
 	const reqs = mockRequests(from);

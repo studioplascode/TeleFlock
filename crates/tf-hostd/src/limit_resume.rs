@@ -545,12 +545,23 @@ pub async fn steer_ticket(ctx: &Ctx, session_id: &str, ticket: &Ticket) -> Optio
     }
 }
 
+/// The ticket's offer is account `key` and was made for the agent's own (root) session: offers are
+/// made only when that session's own pin refuses the model, never for a subagent's refusal.
+pub fn offer_applies(t: &crate::recovery::Ticket, key: &str) -> bool {
+    t.refused_by.is_none() && t.offer.as_ref().is_some_and(|o| o.key == key)
+}
+
 /// `agent.useAccount`: pins the agent's session to account `key` (the user's choice: omp's
-/// `/session pin`, never taken for TeleFlock's own) and resumes its ticket, if it has one.
+/// `/session pin`, never taken for TeleFlock's own) and resumes its ticket, if it has one. With a
+/// ticket, only the account it offers, for the session it offered it for ([`offer_applies`]).
 pub async fn use_account(ctx: &Ctx, agent_id: &str, key: &str) -> Result<RetryResult, ApiError> {
     let a = ctx.state.agent(agent_id).ok_or_else(|| ApiError::new("not_found", format!("no agent `{agent_id}`")))?;
     let sid = ctx.state.omp_session_of(agent_id).or_else(|| a.omp.as_ref().and_then(|o| o.session_id.clone())).ok_or_else(|| ApiError::new("invalid_params", format!("{} has no omp session", a.name)))?;
     let provider = key.split('|').next().filter(|p| !p.is_empty()).ok_or_else(|| ApiError::new("invalid_params", "not an account key"))?;
+    let ticket = crate::recovery::get().and_then(|r| r.ticket(&ctx.herdr_session, &sid));
+    if ticket.as_ref().is_some_and(|t| !offer_applies(t, key)) {
+        return Err(ApiError::new("invalid_params", "that account is not what this stop offers (the stop changed)").with_hint("Look at the agent's strip again"));
+    }
     let b = ctx.bridge.by_session(&sid).filter(|b| b.caps.pin_account).ok_or_else(|| {
         ApiError::new("unsupported", "moving a session to another account needs TeleFlock's bridge 2.7.0 in this omp").with_hint("Restart the agent (Mark done, then Resume) so it loads the current bridge")
     })?;
