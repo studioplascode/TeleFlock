@@ -1007,6 +1007,27 @@ wire_struct! {
         pub error: Option<String>,
         /// omp disabled the credential (e.g. expired refresh token); re-login needed.
         pub disabled: bool,
+        /// What the agents' requests showed about models on this account (architecture §3.22
+        /// "Model access"), newest first: absent when nothing current is known, and from older
+        /// daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<ModelAccess>>", optional)]
+        pub models: Vec<ModelAccess>,
+    }
+}
+
+wire_struct! {
+    /// One model on one account as omp's requests showed it (`LimitAccount.models`): the provider
+    /// answered with it, or refused it because the account has no access to it (Anthropic's 404
+    /// `not_found_error` "model: …"). tf-hostd learns it from the agents' transcripts and keeps
+    /// it while it holds: a refusal for a day, an answer for a week; a newer request replaces it.
+    pub struct ModelAccess {
+        /// Model id as omp requests it (`claude-mythos-5-2`).
+        pub model: String,
+        /// The provider refused the model on this account; `false`: it answered.
+        pub denied: bool,
+        /// When the request that showed it ran (host clock).
+        pub at: Millis,
     }
 }
 

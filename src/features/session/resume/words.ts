@@ -167,6 +167,8 @@ export function stripWords(ar: AutoResume, now: number, o: TicketOptions = {}): 
   if (!ended) detail.push(`${ar.root ? "Stopped" : "Subagents stopped"} ${formatClock(ar.since, now, o)}`);
   const basis = ar.status === "waiting" && ar.basis && !restart ? BASIS[ar.basis] : undefined;
   if (basis) detail.push(basis);
+  // Accounts the provider refused the model on: hostd left their room and resets out (§3.22 "Model access").
+  if (ar.noAccess?.length) detail.push(`Not counted, no access to ${ar.model ?? "the model"}: ${ar.noAccess.join(", ")}`);
   const tone = ar.status === "manual" ? "manual" : ar.status === "waiting" ? "wait" : "busy";
   return { text: parts.join(" · "), detail, tone, actions: ticketActions(ar, o) };
 }

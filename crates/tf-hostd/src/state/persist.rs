@@ -131,6 +131,11 @@ pub struct PersistData {
     /// Image originals tf-hostd kept, linked to their user rows: omp session id → row id → one
     /// slot per image (`Signal::OriginalsKept`, handed back to the replica when it joins).
     pub originals: HashMap<String, BTreeMap<String, Vec<Option<String>>>>,
+    /// Which account serves which model, as omp's requests showed it (`crate::model_access`).
+    pub model_access: crate::model_access::Book,
+    /// When this host first saw each omp session (root session id → ms): evidence of model access
+    /// from before then was written on another host (`crate::model_access`).
+    pub model_access_arrivals: BTreeMap<String, tf_proto::Millis>,
 }
 
 impl UsageLedger {

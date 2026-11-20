@@ -7,7 +7,9 @@
 //! room, else the earliest reset of the exhausted accounts (plus [`WINDOW_MARGIN_MS`]), else the
 //! provider's own retry-after (plus [`HINT_MARGIN_MS`]), else usage is checked again after
 //! [`BACKOFF_MS`]; a rate limit on an account out of usage is a usage limit. When the ticket is due,
-//! [`still_exhausted`] reads omp's usage afresh and reschedules while every account is still out.
+//! [`recheck`] reads omp's usage afresh and reschedules while every account is still out. Accounts
+//! known to have no access to the stopped model (`crate::model_access`) count neither their room
+//! nor their resets; when no account of the provider can serve it, the ticket waits for Resume.
 //! Every 2.1.0 bridge learns whether its `context` guard (limit errors out of the model's view) is
 //! on, at connect and whenever the host setting changes ([`start`]); after a hostd restart,
 //! `failedTails` brings back what stopped meanwhile ([`follow`]). `agent.retry` lives here too
@@ -31,6 +33,7 @@ use crate::daemon::Daemon;
 use crate::inject::{self, When};
 use crate::ops::Ctx;
 use crate::recovery::{Ticket, TicketInit};
+use crate::model_access::{access_of, Access};
 use crate::util::{clip, now_ms};
 
 /// After a window's reset, omp's usage report takes a moment to say so.
@@ -92,7 +95,8 @@ fn rank(kind: AutoResumeKind) -> u8 {
 
 /// What omp's usage report says about the accounts a stopped session can go on with: its own (omp's
 /// `session:sticky` pin, else the provider's only account) and every other enabled account of the
-/// provider, which omp rotates its credentials to.
+/// provider, which omp rotates its credentials to. An account known to have no access to the
+/// session's model (`crate::model_access`) is none of them: omp's requests on it fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Usage {
     /// No report for the provider's accounts (API keys, nothing fetched).
@@ -103,6 +107,8 @@ pub enum Usage {
     Elsewhere { own_out: bool },
     /// Every reported account is out for the model; the earliest of their resets, when known.
     Exhausted(Option<Millis>),
+    /// Every enabled account of the provider is known to have no access to the model.
+    NoAccess,
 }
 
 impl Usage {
@@ -128,15 +134,21 @@ fn account_usage(account: &LimitAccount, model: &str) -> Usage {
     Usage::Exhausted(exhausted.iter().filter_map(|w| w.resets_at).max())
 }
 
-/// [`Usage`] of `session_id`'s accounts of `provider` for `model`.
-pub fn provider_usage(limits: &AccountLimits, session_id: &str, provider: &str, model: Option<&str>) -> Usage {
+/// [`Usage`] of `session_id`'s accounts of `provider` for `model` at `now`. Accounts known to have no
+/// access to the model count neither their room nor their resets.
+pub fn provider_usage(limits: &AccountLimits, session_id: &str, provider: &str, model: Option<&str>, now: Millis) -> Usage {
     let model = model.unwrap_or_default().to_lowercase();
     let pinned = limits.sessions.iter().find(|s| s.session_id == session_id && s.provider == provider).and_then(|s| s.account_key.as_deref());
     let accounts: Vec<_> = limits.accounts.iter().filter(|a| a.provider == provider && !a.disabled).collect();
     let mut own = Usage::Unknown;
     let mut elsewhere = false;
     let mut resets: Vec<Option<Millis>> = Vec::new();
+    let mut refused = 0;
     for a in &accounts {
+        if refuses(a, &model, now) {
+            refused += 1;
+            continue;
+        }
         let u = account_usage(a, &model);
         let mine = pinned.map_or(accounts.len() == 1, |k| a.key == k);
         if mine {
@@ -148,12 +160,32 @@ pub fn provider_usage(limits: &AccountLimits, session_id: &str, provider: &str, 
             _ => {}
         }
     }
+    if refused > 0 && refused == accounts.len() {
+        return Usage::NoAccess;
+    }
     match own {
         Usage::Available => Usage::Available,
         _ if elsewhere => Usage::Elsewhere { own_out: matches!(own, Usage::Exhausted(_)) },
         _ if resets.is_empty() => Usage::Unknown,
         _ => Usage::Exhausted(resets.into_iter().flatten().min()),
     }
+}
+
+/// Account `a` is known at `now` to have no access to `model` (lowercase; empty: no model known).
+fn refuses(a: &LimitAccount, model: &str, now: Millis) -> bool {
+    !model.is_empty() && access_of(&a.models, model, now) == Access::Denied
+}
+
+/// The enabled accounts of `provider` (labels) known at `now` to have no access to `model`.
+pub fn refused_accounts(limits: &AccountLimits, provider: &str, model: Option<&str>, now: Millis) -> Vec<String> {
+    let model = model.unwrap_or_default().to_lowercase();
+    limits.accounts.iter().filter(|a| a.provider == provider && !a.disabled && refuses(a, &model, now)).map(|a| a.label.clone()).collect()
+}
+
+/// Why a ticket waits for Resume when no account of `provider` can serve `model`.
+fn no_access_reason(provider: &str, model: Option<&str>, refused: &[String]) -> String {
+    let model = model.unwrap_or("the model");
+    clip(&format!("No {provider} account has access to {model} (refused on {})", refused.join(", ")), 200)
 }
 
 /// When a stopped agent resumes, and why: soon when another account has room (omp rotates to
@@ -187,13 +219,25 @@ fn reason(kind: AutoResumeKind, e: &TurnError) -> String {
     format!("{what}{on}{who}: {}", clip(e.message.trim(), 160))
 }
 
-/// Usage of the failing session's accounts (`refresh`: ask omp again now).
-async fn usage_of(session_id: &str, provider: &str, model: Option<&str>, refresh: bool) -> Usage {
+/// Usage of the failing session's accounts (`refresh`: ask omp again now), and the accounts known
+/// to have no access to the model.
+async fn usage_of(session_id: &str, provider: &str, model: Option<&str>, refresh: bool) -> (Usage, Vec<String>) {
     match crate::ops::limits::limits_for(vec![(session_id.to_owned(), provider.to_owned())], refresh).await {
-        Ok((limits, _)) => provider_usage(&limits, session_id, provider, model),
+        Ok((limits, _)) => {
+            let now = now_ms();
+            let mut usage = provider_usage(&limits, session_id, provider, model, now);
+            // A stored credential the report leaves out (an API key) may still serve the model.
+            if usage == Usage::NoAccess
+                && let Some(m) = model
+                && crate::model_access::all_refused(provider, &m.to_lowercase(), now).await == Some(false)
+            {
+                usage = Usage::Unknown;
+            }
+            (usage, refused_accounts(&limits, provider, model, now))
+        }
         Err(e) => {
             warn!("auto-resume: usage of {provider}: {}", e.message);
-            Usage::Unknown
+            (Usage::Unknown, Vec::new())
         }
     }
 }
@@ -206,9 +250,9 @@ pub async fn on_turn_error(ctx: &Ctx, root_sid: &str, e: &TurnError) {
     let own_sid = e.session_id.clone().unwrap_or_else(|| root_sid.to_owned());
     // Usage windows tell when a limit passes; an overloaded or failing provider just gets backoff.
     let limit = is_limit(kind);
-    let usage = match &e.provider {
+    let (usage, no_access) = match &e.provider {
         Some(p) if limit => usage_of(&own_sid, p, e.model.as_deref(), false).await,
-        _ => Usage::Unknown,
+        _ => (Usage::Unknown, Vec::new()),
     };
     let kind = if usage.out() { AutoResumeKind::UsageLimit } else { kind };
     let prev = r.ticket(&ctx.herdr_session, root_sid).filter(|t| t.kind != AutoResumeKind::Restart);
@@ -243,26 +287,41 @@ pub async fn on_turn_error(ctx: &Ctx, root_sid: &str, e: &TurnError) {
         model: e.model.clone(),
         resume_at: Some(resume_at),
         basis: Some(basis),
+        no_access: no_access.clone(),
     };
     info!(session = %root_sid, agent = %e.agent_id, ?kind, resume_at, ?basis, streak, "auto-resume: the provider stopped the turn");
     r.open(&ctx.herdr_session, kind, root_sid, init);
-    if streak >= MAX_RESTOPS {
+    if usage == Usage::NoAccess {
+        r.hold(&ctx.herdr_session, root_sid, no_access_reason(e.provider.as_deref().unwrap_or("provider"), e.model.as_deref(), &no_access));
+    } else if streak >= MAX_RESTOPS {
         r.hold(&ctx.herdr_session, root_sid, format!("Stopped again right after {streak} automatic resumes"));
     }
 }
 
-/// A due limit ticket: usage read afresh. `Some((at, basis))`: every account the session can go on
-/// with is still out, resume then (at the earliest reset, else checking again 15, 30, then 60 min
-/// apart as the ticket keeps waiting).
-pub async fn still_exhausted(session_id: &str, ticket: &Ticket) -> Option<(Millis, ResumeBasis)> {
-    if !is_limit(ticket.kind) {
-        return None;
-    }
-    let provider = ticket.provider.as_deref()?;
+/// What a due limit ticket finds when usage is read afresh ([`recheck`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Recheck {
+    /// An account that can serve the model has room (or nothing says otherwise): resume.
+    Go,
+    /// Every account the session can go on with is still out: resume then.
+    Later(Millis, ResumeBasis),
+    /// No account of the provider has access to the model: it waits for Resume, saying why.
+    NoAccess(String),
+}
+
+/// A due limit ticket: usage read afresh. Every account the session can go on with still out →
+/// [`Recheck::Later`], at the earliest reset, else checking again 15, 30, then 60 min apart as the
+/// ticket keeps waiting; no account with access to the model → [`Recheck::NoAccess`].
+pub async fn recheck(session_id: &str, ticket: &Ticket) -> Recheck {
+    let Some(provider) = ticket.provider.as_deref().filter(|_| is_limit(ticket.kind)) else { return Recheck::Go };
     let now = now_ms();
     match usage_of(session_id, provider, ticket.model.as_deref(), true).await {
-        u @ Usage::Exhausted(_) => Some(due(u, None, waited_step(ticket.since, now), now)),
-        _ => None,
+        (u @ Usage::Exhausted(_), _) => {
+            let (at, basis) = due(u, None, waited_step(ticket.since, now), now);
+            Recheck::Later(at, basis)
+        }
+        (Usage::NoAccess, refused) => Recheck::NoAccess(no_access_reason(provider, ticket.model.as_deref(), &refused)),
+        _ => Recheck::Go,
     }
 }
 
@@ -658,12 +717,60 @@ mod tests {
             notes: vec![],
             error: None,
             disabled: false,
+            models: vec![],
             windows,
         }
     }
 
     fn limits(accounts: Vec<LimitAccount>, sessions: Vec<LimitSession>) -> AccountLimits {
         AccountLimits { fetched_at: 1, accounts, sessions, error: None }
+    }
+
+    /// `account` with what the agents' requests showed for Claude Mythos 5.2 at `at`.
+    fn mythos(mut a: LimitAccount, denied: bool, at: Millis) -> LimitAccount {
+        a.models = vec![tf_proto::ModelAccess { model: "claude-mythos-5-2".into(), denied, at }];
+        a
+    }
+
+    #[test]
+    fn accounts_without_access_to_the_model_count_neither_room_nor_resets() {
+        use crate::model_access::DENIED_FOR_MS;
+        let now = 1_000_000_000;
+        let h = 3_600_000;
+        let room = |key: &str| account(key, "anthropic", vec![window("7d", None, LimitStatus::Ok, Some(now + 50 * h))]);
+        let out = |key: &str, reset: Millis| account(key, "anthropic", vec![window("7d", None, LimitStatus::Exhausted, Some(reset))]);
+        let pin = vec![LimitSession { session_id: "s".into(), provider: "anthropic".into(), account_key: Some("anthropic|out".into()) }];
+        let model = Some("claude-mythos-5-2");
+        // Room but no access: not a reason to resume soon; the earliest reset of an account that
+        // can serve it is.
+        let denied_room = mythos(room("anthropic|room"), true, now - h);
+        let l = limits(vec![out("anthropic|out", now + 3 * h), denied_room.clone()], pin.clone());
+        assert_eq!(provider_usage(&l, "s", "anthropic", model, now), Usage::Exhausted(Some(now + 3 * h)));
+        assert_eq!(refused_accounts(&l, "anthropic", model, now), vec!["anthropic|room".to_string()]);
+        assert_eq!(provider_usage(&l, "s", "anthropic", Some("claude-opus-5"), now), Usage::Elsewhere { own_out: true }, "another model: the account counts");
+        // Access but exhausted: the serving account's reset, not the refusing account's earlier one.
+        let serving_out = mythos(out("anthropic|out", now + 9 * h), false, now - h);
+        let l = limits(vec![serving_out.clone(), mythos(out("anthropic|denied", now + h), true, now - h)], pin.clone());
+        assert_eq!(provider_usage(&l, "s", "anthropic", model, now), Usage::Exhausted(Some(now + 9 * h)));
+        // Unknown access counts: omp may well rotate to it.
+        let l = limits(vec![serving_out.clone(), room("anthropic|unknown"), denied_room.clone()], pin.clone());
+        assert_eq!(provider_usage(&l, "s", "anthropic", model, now), Usage::Elsewhere { own_out: true });
+        // Access learned, then expired: after a day the refusing account counts again.
+        let l = limits(vec![serving_out.clone(), denied_room.clone()], pin.clone());
+        assert_eq!(provider_usage(&l, "s", "anthropic", model, now), Usage::Exhausted(Some(now + 9 * h)));
+        let later = now - h + DENIED_FOR_MS;
+        assert_eq!(provider_usage(&l, "s", "anthropic", model, later), Usage::Elsewhere { own_out: true });
+        assert!(refused_accounts(&l, "anthropic", model, later).is_empty());
+        // A success after the refusal (access granted since): `crate::model_access` keeps the newer
+        // request, so the account serves and its room counts.
+        let l = limits(vec![serving_out.clone(), mythos(room("anthropic|room"), false, now - 1)], pin.clone());
+        assert_eq!(provider_usage(&l, "s", "anthropic", model, now), Usage::Elsewhere { own_out: true });
+        // No account has access: no automatic resume (the ticket says why).
+        let l = limits(vec![mythos(out("anthropic|out", now + h), true, now - h), denied_room], pin);
+        assert_eq!(provider_usage(&l, "s", "anthropic", model, now), Usage::NoAccess);
+        assert!(!Usage::NoAccess.out(), "not a usage limit");
+        let why = no_access_reason("anthropic", model, &refused_accounts(&l, "anthropic", model, now));
+        assert_eq!(why, "No anthropic account has access to claude-mythos-5-2 (refused on anthropic|out, anthropic|room)");
     }
 
     #[test]
@@ -673,19 +780,19 @@ mod tests {
         let pinned = vec![LimitSession { session_id: "s1".into(), provider: "anthropic".into(), account_key: Some("anthropic|email:a".into()) }];
         // The opus window meters opus models only; the shared one meters every model.
         let only_a = limits(vec![a.clone()], pinned.clone());
-        assert_eq!(provider_usage(&only_a, "s1", "anthropic", Some("claude-opus-5")), Usage::Exhausted(Some(20_000)));
-        assert_eq!(provider_usage(&only_a, "s1", "anthropic", Some("claude-sonnet-5")), Usage::Exhausted(Some(9_000)));
+        assert_eq!(provider_usage(&only_a, "s1", "anthropic", Some("claude-opus-5"), 0), Usage::Exhausted(Some(20_000)));
+        assert_eq!(provider_usage(&only_a, "s1", "anthropic", Some("claude-sonnet-5"), 0), Usage::Exhausted(Some(9_000)));
         // Another account has room: omp rotates to it.
         let both = limits(vec![a.clone(), b.clone()], pinned.clone());
-        assert_eq!(provider_usage(&both, "s1", "anthropic", Some("claude-opus-5")), Usage::Elsewhere { own_out: true });
-        assert_eq!(provider_usage(&both, "s2", "anthropic", None), Usage::Elsewhere { own_out: false }, "no pin: own unknown");
+        assert_eq!(provider_usage(&both, "s1", "anthropic", Some("claude-opus-5"), 0), Usage::Elsewhere { own_out: true });
+        assert_eq!(provider_usage(&both, "s2", "anthropic", None, 0), Usage::Elsewhere { own_out: false }, "no pin: own unknown");
         let mut off = b.clone();
         off.disabled = true;
-        assert_eq!(provider_usage(&limits(vec![a.clone(), off], pinned), "s1", "anthropic", None), Usage::Exhausted(Some(9_000)), "a disabled account is not one omp rotates to");
+        assert_eq!(provider_usage(&limits(vec![a.clone(), off], pinned), "s1", "anthropic", None, 0), Usage::Exhausted(Some(9_000)), "a disabled account is not one omp rotates to");
         // One account: that one; nothing reported: unknown.
-        assert_eq!(provider_usage(&limits(vec![b], vec![]), "s2", "anthropic", None), Usage::Available);
-        assert_eq!(provider_usage(&limits(vec![a], vec![]), "s2", "openai", None), Usage::Unknown);
-        assert_eq!(provider_usage(&limits(vec![account("x|#0", "x", vec![])], vec![]), "s", "x", None), Usage::Unknown);
+        assert_eq!(provider_usage(&limits(vec![b], vec![]), "s2", "anthropic", None, 0), Usage::Available);
+        assert_eq!(provider_usage(&limits(vec![a], vec![]), "s2", "openai", None, 0), Usage::Unknown);
+        assert_eq!(provider_usage(&limits(vec![account("x|#0", "x", vec![])], vec![]), "s", "x", None, 0), Usage::Unknown);
     }
 
     #[test]
@@ -702,13 +809,13 @@ mod tests {
         let d = account("anthropic|d", "anthropic", vec![five(LimitStatus::Ok, now + 4 * h), week(LimitStatus::Ok, now + 50 * h)]);
         let pin = vec![LimitSession { session_id: "s".into(), provider: "anthropic".into(), account_key: Some("anthropic|c".into()) }];
         let all = limits(vec![a.clone(), b.clone(), c.clone(), d], pin.clone());
-        let u = provider_usage(&all, "s", "anthropic", Some("claude-opus-5"));
+        let u = provider_usage(&all, "s", "anthropic", Some("claude-opus-5"), 0);
         assert_eq!(u, Usage::Elsewhere { own_out: true });
         assert!(u.out(), "a rate limit on an account out of usage is a usage limit");
         assert_eq!(due(u, Some(now + 91 * h), 0, now), (now + ROTATE_MS, ResumeBasis::Window), "not the failed account's 91 h");
         // No account has room: the earliest reset among them.
         let none = limits(vec![a, b, c], pin);
-        let u = provider_usage(&none, "s", "anthropic", Some("claude-opus-5"));
+        let u = provider_usage(&none, "s", "anthropic", Some("claude-opus-5"), 0);
         assert_eq!(u, Usage::Exhausted(Some(now + 127 * 60_000)));
         assert_eq!(due(u, Some(now + 91 * h), 0, now), (now + 127 * 60_000 + WINDOW_MARGIN_MS, ResumeBasis::Window));
         assert!(!Usage::Available.out() && !Usage::Unknown.out() && !Usage::Elsewhere { own_out: false }.out());

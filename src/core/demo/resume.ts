@@ -93,7 +93,9 @@ const SEEDS: Seed[] = [
       say("VarsScan found **3 plain-text secrets** in `roles/tailscale` and `roles/herdr`. Moving them to vault next."),
       { t: "fail", error: "429 usage_limit_reached: the 5-hour usage limit of this Claude Max account is used up", status: 429 },
     ],
-    ticket: (now, stopped) => ({ status: "waiting", kind: "usageLimit", reason: "Claude Max 5-hour limit reached", provider: "anthropic", model: "claude-opus-5", resumeAt: now + 120 * MIN, basis: "window", since: now - 25 * MIN, attempts: 0, root: true, subagentIds: stopped }),
+    // `noAccess`: a linked account whose requests were refused the model (§3.22 "Model access") is
+    // left out of when usage is back.
+    ticket: (now, stopped) => ({ status: "waiting", kind: "usageLimit", reason: "Claude Max 5-hour limit reached", provider: "anthropic", model: "claude-opus-5", resumeAt: now + 120 * MIN, basis: "window", since: now - 25 * MIN, attempts: 0, root: true, subagentIds: stopped, noAccess: ["team@example.test"] }),
   },
   {
     def: { id: "i18n", kind: "omp", workspace: "w12", column: "review", model: "luna", thinking: "medium", since: 10_800, age: 14_400, ctxPct: 23, cost: 0.32, title: "Translate the pricing page into German and French", files: [] },

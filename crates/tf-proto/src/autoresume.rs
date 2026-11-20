@@ -90,6 +90,13 @@ wire_struct! {
         pub root: bool,
         /// Subagents (`Subagent.id`) that stopped; they resume before the agent.
         pub subagent_ids: Vec<String>,
+        /// Accounts of `provider` (their labels) known to have no access to `model` (omp's requests
+        /// on them were refused, `ModelAccess.denied`): the ticket counts neither their room nor
+        /// their resets (architecture §3.22 "Model access"). Absent when none is known, and from
+        /// older daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<String>>", optional)]
+        pub no_access: Vec<String>,
     }
 }
 

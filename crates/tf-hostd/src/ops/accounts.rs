@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 
 use tf_proto::{
     AccountsSnapshot, ApiError, AuthFlow, AuthFlowState, AuthPaste, AuthPrompt, CredentialKind, HostMethod, LimitAccount, LinkedAccount,
-    LoginProvider, Millis,
+    LoginProvider, Millis, ModelAccess,
 };
 
 use crate::authflow::{self, FlowCtl, FlowInput, LoopbackRedirect};
@@ -313,11 +313,12 @@ pub async fn snapshot(ctx: &Ctx, refresh: bool) -> Result<AccountsSnapshot, ApiE
         }
     };
     let broker = broker_url(ctx, refresh).await;
-    let accounts = merge(&rows, &usage.accounts, &idents, &sessions, &policies, &providers, broker.is_some());
+    let known = crate::model_access::known(now_ms());
+    let accounts = merge(&rows, &usage.accounts, &idents, &sessions, &policies, &providers, &known, broker.is_some());
     Ok(AccountsSnapshot { providers, accounts, broker, flows: link_flows(), fetched_at, error: (!errors.is_empty()).then(|| errors.join(" · ")) })
 }
 
-fn label_of(row: &CredRow) -> String {
+pub(crate) fn label_of(row: &CredRow) -> String {
     if !row.oauth {
         return format!("API key #{}", row.id);
     }
@@ -335,7 +336,9 @@ fn label_of(row: &CredRow) -> String {
     format!("Account #{}", row.id)
 }
 
-fn key_of(row: &CredRow) -> String {
+/// The account a stored credential is on the accounts page when no usage report names it, and in
+/// `crate::model_access`: `provider|<identity key>` for a signed-in account, else `provider|#<id>`.
+pub(crate) fn key_of(row: &CredRow) -> String {
     match (&row.identity_key, row.oauth) {
         (Some(ik), true) => format!("{}|{ik}", row.provider),
         _ => format!("{}|#{}", row.provider, row.id),
@@ -384,7 +387,9 @@ fn prefer_blocked(row: &CredRow, active: &[&CredRow], broker: bool) -> Option<St
     None
 }
 
-/// Stored credentials + omp's usage report → the accounts the app shows.
+/// Stored credentials + omp's usage report → the accounts the app shows. `known`: what
+/// `crate::model_access` knows of each stored credential's account ([`key_of`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn merge(
     rows: &[CredRow],
     usage: &[LimitAccount],
@@ -392,6 +397,7 @@ pub(crate) fn merge(
     sessions: &HashMap<i64, u32>,
     policies: &[Value],
     providers: &[LoginProvider],
+    known: &HashMap<String, Vec<ModelAccess>>,
     broker: bool,
 ) -> Vec<LinkedAccount> {
     let mut used = vec![false; usage.len()];
@@ -453,6 +459,7 @@ pub(crate) fn merge(
             windows: r.map(|r| r.windows.clone()).unwrap_or_default(),
             windows_at: r.and_then(|r| r.fetched_at),
             windows_error: r.and_then(|r| r.error.clone()),
+            models: known.get(&key_of(row)).cloned().unwrap_or_default(),
         });
     }
     // Accounts only the usage report knows (an auth broker's, or credentials outside agent.db).
@@ -482,6 +489,7 @@ pub(crate) fn merge(
             windows: r.windows.clone(),
             windows_at: r.fetched_at,
             windows_error: if r.disabled { None } else { r.error.clone() },
+            models: r.models.clone(),
         });
     }
     // A preference only counts for the highest-ranked account of its provider.
@@ -1490,6 +1498,7 @@ mod tests {
             notes: vec![],
             error: None,
             disabled: false,
+            models: vec![],
         }
     }
 
@@ -1515,7 +1524,7 @@ mod tests {
         assert_eq!(sessions.get(&2), Some(&1), "pinned session");
         assert_eq!(sessions.get(&6), Some(&1), "single account of its provider");
         let policies = vec![json!({ "provider": "anthropic", "account": { "email": "me@example.com", "orgId": "org-b" }, "priority": 100 })];
-        let out = merge(&rows, &usage, &idents, &sessions, &policies, &providers(), false);
+        let out = merge(&rows, &usage, &idents, &sessions, &policies, &providers(), &HashMap::new(), false);
         let keys: Vec<&str> = out.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(
             keys,
@@ -1547,7 +1556,7 @@ mod tests {
         assert_eq!((key.kind, key.label.as_str()), (CredentialKind::ApiKey, "API key #5"));
         assert!(key.prefer_blocked.is_some());
         // In a broker, nothing can be preferred from here.
-        let brokered = merge(&rows, &usage, &idents, &sessions, &policies, &providers(), true);
+        let brokered = merge(&rows, &usage, &idents, &sessions, &policies, &providers(), &HashMap::new(), true);
         assert!(brokered.iter().all(|a| a.prefer_blocked.is_some()));
     }
 
@@ -1609,14 +1618,14 @@ mod tests {
         // omp's usage report lists the identity's disabled credential once.
         let report = LimitAccount { disabled: true, windows: vec![], ..usage_account("anthropic", "anthropic|email:me@x.y|org:o", "me@x.y", None) };
         let idents = [Ident { email: Some("me@x.y".into()), org_id: Some("o".into()), ..Default::default() }];
-        let out = merge(&[expired(2), other.clone(), expired(7)], &[report], &idents, &HashMap::new(), &[], &providers(), false);
+        let out = merge(&[expired(2), other.clone(), expired(7)], &[report], &idents, &HashMap::new(), &[], &providers(), &HashMap::new(), false);
         let shown: Vec<(Option<i64>, bool)> = out.iter().map(|a| (a.credential_id, a.disabled)).collect();
         assert_eq!(shown, [(Some(4), false), (Some(7), true)], "one Re-link row, for the newest expiry");
         let keys: std::collections::HashSet<&str> = out.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys.len(), out.len(), "unique keys: {out:?}");
         // Linked again: neither expiry shows.
         let again = CredRow { id: 9, disabled: None, ..expired(9) };
-        let out = merge(&[expired(2), other, expired(7), again], &[], &[], &HashMap::new(), &[], &providers(), false);
+        let out = merge(&[expired(2), other, expired(7), again], &[], &[], &HashMap::new(), &[], &providers(), &HashMap::new(), false);
         assert_eq!(out.iter().map(|a| (a.credential_id, a.disabled)).collect::<Vec<_>>(), [(Some(9), false), (Some(4), false)]);
     }
 
@@ -1630,7 +1639,7 @@ mod tests {
             .execute_batch(r#"INSERT INTO auth_credentials VALUES (10, 'anthropic', 'oauth', '{"access":"SECRET-F","refresh":"SECRET-FR","email":"old@example.com","orgId":"org-o"}', 'oauth refresh failed: invalid_grant', 'email:old@example.com|org:org-o', 1650000000, 1650000000);"#)
             .unwrap();
         let expired = |db: &Path| -> Vec<Option<i64>> {
-            merge(&read_credentials(db).unwrap(), &[], &[], &HashMap::new(), &[], &providers(), false).iter().filter(|a| a.disabled).map(|a| a.credential_id).collect()
+            merge(&read_credentials(db).unwrap(), &[], &[], &HashMap::new(), &[], &providers(), &HashMap::new(), false).iter().filter(|a| a.disabled).map(|a| a.credential_id).collect()
         };
         assert_eq!(expired(&db), [Some(10)], "one Re-link row for the account");
         // An active credential, or one asked for under another provider, stays.

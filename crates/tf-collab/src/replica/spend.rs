@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use tf_proto::{Millis, ModelShare, PresentedArtifact, Spender};
 
+use super::access::{Collector, CredentialUse};
 use super::subagents::{self, Outcome, TailTurn};
 use super::util::{b, f, non_empty, s, u};
 
@@ -291,6 +292,9 @@ pub struct ArtifactLedger {
     live: bool,
     /// Documents the transcripts' `present` calls showed since the ledger went live.
     presented: Vec<PresentedArtifact>,
+    /// The newest request per credential, model and outcome the transcripts recorded since
+    /// [`Self::take_credentials`] (history too: what an account served before is still news).
+    credentials: Collector,
 }
 
 impl ArtifactLedger {
@@ -334,6 +338,7 @@ impl ArtifactLedger {
             {
                 self.presented.push(a);
             }
+            self.credentials.entry(&entry);
             let (details, tool) = match s(&entry, "type") {
                 Some("custom_message") => (entry.get("details"), ""),
                 Some("message") => entry.get("message").map_or((None, ""), |m| (m.get("details"), s(m, "toolName").unwrap_or(""))),
@@ -358,6 +363,12 @@ impl ArtifactLedger {
     /// The documents presented since the last call, oldest first.
     pub fn take_presented(&mut self) -> Vec<PresentedArtifact> {
         std::mem::take(&mut self.presented)
+    }
+
+    /// The requests the transcripts recorded since the last call: per credential, model and
+    /// outcome (answered or refused), the newest.
+    pub fn take_credentials(&mut self) -> Vec<CredentialUse> {
+        self.credentials.take()
     }
 
     /// How the subagents' runs ended, as the transcripts record it: each transcript's records in

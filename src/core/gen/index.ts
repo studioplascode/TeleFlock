@@ -340,6 +340,7 @@ export type * from "./MicrophoneAccess";
 export type * from "./MicrosoftSignInSource";
 export type * from "./MicrosoftSignInUnavailable";
 export type * from "./ModeItem";
+export type * from "./ModelAccess";
 export type * from "./ModelCatalog";
 export type * from "./ModelInfo";
 export type * from "./ModelPreset";

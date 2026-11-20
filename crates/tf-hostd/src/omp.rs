@@ -687,6 +687,8 @@ impl OmpSession {
         if st.first_prompt.is_none() {
             st.first_prompt = first_prompt_in(&update.events);
         }
+        // Which account served which model (§3.22 "Model access").
+        crate::model_access::note(&self.session_id, st.replica.take_credentials());
         changed_usage(st)
     }
 
@@ -2141,11 +2143,14 @@ async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
         let Some((id, dir, mut ledger)) = tail.take() else { continue };
         let scanned = tokio::task::spawn_blocking(move || {
             let (calls, presented) = crate::artifacts::scan_live(&dir, &mut ledger);
-            (dir, ledger, calls, presented)
+            let uses = ledger.take_credentials();
+            (dir, ledger, calls, presented, uses)
         })
         .await;
         let (calls, presented) = match scanned {
-            Ok((dir, ledger, calls, presented)) => {
+            Ok((dir, ledger, calls, presented, uses)) => {
+                // Subagents and advisors make provider requests too (§3.22 "Model access").
+                crate::model_access::note(&id, uses);
                 tail = Some((id, dir, ledger));
                 (calls, presented)
             }

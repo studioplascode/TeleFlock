@@ -24,6 +24,7 @@ pub mod journal;
 #[cfg(any(test, feature = "lab-faults"))]
 pub mod lab;
 pub mod live_rows;
+pub mod model_access;
 pub mod logging;
 pub mod notes;
 pub mod notify;

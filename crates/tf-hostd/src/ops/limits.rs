@@ -148,6 +148,9 @@ pub(crate) async fn limits_for(live: Vec<(String, String)>, refresh: bool) -> Re
         let db = db.clone();
         tokio::task::spawn_blocking(move || cached_reports(&db)).await.unwrap_or_default()
     };
+    // What omp's requests showed about model access, current (§3.22 "Model access").
+    crate::model_access::note_omp_blocks().await;
+    crate::model_access::settle().await;
     let (fetched_at, accounts, error) = {
         let mut c = CACHE.lock().await;
         let max_age = if refresh { REFRESH_MIN } else { TTL };
@@ -177,7 +180,12 @@ pub(crate) async fn limits_for(live: Vec<(String, String)>, refresh: bool) -> Re
         .await
         .map_err(|e| ApiError::new("internal", e.to_string()))?;
     let idents = accounts.iter().map(|p| p.ident.clone()).collect();
-    Ok((AccountLimits { fetched_at, accounts: accounts.into_iter().map(|p| p.account).collect(), sessions, error }, idents))
+    let now = now_ms();
+    let accounts = accounts
+        .into_iter()
+        .map(|p| LimitAccount { models: crate::model_access::models_for(&p.account.provider, &p.ident, now), ..p.account })
+        .collect();
+    Ok((AccountLimits { fetched_at, accounts, sessions, error }, idents))
 }
 
 /// While an omp session on this host runs a turn (and once more after the last one ends), reads
@@ -202,6 +210,8 @@ pub fn start(daemon: &Arc<Daemon>) {
                 let db = omp_agent_dir().join("agent.db");
                 let cached = tokio::task::spawn_blocking(move || cached_reports(&db)).await.unwrap_or_default();
                 note_readings(&mut CACHE.lock().await.ring, &cached, now_ms());
+                // omp's model blocks last a minute: read them while sessions work.
+                crate::model_access::note_omp_blocks().await;
             }
             was_busy = busy;
         }
@@ -433,6 +443,7 @@ pub(crate) fn parse_usage(v: &Value) -> Result<Vec<Parsed>, String> {
             notes: strings(r.get("notes")),
             error: windows.is_empty().then(|| "omp reported no limit windows for this account".to_string()),
             disabled: false,
+            models: vec![],
             windows,
             provider,
             key,
@@ -465,6 +476,7 @@ pub(crate) fn parse_usage(v: &Value) -> Result<Vec<Parsed>, String> {
                     notes: vec![],
                     error: Some(error(a)),
                     disabled,
+                    models: vec![],
                     provider,
                     key,
                 },

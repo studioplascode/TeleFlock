@@ -94,6 +94,10 @@ pub struct Ticket {
     pub root: bool,
     #[serde(default)]
     pub subagent_ids: Vec<String>,
+    /// Accounts of the provider (labels) known to have no access to `model` when the ticket was
+    /// decided: their room and resets did not count (`crate::limit_resume`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_access: Vec<String>,
     /// The session's file: cards that only know the file (a parked card from an older build)
     /// still match, and a restart relaunches it.
     #[serde(default)]
@@ -119,6 +123,8 @@ pub struct TicketInit {
     /// Earliest automatic resume; `None`: as soon as the worker sees it.
     pub resume_at: Option<Millis>,
     pub basis: Option<ResumeBasis>,
+    /// Accounts known to have no access to the model ([`Ticket::no_access`]).
+    pub no_access: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +334,7 @@ impl Recovery {
                     t.model = init.model;
                     t.resume_at = init.resume_at;
                     t.basis = init.basis;
+                    t.no_access = init.no_access;
                     t.missing_since = None;
                     false
                 }
@@ -345,6 +352,7 @@ impl Recovery {
                             attempts: 0,
                             root: init.root,
                             subagent_ids: init.subagent_ids,
+                            no_access: init.no_access,
                             session_file: init.session_file,
                             manual: None,
                             missing_since: None,
@@ -430,6 +438,7 @@ impl Recovery {
                     attempts: 0,
                     root: init.root,
                     subagent_ids: init.subagent_ids,
+                    no_access: Vec::new(),
                     session_file: init.session_file,
                     manual,
                     missing_since: None,
@@ -509,6 +518,7 @@ impl Recovery {
             attempts: t.attempts,
             root: t.root,
             subagent_ids: t.subagent_ids.clone(),
+            no_access: t.no_access.clone(),
         }
     }
 
@@ -820,14 +830,23 @@ async fn resume_limit(ctx: &Ctx, session_id: &str, ticket: &Ticket) -> Result<Re
     if bridge.is_none() && card.as_ref().is_some_and(crate::limit_resume::omp_gone) {
         return Err(ApiError::new(GONE, crate::limit_resume::OMP_GONE));
     }
-    // A due usage-limit ticket (not Resume by hand): usage is read afresh; still exhausted → later.
+    // A due usage-limit ticket (not Resume by hand): usage is read afresh; still exhausted → later;
+    // no account of the provider can serve the model any more → it waits for Resume.
     if ticket.manual.is_none()
         && ticket.resume_at.is_none_or(|at| at <= now_ms())
-        && let Some((at, basis)) = crate::limit_resume::still_exhausted(session_id, ticket).await
         && let Some(r) = get()
     {
-        r.reschedule(&ctx.herdr_session, session_id, at, basis);
-        return Err(ApiError::new(RESCHEDULED, "the account's usage window is still exhausted"));
+        match crate::limit_resume::recheck(session_id, ticket).await {
+            crate::limit_resume::Recheck::Go => {}
+            crate::limit_resume::Recheck::Later(at, basis) => {
+                r.reschedule(&ctx.herdr_session, session_id, at, basis);
+                return Err(ApiError::new(RESCHEDULED, "the account's usage window is still exhausted"));
+            }
+            crate::limit_resume::Recheck::NoAccess(why) => {
+                r.hold(&ctx.herdr_session, session_id, why);
+                return Err(ApiError::new(RESCHEDULED, "no account of the provider has access to the model"));
+            }
+        }
     }
     let b = bridge.ok_or_else(|| {
         ApiError::new("not_connected", "TeleFlock's bridge in omp is not connected").with_hint("Resume it in the terminal: press F5 in omp").retryable()

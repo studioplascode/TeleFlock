@@ -12,7 +12,7 @@
 //! quota windows from `omp usage`), links a new one (`omp login <provider>` driven as an
 //! [`AuthFlow`]), unlinks one and marks the account omp should prefer for new sessions.
 
-use crate::methods::LimitWindow;
+use crate::methods::{LimitWindow, ModelAccess};
 use crate::Millis;
 
 wire_enum! {
@@ -161,6 +161,11 @@ wire_struct! {
         pub windows_at: Option<Millis>,
         /// Why there are no windows.
         pub windows_error: Option<String>,
+        /// Models the agents' requests showed this account serves or is refused
+        /// (`LimitAccount.models`); absent when nothing current is known, and from older daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<ModelAccess>>", optional)]
+        pub models: Vec<ModelAccess>,
     }
 }
 

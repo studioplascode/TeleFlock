@@ -31,4 +31,11 @@ root: boolean,
 /**
  * Subagents (`Subagent.id`) that stopped; they resume before the agent.
  */
-subagentIds: Array<string>, };
+subagentIds: Array<string>, 
+/**
+ * Accounts of `provider` (their labels) known to have no access to `model` (omp's requests
+ * on them were refused, `ModelAccess.denied`): the ticket counts neither their room nor
+ * their resets (architecture §3.22 "Model access"). Absent when none is known, and from
+ * older daemons.
+ */
+noAccess?: Array<string>, };
