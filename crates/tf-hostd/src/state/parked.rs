@@ -24,7 +24,7 @@ use tf_proto::Millis;
 use super::persist::{ParkedRecord, ParkedWorktree, SessionData};
 use super::StateHandle;
 use crate::ops::Ctx;
-use crate::util::now_ms;
+use crate::util::{Occupancy, now_ms, occupancy};
 
 /// Undo window between *Mark done* and closing the pane.
 pub const PARK_GRACE: Duration = Duration::from_secs(10);
@@ -483,12 +483,15 @@ impl StateHandle {
     /// The folder parked records ran in is gone (their linked worktree was removed, here or by
     /// hand): their cards leave the board. Each omp session stays on disk (Past sessions lists
     /// it), so this is no prune and `HostInfo.pruned` doesn't name them. A record whose move has
-    /// not finished and an agent being resumed are kept. Returns the ids dropped.
+    /// not finished and an agent being resumed are kept, and so is an ended one (Review, waiting
+    /// for Continue): the restart ledger would make its card again from its session
+    /// (`restart::Worker::stale`). Mark done and Dismiss turn an ended card into a Done one and
+    /// drop its ledger entry, so a Done card goes for good. Returns the ids dropped.
     pub fn drop_parked_where(&self, gone: impl Fn(&ParkedRecord) -> bool) -> Vec<String> {
         let resuming: HashSet<String> = self.lock().life.resuming.keys().cloned().collect();
         let dropped = self.inner.persist.session(&self.inner.session, |s| {
             let ids: Vec<(String, Option<String>)> =
-                s.parked.values().filter(|r| settled(r) && !resuming.contains(&r.agent_id) && gone(r)).map(|r| (r.agent_id.clone(), r.session_id.clone())).collect();
+                s.parked.values().filter(|r| settled(r) && r.ended.is_none() && !resuming.contains(&r.agent_id) && gone(r)).map(|r| (r.agent_id.clone(), r.session_id.clone())).collect();
             for (id, sid) in &ids {
                 forget(s, id, sid.as_deref());
             }
@@ -708,6 +711,8 @@ pub enum FileCheck {
     Unknown(String),
 }
 
+/// [`FileCheck`] of a session file. An entry of its sessions root that can't be read gives no
+/// verdict, like any other error there.
 pub fn check_file(path: &Path) -> FileCheck {
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => FileCheck::Present,
@@ -720,10 +725,10 @@ pub fn check_file(path: &Path) -> FileCheck {
                 match std::fs::metadata(dir) {
                     Ok(d) if d.is_dir() && level == 0 => return FileCheck::Missing,
                     Ok(d) if d.is_dir() => {
-                        return match std::fs::read_dir(dir).map(|mut it| it.next().is_some()) {
-                            Ok(true) => FileCheck::Missing,
-                            Ok(false) => FileCheck::Unknown(format!("{} is empty (unmounted?)", dir.display())),
-                            Err(e) => FileCheck::Unknown(format!("{}: {e}", dir.display())),
+                        return match std::fs::read_dir(dir).map(occupancy) {
+                            Ok(Occupancy::Filled) => FileCheck::Missing,
+                            Ok(Occupancy::Empty) => FileCheck::Unknown(format!("{} is empty (unmounted?)", dir.display())),
+                            Ok(Occupancy::Unreadable(e)) | Err(e) => FileCheck::Unknown(format!("{}: {e}", dir.display())),
                         };
                     }
                     Ok(_) => return FileCheck::Unknown(format!("{} is not a folder", dir.display())),
@@ -738,19 +743,41 @@ pub fn check_file(path: &Path) -> FileCheck {
 }
 
 /// What a stat says about the folder a parked agent ran in ([`folder_of`]). Only a definite
-/// deletion is `Missing`: `NotFound` while the folder above it still holds something, or while
-/// its repository's main worktree (`repo_root`) is a folder. An unmounted mount point is an empty
-/// folder, and a disk that is gone takes the folder above with it: no verdict then.
+/// deletion is `Missing`: `NotFound` while
+/// - its parent folder holds something;
+/// - its parent folder is empty (the last worktree of that folder was removed) and its
+///   repository's main worktree (`repo_root`) is a folder;
+/// - its parent folder is gone too (a repository's worktrees folder removed whole), the nearest
+///   folder above it that is there holds something, and `repo_root` is a folder.
+///
+/// An unmounted disk leaves an empty mount point with nothing below it: an empty nearest folder
+/// gives no verdict (`Unknown`), and so do a symlink to a folder that isn't there and an entry that
+/// can't be read. A folder that can't be opened counts as empty.
 pub fn check_folder(path: &Path, repo_root: Option<&Path>) -> FileCheck {
     match std::fs::metadata(path) {
         Ok(_) => FileCheck::Present,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let filled = |d: &Path| std::fs::read_dir(d).is_ok_and(|mut it| it.next().is_some());
-            if path.parent().is_some_and(filled) || repo_root.is_some_and(Path::is_dir) {
-                FileCheck::Missing
-            } else {
-                FileCheck::Unknown(format!("{}: the folders around it are gone or empty too (unmounted?)", path.display()))
+            // The nearest folder above it that is there. A symlink to a folder that isn't there (on
+            // an unmounted disk) is no evidence either way: no verdict.
+            for (level, dir) in path.ancestors().skip(1).enumerate() {
+                match std::fs::symlink_metadata(dir) {
+                    Ok(m) if m.file_type().is_symlink() && std::fs::metadata(dir).is_err() => {
+                        return FileCheck::Unknown(format!("{} points to a folder that isn't there (unmounted?)", dir.display()));
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return FileCheck::Unknown(format!("{}: {e}", dir.display())),
+                }
+                let main_there = repo_root.is_some_and(Path::is_dir);
+                return match std::fs::read_dir(dir).map_or(Occupancy::Empty, occupancy) {
+                    Occupancy::Unreadable(e) => FileCheck::Unknown(format!("{}: {e}", dir.display())),
+                    Occupancy::Filled if level == 0 || main_there => FileCheck::Missing,
+                    Occupancy::Empty if level == 0 && main_there => FileCheck::Missing,
+                    Occupancy::Filled => FileCheck::Unknown(format!("{}: the folder above it is gone too, and no main worktree is there", path.display())),
+                    Occupancy::Empty => FileCheck::Unknown(format!("{} is empty (unmounted?)", dir.display())),
+                };
             }
+            FileCheck::Unknown(format!("{}: no folder above it is there", path.display()))
         }
         Err(e) => FileCheck::Unknown(format!("{}: {e}", path.display())),
     }
@@ -1406,6 +1433,45 @@ mod tests {
         assert!(matches!(check_folder(&td.path().join("gone/x"), Some(&td.path().join("gone/main"))), FileCheck::Unknown(_)));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_on_an_unmounted_disk_gives_no_verdict() {
+        let td = tempfile::tempdir().unwrap();
+        // The main worktree is on the system disk; the second disk's mount point is empty, its
+        // worktrees folder away with the disk.
+        let main = td.path().join("home/code/repo");
+        std::fs::create_dir_all(&main).unwrap();
+        let mount = td.path().join("mnt/disk2");
+        std::fs::create_dir_all(&mount).unwrap();
+        assert!(matches!(check_folder(&mount.join("worktrees/repo/feat"), Some(&main)), FileCheck::Unknown(_)));
+        // Reached through a symlink to that worktrees folder, which dangles meanwhile.
+        let link = td.path().join("home/worktrees");
+        std::os::unix::fs::symlink(mount.join("worktrees"), &link).unwrap();
+        assert!(matches!(check_folder(&link.join("repo/feat"), Some(&main)), FileCheck::Unknown(_)));
+        // …or a symlink to the repository's folder itself, the worktree's parent.
+        let repo_link = td.path().join("home/repo-worktrees");
+        std::os::unix::fs::symlink(mount.join("worktrees/repo"), &repo_link).unwrap();
+        assert!(matches!(check_folder(&repo_link.join("feat"), Some(&main)), FileCheck::Unknown(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_worktrees_folder_removed_whole_counts_as_deleted_beside_its_main_worktree() {
+        let td = tempfile::tempdir().unwrap();
+        let main = td.path().join("code/repo");
+        std::fs::create_dir_all(&main).unwrap();
+        let wts = td.path().join("worktrees");
+        let wt = wts.join("repo/feat");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(wts.join("other-repo/fix")).unwrap();
+        // `rm -rf worktrees/repo`: the nearest folder that is there still holds another repository's.
+        std::fs::remove_dir_all(wts.join("repo")).unwrap();
+        assert_eq!(check_folder(&wt, Some(&main)), FileCheck::Missing);
+        // No main worktree to vouch for it: no verdict.
+        assert!(matches!(check_folder(&wt, None), FileCheck::Unknown(_)));
+        assert!(matches!(check_folder(&wt, Some(&td.path().join("code/gone"))), FileCheck::Unknown(_)));
+    }
+
     #[test]
     fn a_parked_agent_ran_in_its_worktree_or_a_folder_inside() {
         let mut r = record_from_agent(&live_agent(), 1, 2, None, None).unwrap();
@@ -1441,5 +1507,22 @@ mod tests {
         let h = store(dir.path(), "b").await;
         h.rebuild();
         assert!(h.agent("term_7").is_none(), "gone for good");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ended_card_stays_when_its_folder_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = store(dir.path(), "a").await;
+        let rec = record_from_agent(&live_agent(), 1, 2, None, None).unwrap();
+        h.park(rec.clone());
+        let ended = tf_proto::autoresume::AgentEnded { at: 3, cause: tf_proto::autoresume::EndCause::HerdrStopped, reason: "herdr stopped".into(), turn: tf_proto::autoresume::EndedTurn::Idle, last_action: None };
+        h.park(ParkedRecord { agent_id: "term_9".into(), session_id: Some("sid-3".into()), ended: Some(ended), ..rec });
+        h.rebuild();
+        // The restart ledger would make a dropped ended card again from its session, every pass.
+        assert_eq!(h.drop_parked_where(|_| true), vec!["term_7".to_string()], "only the Done card goes");
+        h.rebuild();
+        assert!(h.agent("term_7").is_none());
+        assert_eq!(h.agent("term_9").map(|a| a.column), Some(Column::Review), "the ended card waits for Continue");
     }
 }

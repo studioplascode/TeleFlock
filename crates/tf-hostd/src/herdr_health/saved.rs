@@ -11,12 +11,14 @@ use std::path::Path;
 
 use tf_proto::Millis;
 
+use crate::util::{Occupancy, occupancy};
+
 /// How long a saved session must have been seen without its file before it is cleared.
 pub const GRACE_MS: Millis = 120_000;
 
 /// The file is gone for certain: it is missing, and the nearest folder above it that exists is a
 /// readable folder that holds something (an unmounted mount point is an empty folder). Any other
-/// error (permissions, I/O, a stale mount) is not certain.
+/// error (permissions, I/O, a stale mount) is not certain, an entry that can't be read included.
 pub fn missing(path: &Path) -> bool {
     if !path.is_absolute() {
         return false;
@@ -27,7 +29,7 @@ pub fn missing(path: &Path) -> bool {
     }
     for dir in path.ancestors().skip(1) {
         match std::fs::metadata(dir) {
-            Ok(m) if m.is_dir() => return std::fs::read_dir(dir).is_ok_and(|mut it| it.next().is_some()),
+            Ok(m) if m.is_dir() => return matches!(std::fs::read_dir(dir).map(occupancy), Ok(Occupancy::Filled)),
             Ok(_) => return false,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return false,

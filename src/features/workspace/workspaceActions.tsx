@@ -1,6 +1,6 @@
 import { Bot, FileDiff, GitBranchPlus, History, type LucideIcon, PanelTopClose, PencilLine, SquareArrowOutUpRight, SquareTerminal, SquareX, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { aiNamingEnabled, core, draftKey, drafts, getAgentViews, navigate, suggestTitle, useUi } from "@/core";
+import { type AgentView, aiNamingEnabled, core, draftKey, drafts, getAgentViews, getHostStates, navigate, suggestTitle, useUi } from "@/core";
 import type { PaneInfo, Tab, Workspace } from "@/core/gen";
 import {
   ContextMenu,
@@ -17,6 +17,8 @@ import {
   DropdownMenuTrigger,
   toast,
 } from "@/design";
+import { andList } from "@/features/cleanup/idleShells";
+import { versionBelow } from "@/features/hosts/kinds";
 import { ACTIONS } from "@/features/shell/vocab";
 import { paneName } from "@/features/terminal/panes";
 import { openPastSessions } from "../history/PastSessionsDialog";
@@ -166,10 +168,46 @@ export function worktreeTargetOf(ws: Workspace): WorktreeTarget {
   return { workspaceId: ws.id, path: ws.worktree?.path ?? ws.cwd, branch: ws.worktree?.branch, label: ws.label, dirty: ws.repo?.dirty ?? 0 };
 }
 
+/** tf-hostd 0.9.6 takes the parked (Done) cards that ran in a worktree off the board when it removes it; older ones keep them. */
+const CARDS_LEAVE_MIN_HOSTD = "0.9.6";
+
+/**
+ * The cards that leave the board with a removed worktree, on a host whose tf-hostd takes parked cards along
+ * (≥ 0.9.6; a version not known yet counts as no, so older hosts list none): the agents in the workspace that
+ * closes with it, and the parked Done cards that ran in it (their worktree is it, or their folder is it or
+ * inside it, like hostd's `parked::ran_in` but by the paths' text). Not one whose move to another host is
+ * unfinished, nor an ended card (Review, waiting for Continue): the host keeps those.
+ */
+export function cardsLeaving(hostId: string, t: Pick<WorktreeTarget, "workspaceId" | "path">): AgentView[] {
+  const version = getHostStates()[hostId]?.info.hostdVersion;
+  if (!version || versionBelow(version, CARDS_LEAVE_MIN_HOSTD)) return [];
+  return getAgentViews().filter((a) => {
+    if (a.hostId !== hostId) return false;
+    if (!a.parked) return !!t.workspaceId && a.workspaceId === t.workspaceId;
+    const moving = a.parked.moved?.state === "moving" || a.parked.moved?.state === "interrupted";
+    const folder = a.parked.worktree?.path ?? a.cwd?.replace(/ \(deleted\)$/, "");
+    return !moving && !a.parked.ended && !!folder && (folder === t.path || folder.startsWith(`${t.path}/`) || folder.startsWith(`${t.path}\\`));
+  });
+}
+
+/**
+ * The confirm's sentence for the cards that leave the board ({@link cardsLeaving}); null when none does. Past
+ * sessions lists omp sessions, so it is named only when every card is an omp agent's.
+ */
+export function cardsLeaveSentence(cards: readonly Pick<AgentView, "id" | "name" | "kind">[]): string | null {
+  const names = cards.map((a) => a.name || a.id);
+  if (names.length === 0) return null;
+  const kept = cards.every((a) => a.kind === "omp");
+  return names.length === 1
+    ? `${names[0]}'s card leaves the board${kept ? "; the conversation stays in Past sessions" : ""}.`
+    : `The cards of ${andList(names)} leave the board${kept ? "; their conversations stay in Past sessions" : ""}.`;
+}
+
 /**
  * Remove a linked worktree: confirm, then `worktree.remove` (a second, explicit confirm to force when it has
- * uncommitted changes; a trust prompt for repos owned by another user). Toasts its own outcome and never
- * rejects; resolves true once the worktree is gone. `confirm` overrides the first dialog's title and button.
+ * uncommitted changes; a trust prompt for repos owned by another user). The confirm names the cards that leave
+ * the board with it ({@link cardsLeaving}). Toasts its own outcome and never rejects; resolves true once the
+ * worktree is gone. `confirm` overrides the first dialog's title and button.
  */
 export async function removeWorktree(hostId: string, ws: Workspace, confirm?: { title: string; confirmLabel: string }): Promise<boolean> {
   return removeWorktreeTarget(hostId, worktreeTargetOf(ws), confirm);
@@ -179,6 +217,7 @@ export async function removeWorktree(hostId: string, ws: Workspace, confirm?: { 
 export async function removeWorktreeTarget(hostId: string, t: WorktreeTarget, confirm?: { title: string; confirmLabel: string }): Promise<boolean> {
   const { path, branch, dirty } = t;
   const name = branch ?? t.label;
+  const leaving = cardsLeaveSentence(cardsLeaving(hostId, t));
   const ok = await confirmAction({
     title: confirm?.title ?? `Remove worktree ${name}?`,
     body: (
@@ -191,6 +230,7 @@ export async function removeWorktreeTarget(hostId: string, t: WorktreeTarget, co
             The branch <span className="font-mono">{branch}</span> is kept.
           </>
         )}
+        {leaving && ` ${leaving}`}
         {dirty > 0 && <span className="mt-2 block font-semibold text-warn">{dirty} uncommitted change{dirty === 1 ? "" : "s"} will need a force remove.</span>}
       </>
     ),

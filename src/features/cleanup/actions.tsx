@@ -5,6 +5,7 @@ import { toast } from "@/design";
 import { classifyHerdrError, describeError } from "@/features/workspace/shared/errors";
 import { confirmAction } from "@/features/workspace/shared/overlays";
 import { tildify } from "@/features/workspace/shared/paths";
+import { cardsLeaveSentence, cardsLeaving } from "@/features/workspace/workspaceActions";
 import { type BulkKind, type BulkSet, type Hold } from "./classify";
 
 /*
@@ -25,12 +26,13 @@ function nameOf(w: CleanupWorktree): string {
 }
 
 /**
- * One worktree: confirm, then `cleanup.remove`; uncommitted changes or a detached HEAD's unsaved commit
- * ask a second, explicit confirm to force; a repository owned by another user asks to trust it. Toasts
- * its own outcome, never rejects; true once the worktree is gone.
+ * One worktree: confirm (naming the cards that leave the board with it, `cardsLeaving`), then `cleanup.remove`;
+ * uncommitted changes or a detached HEAD's unsaved commit ask a second, explicit confirm to force; a repository
+ * owned by another user asks to trust it. Toasts its own outcome, never rejects; true once the worktree is gone.
  */
 export async function removeOne(hostId: string, w: CleanupWorktree, home?: string): Promise<boolean> {
   const name = nameOf(w);
+  const leaving = cardsLeaveSentence(cardsLeaving(hostId, w));
   const ok = await confirmAction({
     title: w.missing ? `Forget worktree ${name}?` : `Delete worktree ${name}?`,
     body: (
@@ -52,6 +54,7 @@ export async function removeOne(hostId: string, w: CleanupWorktree, home?: strin
             The branch <span className="font-mono">{w.branch}</span> is kept.
           </>
         )}
+        {leaving && ` ${leaving}`}
         {(w.dirty ?? 0) > 0 && (
           <span className="mt-2 block font-semibold text-warn">
             {w.dirty} uncommitted change{w.dirty === 1 ? "" : "s"} will need a force remove.

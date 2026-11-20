@@ -169,7 +169,11 @@ It runs `deleteWorktree`: `removeWorktreeTarget`'s confirm, force confirm when d
 another user, toast; a Review agent is marked done afterwards. A parked card's worktree goes by path
 (`worktree.remove {workspaceId: "", path}`), and the card leaves the board with it (hosts ≥ 0.9.6; its session stays in
 Past sessions). A parked card whose folder was deleted any other way (git, herdr, Cleanup, by hand) leaves within a
-minute too (architecture §3.5, "A parked card leaves with its folder"). The PR state
+minute too (architecture §3.5, "A parked card leaves with its folder"). On hosts ≥ 0.9.6 the confirm names the cards
+that leave with the worktree and says their conversations stay in Past sessions (`cardsLeaving`: the agents in the
+workspace that closes, whose panes close with it, and the parked Done cards that ran in it; not an ended card, which
+the host keeps, nor one moving to another host); "Mark done & remove" and the Cleanup page's Delete / Forget say it
+too. Older hosts keep their parked cards, and the confirm says nothing about cards. The PR state
 comes from Review's memo (stage merged) or from `worktreePr.tsx`: each such card (not fresh, host online) carries an
 invisible `PrProbe`; after 600 ms on screen it queues `gh.prStatus {cwd: worktree}` (2 in flight per host, none
 while the window is hidden), cached per host + worktree path + branch. Answers hold 30 min (merged/closed), 5 min

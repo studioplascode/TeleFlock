@@ -15,7 +15,7 @@ export function CleanupView(props: { hostId?: string }): JSX.Element;
 // WorktreeRow.tsx — one worktree: kind chip, branch, path, last agent, PR, created/used, changes, size, Delete / Forget
 // StorageSection.tsx — omp storage: sessions kept (measured only), Check (dry run), per-category picks, Apply, last apply
 // LowDiskNotice.tsx — board notice row (Notices.tsx, kind "disk"): host low on disk → Clean up…; hidden for a day or until worse
-// actions.tsx — removeOne (confirm → cleanup.remove; force / trust asked separately), removeMany (confirm the exact list, one at a time, never force)
+// actions.tsx — removeOne (confirm, naming the cards that leave the board with it (`cardsLeaving`) → cleanup.remove; force / trust asked separately), removeMany (confirm the exact list, one at a time, never force)
 // classify.ts — classify / holdOf / bulkSet / totals / sortForPage (classify.test.ts)
 // disk.ts — diskLevel / showDiskNotice (classify.test.ts)
 // useCleanup.ts — useCleanupReport (this device's last report at once, then follows the host's scan with waitMs), useCleanupStorage (check / apply, follows a run)

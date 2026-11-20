@@ -32,6 +32,10 @@ export function openReview / newAgentIn / newWorktreeFrom / revealPastSessions /
 export function renameTab(hostId: string, tab: Tab): Promise<void>;
 export function closeTab(hostId: string, ws: Workspace, tab: Tab): Promise<void>;   // group-close refusal → toast with "Close workspace…"
 export function closePane(hostId: string, pane: PaneInfo): Promise<void>;
+// The cards a removed worktree takes off the board (hostd ≥ 0.9.6, else none): agents in the workspace that closes, parked Done
+// cards that ran in it (not ended or moving ones); removeWorktree's confirm and Cleanup's removeOne name them (workspaceActions.test.ts).
+export function cardsLeaving(hostId: string, t: { workspaceId?: string; path: string }): AgentView[];
+export function cardsLeaveSentence(cards: readonly { id: string; name: string; kind: string }[]): string | null;   // Past sessions named only for omp cards
 
 // @/features/worktree/FanOutDialog       kind "fanOut" { hostId?, cwd?, prompt? }
 export function FanOutDialog(): JSX.Element | null;   // N worktrees fanout/<slug>/<variant>, agents <slug>-<variant>; finishes on the board with q = slug

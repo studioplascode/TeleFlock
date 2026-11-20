@@ -38,6 +38,24 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}{:x}{:04x}", now_ms(), n & 0xffff)
 }
 
+/// What a folder holds, by the first entry listing it gives.
+#[derive(Debug)]
+pub(crate) enum Occupancy {
+    Filled,
+    Empty,
+    /// Reading an entry failed (an I/O error while listing): it says nothing either way.
+    Unreadable(std::io::Error),
+}
+
+/// [`Occupancy`] of a folder's entries (`std::fs::read_dir`): filled only by an entry that was read.
+pub(crate) fn occupancy<T>(mut entries: impl Iterator<Item = std::io::Result<T>>) -> Occupancy {
+    match entries.next() {
+        Some(Ok(_)) => Occupancy::Filled,
+        Some(Err(e)) => Occupancy::Unreadable(e),
+        None => Occupancy::Empty,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +69,13 @@ mod tests {
     #[test]
     fn ids_unique() {
         assert_ne!(new_id("n"), new_id("n"));
+    }
+
+    #[test]
+    fn only_an_entry_that_was_read_fills_a_folder() {
+        assert!(matches!(occupancy([Ok::<(), std::io::Error>(())].into_iter()), Occupancy::Filled));
+        assert!(matches!(occupancy(std::iter::empty::<std::io::Result<()>>()), Occupancy::Empty));
+        let failed = occupancy([Err::<(), _>(std::io::Error::other("disk read failed"))].into_iter());
+        assert!(matches!(&failed, Occupancy::Unreadable(e) if e.to_string() == "disk read failed"), "{failed:?}");
     }
 }
