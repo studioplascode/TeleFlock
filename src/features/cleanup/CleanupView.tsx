@@ -12,7 +12,7 @@ import { tildify } from "@/features/workspace/shared/paths";
 import { removeMany, removeOne } from "./actions";
 import { AgentSection } from "./AgentSection";
 import { backgroundNote, followsScan } from "./background";
-import { type BulkKind, STALE_DAYS, bulkSet, classify, sortForPage, totals } from "./classify";
+import { type BulkKind, STALE_DAYS, bulkSet, classify, sortForPage, staleCutoff, totals } from "./classify";
 import { type AgentGroup, groupByOwner, ownerLabel } from "./groups";
 import { diskLevel } from "./disk";
 import { IdleShellsSection } from "./IdleShellsSection";
@@ -213,7 +213,9 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   const deleteOne = async (w: CleanupWorktree) => {
     if (!hostId) return;
     setRemoving((r) => ({ hostId, paths: new Set([...(r.hostId === hostId ? r.paths : []), w.path]), bulk: r.bulk }));
-    const gone = await removeOne(hostId, w, home, { revalidates: q.revalidates, reloadRow: q.reloadRow, hostName });
+    // A row shown as stale goes only while it is still untouched since the cutoff (the host asks again).
+    const staleBefore = classify(w, now, staleDays).kind === "stale" ? staleCutoff(now, staleDays) : undefined;
+    const gone = await removeOne(hostId, w, home, { revalidates: q.revalidates, reloadRow: q.reloadRow, hostName, staleBefore });
     setRemoving((r) => ({ ...r, paths: new Set([...r.paths].filter((p) => p !== w.path)) }));
     if (gone) q.reload();
   };
@@ -222,7 +224,10 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     if (!hostId) return;
     const set = which === "shipped" ? shipped : stale;
     const paths = new Set(set.items.map((w) => w.path));
-    const out = await removeMany(hostId, which, set, home, (done) => setRemoving({ hostId, paths, bulk: { which, done, of: set.items.length } }), { revalidates: q.revalidates });
+    const out = await removeMany(hostId, which, set, home, (done) => setRemoving({ hostId, paths, bulk: { which, done, of: set.items.length } }), {
+      revalidates: q.revalidates,
+      staleBefore: staleCutoff(now, staleDays),
+    });
     setRemoving({ hostId, paths: new Set() });
     if (out) q.reload();
   };
@@ -237,6 +242,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     const out = await removeMany(hostId, "cleanable", set, home, (done) => setRemoving({ hostId, paths, bulk: { which: "cleanable", group: g.key, done, of: n } }), {
       revalidates: q.revalidates,
       title,
+      staleBefore: staleCutoff(now, staleDays),
     });
     setRemoving({ hostId, paths: new Set() });
     if (out) q.reload();

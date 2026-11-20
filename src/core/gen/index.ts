@@ -129,6 +129,7 @@ export type * from "./ChecksSummary";
 export type * from "./CleanupAgent";
 export type * from "./CleanupBackground";
 export type * from "./CleanupExpect";
+export type * from "./CleanupExpectPr";
 export type * from "./CleanupOwner";
 export type * from "./CleanupOwnerRef";
 export type * from "./CleanupOwnerState";

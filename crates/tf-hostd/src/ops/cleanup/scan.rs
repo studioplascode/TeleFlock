@@ -428,19 +428,89 @@ fn refresh_row(sc: &Scanner, root: &Path, mut w: CleanupWorktree) {
 /// the last report and its status memo are refreshed with it.
 pub(crate) async fn recheck(ctx: &Ctx, root: &Path, rec: &git::WorktreeRecord) -> CleanupWorktree {
     let sc = scanner(&ctx.herdr_session);
-    let common = common_dir(root).await;
-    let admin = common.as_deref().and_then(|c| admin_dir(Path::new(&rec.path), c));
-    let signals = Signals::of(rec, admin.as_deref());
-    let (mut w, clues, memo) = git_facts_with(root, admin.as_deref(), rec.clone(), None, signals, &Counters::default()).await;
+    let (mut w, clues, memo) = git_facts_of(root, rec).await;
     let board = ctx.state.snapshot();
     let autos = crate::automations::get().map(|a| a.list(&ctx.herdr_session));
     add_board(&mut w, &board.workspaces, &board.agents, autos.as_ref());
-    settle(&mut w, &clues, None);
+    let agent = agent_use(&board.workspaces, &board.agents, &w).await;
+    settle(&mut w, &clues, agent);
     if let Some(m) = memo {
         sc.inner.lock().unwrap().statuses.insert(rec.path.clone(), m);
     }
     refresh_row(&sc, root, w.clone());
     w
+}
+
+/// git's facts of one worktree, asked now (its status too, whatever the memo says).
+async fn git_facts_of(root: &Path, rec: &git::WorktreeRecord) -> (CleanupWorktree, Clues, Option<StatusMemo>) {
+    let common = common_dir(root).await;
+    let admin = common.as_deref().and_then(|c| admin_dir(Path::new(&rec.path), c));
+    let signals = Signals::of(rec, admin.as_deref());
+    git_facts_with(root, admin.as_deref(), rec.clone(), None, signals, &Counters::default()).await
+}
+
+/// A worktree's last use by an agent, asked now as a scan settles it: omp sessions that worked in
+/// it since it was created (the session index read on from where it was) and live agents in it.
+async fn agent_use(workspaces: &[Workspace], agents: &[Agent], w: &CleanupWorktree) -> Option<Millis> {
+    let (_, found) = agents_in(workspaces, agents, Path::new(&w.path));
+    let live = found.iter().filter(|a| a.parked.is_none()).filter_map(|a| a.live.last_event_at).max();
+    let since = w.created_at.map(|t| t - BEFORE_CREATED_MS);
+    let path = PathBuf::from(&w.path);
+    let worked = tokio::task::spawn_blocking(move || {
+        let dir = omp_agent_dir().join("sessions");
+        let home = crate::paths::home_dir();
+        sessions::with_index(&dir, Some(&home), &HashSet::new(), SESSIONS_BUDGET, |ix| ix.worked_in(std::slice::from_ref(&path))).0
+    })
+    .await
+    .ok()
+    .and_then(|v| v.into_iter().next())
+    .unwrap_or_default();
+    worked.iter().map(|u| u.seen.last).filter(|t| since.is_none_or(|s| *t >= s)).chain(live).max()
+}
+
+/// [`recheck`]'s facts without the board and omp's sessions (tests: last use from git alone).
+#[cfg(test)]
+pub(crate) async fn recheck_git(root: &Path, rec: &git::WorktreeRecord) -> CleanupWorktree {
+    let (mut w, clues, _) = git_facts_of(root, rec).await;
+    settle(&mut w, &clues, None);
+    w
+}
+
+/// A worktree's pull request asked of gh again right before a removal chosen for it (merged or
+/// closed), at the caller's priority (a user's action): one lookup, as a scan makes it (in the
+/// checkout, by branch name from the main worktree when the folder is gone). What gh said goes
+/// into the memo and the worktree's row (`w`: as it is now, from [`recheck`]).
+pub(crate) async fn recheck_pr(ctx: &Ctx, root: &Path, w: &CleanupWorktree) -> Lookup {
+    let Some(branch) = w.branch.clone() else {
+        return Lookup::Found(None);
+    };
+    let found = if w.missing {
+        prs::lookup(root, Some(&branch), w.head.as_deref()).await
+    } else {
+        prs::lookup(Path::new(&w.path), None, w.head.as_deref()).await
+    };
+    let answer = match &found {
+        Lookup::Found(pr) => Ok(pr.clone()),
+        Lookup::Failed(e) | Lookup::GhDown(e) | Lookup::NotGithub(e) => Err(e.clone()),
+    };
+    let memo = PrMemo { checked_at: now_ms(), found: answer };
+    let sc = scanner(&ctx.herdr_session);
+    {
+        // Onto the report's row as it is (`refresh_row` keeps a row's pull request while its HEAD
+        // stays): a failed lookup keeps the pull request shown, with its error.
+        let mut g = sc.inner.lock().unwrap();
+        let row = g
+            .report
+            .as_mut()
+            .and_then(|r| r.repos.iter_mut().find(|r| same_path(Path::new(&r.root), root)))
+            .and_then(|r| r.worktrees.iter_mut().find(|x| same_path(Path::new(&x.path), Path::new(&w.path))));
+        if let Some(row) = row {
+            show_pr(row, &memo);
+        }
+        g.prs.insert(format!("{}\0{branch}\0{}", w.path, w.head.as_deref().unwrap_or_default()), memo);
+    }
+    sc.tick.send_modify(|t| *t += 1);
+    found
 }
 
 // ───────────────────────────── the scan ─────────────────────────────

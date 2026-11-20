@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Cleanup lab (architecture §3.17 "Background scans", "Incremental scans"): inside scripts/lab/run
 # cleanup, a lab herdr server with workspaces in two repositories that have 20 linked worktrees
-# between them (`merged-*` branches have a merged pull request, three worktrees carry a
-# node_modules-like tree of 300 folders), an omp session file, and a fake gh (./gh) first on the
-# lab tf-hostd's PATH. drive.ts then attaches a lab tf-hostd at a fast pace and checks what the
-# host does by itself.
+# between them (`merged-*` branches have a merged pull request, `closed-*` a closed one, `.env.local`
+# is ignored, three worktrees carry a node_modules-like tree of 300 folders), an omp session file,
+# and a fake gh (./gh) first on the lab tf-hostd's PATH. drive.ts then attaches a lab tf-hostd at a
+# fast pace and checks what the host does by itself.
 #
 # Usage: scripts/lab/cleanup/setup.sh [--hostd BIN] [--fresh]
 #   --hostd BIN   the tf-hostd to run (default $CARGO_TARGET_DIR/debug/tf-hostd, else target/debug/tf-hostd)
@@ -44,10 +44,10 @@ TF_LAB_CWD="$src" "$run" "$lab" -- bash -c '
   set -e
   for r in alpha beta; do
     mkdir -p "$r"
-    (cd "$r" && git init -q -b main && printf "node_modules/\n" >.gitignore && echo "# $r" >README.md && git add -A \
+    (cd "$r" && git init -q -b main && printf "node_modules/\n.env.local\n" >.gitignore && echo "# $r" >README.md && git add -A \
       && git -c user.name=lab -c user.email=lab@example.invalid commit -qm init)
     for i in $(seq 0 9); do
-      case $i in 0|1|2) b="merged-$r-$i" ;; *) b="plain-$r-$i" ;; esac
+      case $i in 0|1|2) b="merged-$r-$i" ;; 3) b="closed-$r-$i" ;; *) b="plain-$r-$i" ;; esac
       git -C "$r" worktree add -q -b "$b" "$PWD/$r-wt/w$i" main
     done
   done

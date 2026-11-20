@@ -31,7 +31,7 @@ describe("hosts that keep their Cleanup report fresh (tf-hostd 0.9.6)", () => {
     expect(followsScan(undefined)).toBe(false);
   });
 
-  test("expectOf: the row's HEAD, branch, unpushed commits, agents and workspace, nothing else", () => {
+  test("expectOf: the row's HEAD, branch, unpushed commits, agents and workspace; why it was chosen (a settled PR, else the stale cutoff)", () => {
     const w: CleanupWorktree = {
       path: "/w/feat-a",
       branch: "feat/a",
@@ -52,6 +52,17 @@ describe("hosts that keep their Cleanup report fresh (tf-hostd 0.9.6)", () => {
     expect(detached.branch).toBeUndefined();
     expect(detached.unpushed).toBeUndefined();
     expect(detached.workspaceId).toBeUndefined();
+
+    const pr = { number: 41, url: "https://github.com/o/r/pull/41", title: "t", draft: false };
+    expect(expectOf({ ...w, pr: { ...pr, state: "CLOSED" } }).pr).toStrictEqual({ number: 41, state: "CLOSED" });
+    expect(expectOf({ ...w, pr: { ...pr, state: "MERGED" } }).pr).toStrictEqual({ number: 41, state: "MERGED" });
+    expect(expectOf({ ...w, pr: { ...pr, state: "OPEN" } }).pr).toBeUndefined();
+    expect(expectOf({ ...w, missing: true, pr: { ...pr, state: "MERGED" } }).pr).toBeUndefined();
+    // Chosen as stale: the cutoff, unless a settled pull request is why it was chosen.
+    expect(expectOf(w, 1_000).staleBefore).toBe(1_000);
+    expect(expectOf({ ...w, pr: { ...pr, state: "MERGED" } }, 1_000)).toMatchObject({ pr: { number: 41, state: "MERGED" } });
+    expect(expectOf({ ...w, pr: { ...pr, state: "MERGED" } }, 1_000).staleBefore).toBeUndefined();
+    expect(expectOf({ ...w, missing: true }, 1_000).staleBefore).toBeUndefined();
   });
 
   test("backgroundNote: updated or updating in the background with the scan's age, how often the host checks", () => {

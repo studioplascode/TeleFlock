@@ -14,11 +14,18 @@
  *   e  `cleanup.remove` with `expect`: a clean worktree goes at once, without a scan; one whose HEAD
  *      moved since the report is refused (`worktree_changed`)
  *   f  Forget of a checkout the report saw gone that came back: `not_missing`, the folder intact
+ *   h  bulk "Delete merged/closed", each removal carrying the pull request it was chosen for: the host
+ *      asks gh again right before (at the user's priority). A closed PR reopened since the report
+ *      (fake gh flips it) → `worktree_changed`; gh rate-limited → `pr_unverified`; both worktrees and
+ *      their ignored `.env.local` stay, the row shows gh's answer; the merged ones go
+ *   i  Prune stale with the cutoff the user confirmed: a worktree reset on the same HEAD since the report
+ *      (its reflog moved, nothing else did) → `worktree_changed` ("used since the report"), it stays; an
+ *      untouched one goes
  *
  * Usage: scripts/lab/run cleanup -- env TF_HOSTD_CLEANUP_PACE=30 bun scripts/lab/cleanup/drive.ts
  * Exit 0: every check held; 2: a check failed; 1: error.
  */
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { sleep } from "bun";
 
 type Json = Record<string, any>;
@@ -210,6 +217,57 @@ try {
 	);
 	note("info", `Forget: ${forgot}`);
 	check(seen?.missing === true && forgot.startsWith("not_missing") && readFileSync(`${w8}/.env.local`, "utf8") === "SECRET=1\n" && git(`${SRC}/beta`, "worktree", "list").includes("beta-wt/w8"), "f. Forget of beta w8 (reported gone, back again): not_missing; the checkout, its ignored .env.local and its registration stay");
+
+	// h: bulk "Delete merged/closed": each removal carries the pull request it was chosen for.
+	const shipped = rows(await call("cleanup.worktrees", { refresh: false, waitMs: 0, latest: true })).filter((x) => !x.missing && (x.pr?.state === "MERGED" || x.pr?.state === "CLOSED"));
+	const short = (p: string) => p.split("/").slice(-2).join("/");
+	note("info", `Delete merged/closed: ${shipped.map((x) => `${short(x.path)} #${x.pr.number} ${x.pr.state.toLowerCase()}`).join(", ")}`);
+	const reopened = `${SRC}/alpha-wt/w3`;
+	const unverified = `${SRC}/beta-wt/w3`;
+	for (const p of [reopened, unverified]) writeFileSync(`${p}/.env.local`, "SECRET=1\n");
+	const lab = LOGS!.replace(/\/logs$/, "");
+	mkdirSync(`${lab}/gh-prs`, { recursive: true });
+	writeFileSync(`${lab}/gh-prs/closed-alpha-3`, "OPEN\n");
+	writeFileSync(`${lab}/gh-prs/closed-beta-3`, "FAIL HTTP 403: API rate limit exceeded for user ID 1.\n");
+	const ghBefore = readFileSync(`${LOGS}/gh.log`, "utf8").trim().split("\n").length;
+	const outcome = new Map<string, string>();
+	for (const w of shipped) {
+		const said = await call("cleanup.remove", { path: w.path, force: false, trust: false, forget: false, expect: { ...expectOf(w), pr: { number: w.pr.number, state: w.pr.state } } }).then(
+			() => "removed",
+			(e) => e.message as string,
+		);
+		outcome.set(w.path, said);
+		note("info", `  ${short(w.path)}: ${said}`);
+	}
+	const asked = readFileSync(`${LOGS}/gh.log`, "utf8").trim().split("\n").slice(ghBefore).filter((l) => l.includes("args=pr view"));
+	check(shipped.length === 8 && outcome.get(reopened)?.startsWith("worktree_changed") === true && outcome.get(reopened)!.includes("was reopened"), "h. the closed PR of alpha w3, reopened since the report: worktree_changed");
+	check(outcome.get(unverified)?.startsWith("pr_unverified") === true, "h. beta w3, gh rate-limited: pr_unverified");
+	check([reopened, unverified].every((p) => readFileSync(`${p}/.env.local`, "utf8") === "SECRET=1\n" && git(p, "status", "--porcelain") === ""), "h. …both checkouts and their ignored .env.local stay");
+	const removed = shipped.filter((x) => x.path !== reopened && x.path !== unverified);
+	check(removed.every((x) => outcome.get(x.path) === "removed" && !existsSync(x.path)), `h. the ${removed.length} merged ones went`);
+	check(asked.length === shipped.length && asked.every((l) => field(l, "nice") !== "19" && !field(l, "cgroup")?.includes("teleflock-background")), `h. one gh lookup per removal (${asked.length}), at the user's priority (nice ${field(asked[0] ?? "", "nice")})`);
+	const reopenedRow = rows(await call("cleanup.worktrees", { refresh: false, waitMs: 0, latest: true })).find((x) => x.path === reopened);
+	check(reopenedRow?.pr?.state === "OPEN", `h. the report shows gh's answer for alpha w3: ${reopenedRow?.pr?.state}`);
+
+	// i: Prune stale, its cutoff the one the user confirmed (just after both picks' last use): alpha w8
+	// gets a same-HEAD `git reset` since the report, alpha w9 stays untouched.
+	const picks = rows(await call("cleanup.worktrees", { refresh: false, waitMs: 0, latest: true })).filter((x) => /alpha-wt\/w[89]$/.test(x.path));
+	const cutoff = Math.max(...picks.map((x) => x.activeAt ?? x.createdAt));
+	const resetIn = `${SRC}/alpha-wt/w8`;
+	const untouched = `${SRC}/alpha-wt/w9`;
+	await sleep(1100);
+	git(resetIn, "reset", "-q", "HEAD");
+	const pruned = new Map<string, string>();
+	for (const w of picks) {
+		const said = await call("cleanup.remove", { path: w.path, force: false, trust: false, forget: false, expect: { ...expectOf(w), staleBefore: cutoff } }).then(
+			() => "removed",
+			(e) => e.message as string,
+		);
+		pruned.set(w.path, said);
+		note("info", `  prune ${short(w.path)}: ${said}`);
+	}
+	check(picks.length === 2 && pruned.get(resetIn)?.startsWith("worktree_changed") === true && pruned.get(resetIn)!.includes("used since the report") && existsSync(resetIn), "i. Prune stale: alpha w8, reset on the same HEAD since the report: worktree_changed (used since the report), it stays");
+	check(pruned.get(untouched) === "removed" && !existsSync(untouched), "i. …alpha w9, untouched since: pruned");
 } catch (e) {
 	failures.push(String(e));
 	note("ERROR", String(e));

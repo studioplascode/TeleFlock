@@ -337,6 +337,25 @@ wire_struct! {
         pub agents: u32,
         /// The herdr workspace showing it.
         pub workspace_id: Option<String>,
+        /// The pull request it was chosen for, merged or closed (bulk "Delete merged/closed", and
+        /// Delete on a row shown for its pull request): the host asks gh again right before and
+        /// deletes only while gh still says so (`worktree_changed` when not, `pr_unverified` when
+        /// gh can't tell).
+        pub pr: Option<CleanupExpectPr>,
+        /// It was chosen as stale, untouched since before this time (the page's "untouched N+
+        /// days" as the user confirmed it: Prune stale, and Delete on a row shown as stale): the
+        /// host refuses (`worktree_changed`) when its last use, asked again from all its sources
+        /// (sessions, live agents, reflog, changed files), is newer.
+        pub stale_before: Option<Millis>,
+    }
+}
+
+wire_struct! {
+    /// A merged or closed pull request a removal was chosen for (`CleanupExpect.pr`).
+    pub struct CleanupExpectPr {
+        pub number: u32,
+        /// `MERGED` | `CLOSED` (as `CleanupPr.state`).
+        pub state: String,
     }
 }
 
@@ -609,11 +628,15 @@ mod tests {
             force: false,
             trust: false,
             forget: true,
-            expect: Some(CleanupExpect { head: Some("abc1234".into()), branch: None, unpushed: Some(2), agents: 0, workspace_id: None }),
+            expect: Some(CleanupExpect { head: Some("abc1234".into()), branch: None, unpushed: Some(2), agents: 0, workspace_id: None, pr: Some(CleanupExpectPr { number: 41, state: "CLOSED".into() }), stale_before: Some(1_700_000_000_000) }),
         };
         let v = serde_json::to_value(&new).unwrap();
         assert_eq!((v["forget"].as_bool(), v["expect"]["head"].as_str(), v["expect"]["unpushed"].as_u64()), (Some(true), Some("abc1234"), Some(2)));
+        assert_eq!((v["expect"]["pr"]["number"].as_u64(), v["expect"]["pr"]["state"].as_str()), (Some(41), Some("CLOSED")));
         assert_eq!(serde_json::from_value::<CleanupRemoveParams>(v).unwrap(), new);
+        // An `expect` without `pr` (a removal not chosen for its pull request) still parses.
+        let local: CleanupExpect = serde_json::from_value(serde_json::json!({ "head": "abc1234", "agents": 0 })).unwrap();
+        assert!(local.pr.is_none());
         assert_eq!(serde_json::to_value(CleanupScanKind::Background).unwrap(), "background");
     }
 }

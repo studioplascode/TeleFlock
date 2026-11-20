@@ -46,7 +46,16 @@ the host's tf-hostd predates the page ("Update TeleFlock on <host>").
   (`expect`: HEAD, branch, unpushed commits, agents, herdr workspace): one that changed gets its confirm again
   with its current facts ("<name> changed since the report", the host's words first, "Delete anyway"; at most
   3 times, never while an agent works in it or it is locked); in a bulk action it is listed as not removed
-  ("changed since the report: …"). One the host no longer lists is simply gone.
+  ("changed since the report: …"). One the host no longer lists is simply gone. A removal chosen for a merged
+  or closed pull request (bulk "Delete merged/closed", the row's Delete on a Merged/Closed row) carries it
+  (`expect.pr`): the host asks gh again right before, one lookup per worktree, and deletes only while gh still
+  says merged or closed at its HEAD. Reopened, or another pull request on its branch → "changed since the
+  report" (the row shows gh's answer); gh can't tell (signed out, rate limit, timeout) → "couldn't check its
+  pull request #41: …" (`pr_unverified`). Either way nothing is deleted; never on the report's PR alone.
+  Prune stale, an agent's "Delete N" for its stale ones and Delete on a stale row send the cutoff the user
+  confirmed (`expect.staleBefore`): the host settles the worktree's last use again from all its sources (omp
+  sessions, live agents, its reflog, which a same-HEAD reset writes too, changed files) and keeps one used
+  since ("changed since the report: … used since the report"); confirmed again, it goes on its current facts.
 - **Forget** (a `missing` row): only drops git's record of a folder that is gone, never a checkout (`forget`,
   hosts ≥ 0.9.6). The host refuses when anything is at the path (`not_missing`): a folder that is back (a disk
   mounted again, a restored folder) is offered for Delete instead ("The folder of <name> is back"); one still

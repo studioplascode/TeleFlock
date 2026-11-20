@@ -11,6 +11,11 @@ const DAY = 86_400_000;
 export const STALE_DAYS = [3, 7, 14, 30, 60, 90] as const;
 export const DEFAULT_STALE_DAYS = 14;
 
+/** The "untouched N+ days" cutoff as a time: stale means last used at or before it (`CleanupExpect.staleBefore`). */
+export function staleCutoff(now: number, staleDays: number): number {
+  return now - staleDays * DAY;
+}
+
 /**
  * The most telling fact first: an agent works in it, its folder is gone, its pull request was merged
  * or closed, it has an open one, nothing touched it for `staleDays`, or it is in use.

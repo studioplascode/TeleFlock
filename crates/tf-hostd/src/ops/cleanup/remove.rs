@@ -10,6 +10,15 @@
 //!   and branch, no more unpushed commits, no live agent or herdr workspace in it that the page
 //!   did not show (`worktree_changed`; its row in the report is refreshed, so the page asks again
 //!   with the worktree as it is now);
+//! * (`expect.pr`) chosen for its merged or closed pull request, gh still says so: one `gh pr
+//!   view` right before, at the user's priority, never the report's answer alone. Reopened,
+//!   another pull request on the branch, or none at its HEAD any more → `worktree_changed`; gh
+//!   can't tell (not installed, signed out, rate limit, timeout) → `pr_unverified`. Either way
+//!   the worktree stays, and the memo and row take gh's answer;
+//! * (`expect.stale_before`) chosen as stale, untouched since before the cutoff the user confirmed:
+//!   its last use asked again from all its sources (omp sessions, live agents, its reflog, changed
+//!   files: a same-HEAD `git reset` or an agent's session counts) is not newer (`worktree_changed`,
+//!   "used since the report");
 //!
 //! then it goes exactly like `worktree.remove {path}`: through herdr when a workspace shows it
 //! (which closes that workspace), else `git worktree remove [--force]` from the main worktree;
@@ -28,8 +37,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tf_proto::{Agent, ApiError, CleanupExpect, CleanupRemoveParams, CleanupWorktree, Empty, Workspace};
+use tf_proto::{Agent, ApiError, CleanupExpect, CleanupExpectPr, CleanupRemoveParams, CleanupWorktree, Empty, Millis, Workspace, WorktreeUse};
 
+use super::prs::Lookup;
 use super::scan;
 use crate::ops::fs::resolve_path;
 use crate::ops::worktree::{remove_failure, remove_path, same_path};
@@ -69,6 +79,12 @@ pub async fn remove(ctx: &Ctx, p: &CleanupRemoveParams) -> Result<Empty, ApiErro
     if let Some(expect) = &p.expect {
         let now = scan::recheck(ctx, &root, &reg.record).await;
         verdict(&path, expect, &now)?;
+        if let Some(cut) = expect.stale_before {
+            stale_verdict(&path, cut, &now)?;
+        }
+        if let Some(pr) = &expect.pr {
+            pr_verdict(&path, pr, &scan::recheck_pr(ctx, &root, &now).await)?;
+        }
     }
     remove_path(
         ctx,
@@ -139,6 +155,43 @@ pub(crate) fn verdict(path: &Path, expect: &CleanupExpect, now: &CleanupWorktree
         "Look at it as it is now before deleting it: the page shows it again."
     };
     Err(ApiError::new("worktree_changed", format!("{} changed since the report: {}", path.display(), what.join("; "))).with_hint(hint))
+}
+
+/// A removal chosen as stale (`cut`: untouched since before it, the "untouched N+ days" the user
+/// confirmed) against the worktree's last use now (`active_at`, else when it was created): used
+/// since → `worktree_changed`.
+pub(crate) fn stale_verdict(path: &Path, cut: Millis, now: &CleanupWorktree) -> Result<(), ApiError> {
+    let last = now.active_at.or(now.created_at);
+    if last.is_some_and(|t| t <= cut) {
+        return Ok(());
+    }
+    let by = match now.active_by {
+        Some(WorktreeUse::Agent) => " (an agent worked in it)",
+        Some(WorktreeUse::Git) => " (its git history moved: a commit, checkout or reset)",
+        Some(WorktreeUse::Files) => " (its files changed)",
+        None => "",
+    };
+    Err(ApiError::new("worktree_changed", format!("{} changed since the report: it was used since the report{by}", path.display()))
+        .with_hint("Nothing was deleted: it is no longer untouched for as long as you chose. The page shows it as it is now."))
+}
+
+/// A removal chosen for its pull request (`want`: merged or closed) against what gh says now: the
+/// same pull request, still merged or closed at the worktree's HEAD, or no removal. Reopened,
+/// another one on the branch, or none at its HEAD any more → `worktree_changed`; gh can't tell →
+/// `pr_unverified`. Never on the report's pull request alone.
+pub(crate) fn pr_verdict(path: &Path, want: &CleanupExpectPr, found: &Lookup) -> Result<(), ApiError> {
+    let changed = |what: String| -> Result<(), ApiError> {
+        Err(ApiError::new("worktree_changed", format!("{} changed since the report: {what}", path.display()))
+            .with_hint("Nothing was deleted. Look at its pull request as it is now: the page shows it again."))
+    };
+    match found {
+        Lookup::Found(Some(pr)) if pr.number == want.number && (pr.state == "MERGED" || pr.state == "CLOSED") => Ok(()),
+        Lookup::Found(Some(pr)) if pr.number == want.number => changed(format!("its pull request #{} was reopened", pr.number)),
+        Lookup::Found(Some(pr)) => changed(format!("another pull request is on its branch now (#{}, {})", pr.number, pr.state.to_lowercase())),
+        Lookup::Found(None) => changed(format!("gh lists no merged or closed pull request at its HEAD any more (#{} was)", want.number)),
+        Lookup::GhDown(e) | Lookup::NotGithub(e) | Lookup::Failed(e) => Err(ApiError::new("pr_unverified", format!("couldn't check its pull request #{}: {e}", want.number))
+            .with_hint("Nothing was deleted: a worktree chosen for its merged or closed pull request goes only once gh confirms that. Try again when gh answers (signed in, rate limit over).")),
+    }
 }
 
 /// Forget: drops git's record of a worktree whose folder is gone, never a checkout (module doc).
@@ -326,6 +379,7 @@ mod tests {
     use super::*;
     use crate::ops::git::tests::{fixture, sh};
     use crate::ops::worktree::remove_checkout;
+    use tf_proto::CleanupPr;
 
     fn listed(root: &Path) -> String {
         String::from_utf8_lossy(
@@ -494,7 +548,7 @@ mod tests {
     }
 
     fn expect_of(w: &CleanupWorktree) -> CleanupExpect {
-        CleanupExpect { head: w.head.clone(), branch: w.branch.clone(), unpushed: w.unpushed, agents: w.agents, workspace_id: w.workspace_id.clone() }
+        CleanupExpect { head: w.head.clone(), branch: w.branch.clone(), unpushed: w.unpushed, agents: w.agents, workspace_id: w.workspace_id.clone(), pr: None, stale_before: None }
     }
 
     /// A removal confirmed on facts that still hold goes at once; one whose worktree changed since
@@ -587,6 +641,101 @@ mod tests {
         assert!(!prunable && !back.missing && back.dirty == Some(0));
         assert!(verdict(&wt, &expect, &back).is_ok());
         assert!(listed());
+    }
+
+    fn pr(number: u32, state: &str) -> CleanupPr {
+        CleanupPr { number, url: format!("https://github.com/lab/repo/pull/{number}"), title: "lab".into(), state: state.into(), draft: false, closed_at: None }
+    }
+
+    /// As `remove` goes with `expect.pr`: the worktree as it is now, then gh's answer of now
+    /// (`found`, what `prs::lookup` returns), then the removal.
+    async fn delete_chosen_for_pr(root: &Path, wt: &Path, expect: &CleanupExpect, now: &CleanupWorktree, found: Lookup) -> Result<(), ApiError> {
+        verdict(wt, expect, now)?;
+        pr_verdict(wt, expect.pr.as_ref().unwrap(), &found)?;
+        remove_checkout(wt, Some(root), false, false).await.map(|_| ())
+    }
+
+    /// A worktree chosen for its merged or closed pull request goes only while gh still says so.
+    /// Closed, then reopened on the same HEAD: refused (`worktree_changed`), the checkout and its
+    /// ignored `.env.local` kept; another pull request on the branch, or none at its HEAD any more:
+    /// refused too; gh can't tell (signed out, rate limit, no GitHub remote): `pr_unverified`, kept;
+    /// still merged: deleted.
+    #[tokio::test]
+    async fn a_removal_chosen_for_its_pull_request_asks_gh_again() {
+        let td = fixture();
+        let root = td.path();
+        sh(root, &["checkout", "-q", "-f", "main"]);
+        std::fs::write(root.join(".gitignore"), ".env.local\n").unwrap();
+        sh(root, &["add", ".gitignore"]);
+        sh(root, &["commit", "-q", "-m", "ignore .env.local"]);
+        let wt = root.parent().unwrap().join(format!("{}-pr", root.file_name().unwrap().to_string_lossy()));
+        sh(root, &["worktree", "add", "-q", "-b", "fix-41", wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join(".env.local"), "SECRET=1\n").unwrap();
+        let reg = registration(root, &wt, false).await.unwrap().unwrap();
+        let now = scan::git_facts_now(root, &root.join(".git"), reg.record).await;
+        assert_eq!(now.dirty, Some(0), "an ignored file is no change");
+        let closed = CleanupExpect { pr: Some(CleanupExpectPr { number: 41, state: "CLOSED".into() }), ..expect_of(&now) };
+
+        let err = delete_chosen_for_pr(root, &wt, &closed, &now, Lookup::Found(Some(pr(41, "OPEN")))).await.unwrap_err();
+        assert_eq!(err.code, "worktree_changed");
+        assert!(err.message.contains("its pull request #41 was reopened"), "{}", err.message);
+        for other in [Lookup::Found(Some(pr(57, "OPEN"))), Lookup::Found(Some(pr(57, "MERGED"))), Lookup::Found(None)] {
+            assert_eq!(delete_chosen_for_pr(root, &wt, &closed, &now, other.clone()).await.unwrap_err().code, "worktree_changed", "{other:?}");
+        }
+        for down in [Lookup::GhDown("gh is not signed in".into()), Lookup::Failed("HTTP 403: API rate limit exceeded".into()), Lookup::NotGithub("no GitHub remote".into())] {
+            let err = delete_chosen_for_pr(root, &wt, &closed, &now, down).await.unwrap_err();
+            assert_eq!(err.code, "pr_unverified");
+            assert!(err.message.starts_with("couldn't check its pull request #41: "), "{}", err.message);
+        }
+        assert_eq!(std::fs::read_to_string(wt.join(".env.local")).unwrap(), "SECRET=1\n", "the checkout and its ignored file stay");
+        assert!(registration(root, &wt, false).await.unwrap().is_some());
+
+        let merged = CleanupExpect { pr: Some(CleanupExpectPr { number: 41, state: "MERGED".into() }), ..expect_of(&now) };
+        delete_chosen_for_pr(root, &wt, &merged, &now, Lookup::Found(Some(pr(41, "MERGED")))).await.unwrap();
+        assert!(!wt.exists(), "still merged: deleted");
+    }
+
+    /// Prune stale goes only while the worktree is still untouched since the cutoff the user
+    /// confirmed: one that got a same-HEAD `git reset` after the report (a reflog entry, no change to
+    /// its HEAD, branch, changes or commits) is refused and stays; one left untouched goes.
+    #[tokio::test]
+    async fn prune_stale_keeps_a_worktree_used_since_the_report() {
+        let td = fixture();
+        let root = td.path();
+        sh(root, &["checkout", "-q", "-f", "main"]);
+        let add = |name: &str| {
+            let wt = root.parent().unwrap().join(format!("{}-{name}", root.file_name().unwrap().to_string_lossy()));
+            sh(root, &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap(), "main"]);
+            wt
+        };
+        let (used, untouched) = (add("stale-used"), add("stale-untouched"));
+        let now = |wt: PathBuf| async move {
+            let reg = registration(root, &wt, false).await.unwrap().unwrap();
+            scan::recheck_git(root, &reg.record).await
+        };
+        // The report: both last used when they were created; the cutoff the user confirmed is then.
+        let (seen_used, seen_untouched) = (now(used.clone()).await, now(untouched.clone()).await);
+        let cut = seen_used.active_at.max(seen_untouched.active_at).expect("a last use from the reflog");
+        assert!(stale_verdict(&used, cut, &seen_used).is_ok() && stale_verdict(&untouched, cut, &seen_untouched).is_ok());
+        let stale = |w: &CleanupWorktree| CleanupExpect { stale_before: Some(cut), ..expect_of(w) };
+
+        // A second later, a same-HEAD reset in one of them: its reflog moves, nothing else does.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        sh(&used, &["reset", "-q", "HEAD"]);
+        let after = now(used.clone()).await;
+        assert_eq!((after.head.as_deref(), after.branch.as_deref(), after.dirty), (seen_used.head.as_deref(), seen_used.branch.as_deref(), Some(0)));
+        assert!(verdict(&used, &stale(&seen_used), &after).is_ok(), "nothing the other checks see");
+        let err = stale_verdict(&used, cut, &after).unwrap_err();
+        assert_eq!(err.code, "worktree_changed");
+        assert!(err.message.contains("used since the report"), "{}", err.message);
+        assert!(used.is_dir() && registration(root, &used, false).await.unwrap().is_some(), "refused: the checkout stays");
+
+        // Untouched since the report: it goes.
+        let still = now(untouched.clone()).await;
+        verdict(&untouched, &stale(&seen_untouched), &still).unwrap();
+        stale_verdict(&untouched, cut, &still).unwrap();
+        remove_checkout(&untouched, Some(root), false, false).await.unwrap();
+        assert!(!untouched.exists());
     }
 
     /// Forget never deletes a checkout. A worktree the report saw gone whose folder came back

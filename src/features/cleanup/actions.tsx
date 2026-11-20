@@ -40,6 +40,8 @@ export interface RemoveOptions {
   /** The host's current row of a worktree, kept as the page's report; undefined once it is not listed. */
   reloadRow(path: string): Promise<CleanupWorktree | undefined>;
   hostName?: string;
+  /** The row was chosen as stale: the "untouched N+ days" cutoff (`expect.staleBefore`). */
+  staleBefore?: number;
 }
 
 /** Says why `w` was not removed: the host's message and its hint. */
@@ -113,6 +115,8 @@ export async function removeOne(hostId: string, w: CleanupWorktree, home?: strin
   let force = false;
   let trust = false;
   let reconfirmed = 0;
+  // Why it was chosen, until the user confirms it again on its current facts.
+  let staleBefore = opts?.staleBefore;
   for (;;) {
     try {
       // Older hosts know neither `expect` nor `forget`: Forget is off there and Delete goes as before.
@@ -121,7 +125,7 @@ export async function removeOne(hostId: string, w: CleanupWorktree, home?: strin
         force,
         trust,
         forget: !!opts?.revalidates && cur.missing,
-        expect: opts?.revalidates ? expectOf(cur) : undefined,
+        expect: opts?.revalidates ? expectOf(cur, staleBefore) : undefined,
       });
       toast({ title: `${cur.missing ? "Forgot" : "Deleted"} worktree ${nameOf(cur)}`, description: force ? "Forced: its local changes were discarded." : undefined, duration: 3000 });
       return true;
@@ -169,6 +173,7 @@ export async function removeOne(hostId: string, w: CleanupWorktree, home?: strin
           });
           if (!again) return false;
           cur = fresh;
+          staleBefore = undefined;
           continue;
         }
         // Forget refused: something is at the path. Still `missing` (an empty mount point, a folder on the way
@@ -263,10 +268,12 @@ export interface BulkOutcome {
 /**
  * A bulk action: confirm the exact list, then remove one at a time without force or trust (anything that
  * needs either is left for its own Delete), never `forget` (bulk actions take no folder that is gone). A host
- * that checks each worktree against what the page showed (`opts.revalidates`) gets its `expect`: one that
- * changed since the report is not removed and listed as such ("changed since the report: …"). `onProgress`
- * gets the count done; `opts.title` replaces the confirm's (an agent group names its agent). Null when
- * cancelled.
+ * that checks each worktree against what the page showed (`opts.revalidates`) gets its `expect`, with the
+ * merged or closed pull request a worktree was chosen for (the host asks gh again right before): one that
+ * changed since the report (also a pull request reopened) is not removed and listed as such ("changed since
+ * the report: …"), nor one whose pull request gh couldn't confirm ("couldn't check its pull request #41: …").
+ * `onProgress` gets the count done; `opts.title` replaces the confirm's (an agent group names its agent).
+ * Null when cancelled.
  */
 export async function removeMany(
   hostId: string,
@@ -274,7 +281,7 @@ export async function removeMany(
   set: BulkSet,
   home: string | undefined,
   onProgress: (done: number) => void,
-  opts?: { revalidates: boolean; title?: string },
+  opts?: { revalidates: boolean; title?: string; staleBefore?: number },
 ): Promise<BulkOutcome | null> {
   if (set.items.length === 0) return null;
   const n = set.items.length;
@@ -288,11 +295,18 @@ export async function removeMany(
   const out: BulkOutcome = { removed: [], failed: [] };
   for (const [i, w] of set.items.entries()) {
     try {
-      await core.host(hostId).call("cleanup.remove", { path: w.path, force: false, trust: false, forget: false, expect: opts?.revalidates ? expectOf(w) : undefined });
+      await core.host(hostId).call("cleanup.remove", { path: w.path, force: false, trust: false, forget: false, expect: opts?.revalidates ? expectOf(w, opts.staleBefore) : undefined });
       out.removed.push(w);
     } catch (e) {
       const err = toApiError(e);
-      const why = err.code === "worktree_changed" ? `changed since the report: ${err.message}` : err.hint ? `${err.message} — ${err.hint}` : err.message;
+      const why =
+        err.code === "worktree_changed"
+          ? `changed since the report: ${err.message}`
+          : err.code === "pr_unverified"
+            ? err.message
+            : err.hint
+              ? `${err.message} — ${err.hint}`
+              : err.message;
       out.failed.push({ worktree: w, error: why });
     }
     onProgress(i + 1);

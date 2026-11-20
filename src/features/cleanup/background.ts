@@ -22,9 +22,22 @@ export function followsScan(report: CleanupReport | undefined): boolean {
   return !!report?.scanning && !report.background?.running;
 }
 
-/** What the page showed of `w` when its removal was confirmed (`CleanupRemoveParams.expect`). */
-export function expectOf(w: CleanupWorktree): CleanupExpect {
-  return { head: w.head, branch: w.branch, unpushed: w.unpushed, agents: w.agents, workspaceId: w.workspaceId };
+/**
+ * What the page showed of `w` when its removal was confirmed (`CleanupRemoveParams.expect`), with why it was
+ * chosen: a merged or closed pull request it shows (bulk "Delete merged/closed", the row's Delete: the host asks
+ * gh again right before and deletes only while gh still says so), else `staleBefore`, the "untouched N+ days"
+ * cutoff it was chosen by (Prune stale, Delete on a stale row: the host refuses when it was used since).
+ */
+export function expectOf(w: CleanupWorktree, staleBefore?: number): CleanupExpect {
+  const pr = !w.missing && (w.pr?.state === "MERGED" || w.pr?.state === "CLOSED") ? w.pr : undefined;
+  return {
+    head: w.head,
+    branch: w.branch,
+    unpushed: w.unpushed,
+    agents: w.agents,
+    workspaceId: w.workspaceId,
+    ...(pr ? { pr: { number: pr.number, state: pr.state } } : staleBefore !== undefined && !w.missing ? { staleBefore } : {}),
+  };
 }
 
 /** The status line of a host that keeps its report fresh by itself. */

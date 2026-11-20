@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Cleanup lab stand-in for gh (setup.sh puts it first on the lab tf-hostd's PATH): answers
 # `gh pr view [<branch>] --json …` from the checkout, the way gh answers it: branches named
-# `merged-*` have a merged pull request at their HEAD, others none. Every call is logged to
-# <lab>/logs/gh.log with its nice value, session id and cgroup, so the lab can see that a background
-# scan's children run below the agents' work.
+# `merged-*` have a merged pull request at their HEAD, `closed-*` a closed one, others none. A file
+# <lab>/gh-prs/<branch> overrides the answer: OPEN, CLOSED or MERGED (the same pull request, e.g.
+# reopened since the report), or `FAIL <message>` (gh fails with that message, e.g. a rate limit).
+# Every call is logged to <lab>/logs/gh.log with its nice value, I/O class, session id, cgroup and
+# its CPU weight, so the lab can see that a background scan's children run below the agents' work.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 log="$here/../logs/gh.log"
@@ -16,14 +18,26 @@ branch=""
 if [ $# -gt 0 ] && [ "$1" != "--json" ]; then branch="$1"; fi
 [ -n "$branch" ] || branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 head="$(git rev-parse "refs/heads/$branch" 2>/dev/null || git rev-parse HEAD 2>/dev/null)"
+state=""
 case "$branch" in
-  merged-*)
-    n=$(( $(printf '%s' "$branch" | cksum | cut -d' ' -f1) % 900 + 100 ))
-    printf '{"number":%d,"url":"https://github.com/lab/repo/pull/%d","title":"Lab %s","state":"MERGED","isDraft":false,"mergedAt":"2026-11-01T00:00:00Z","closedAt":"2026-11-01T00:00:00Z","headRefOid":"%s"}\n' \
-      "$n" "$n" "$branch" "$head"
+  merged-*) state=MERGED ;;
+  closed-*) state=CLOSED ;;
+esac
+over="$here/../gh-prs/$branch"
+[ -f "$over" ] && state="$(head -1 "$over")"
+n=$(( $(printf '%s' "$branch" | cksum | cut -d' ' -f1) % 900 + 100 ))
+case "$state" in
+  FAIL*)
+    echo "${state#FAIL }" >&2
+    exit 1
     ;;
+  MERGED) at='"mergedAt":"2026-11-01T00:00:00Z","closedAt":"2026-11-01T00:00:00Z"' ;;
+  CLOSED) at='"mergedAt":null,"closedAt":"2026-11-01T00:00:00Z"' ;;
+  OPEN) at='"mergedAt":null,"closedAt":null' ;;
   *)
     echo "no pull requests found for branch \"$branch\"" >&2
     exit 1
     ;;
 esac
+printf '{"number":%d,"url":"https://github.com/lab/repo/pull/%d","title":"Lab %s","state":"%s","isDraft":false,%s,"headRefOid":"%s"}\n' \
+  "$n" "$n" "$branch" "$state" "$at" "$head"
