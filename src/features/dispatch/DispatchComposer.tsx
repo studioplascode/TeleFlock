@@ -2,8 +2,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { ArrowUp, Check, ClipboardList, Cpu, Goal, Layers, LayoutTemplate, Lock, Mic, MicOff, Paperclip, Slash, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { type DraftImage, useAiNaming, useAiSuggestion, useCore, useDraft, useDraftImages, useHosts, useSettings } from "@/core";
-import { attachImages, dragHasFiles, isVideoFile, mediaFiles } from "@/core/clipboardImages";
-import { attachVideos, detachDraftVideos, MAX_DRAFT_VIDEOS, removeDraftVideo, retryVideos, useDraftVideos } from "@/core/draftVideos";
+import { attachImages, dragHasFiles, splitAttachments, transferFiles } from "@/core/clipboardImages";
+import { attachUploads, detachDraftUploads, MAX_DRAFT_UPLOADS, removeDraftUpload, retryUploads, useDraftUploads } from "@/core/draftUploads";
 import type { ModelInfo, RoleBinding } from "@/core/gen";
 import { expandPastes } from "@/core/pastes";
 import { Button, IconButton, Kbd, Lightbox, LightboxTrigger, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn, spring, toast } from "@/design";
@@ -24,7 +24,7 @@ import { isSlashDraft } from "@/features/session/composer/slash";
 import { useSlashPalette } from "@/features/session/composer/SlashPalette";
 import { usePasteAttach } from "@/features/session/composer/usePasteAttach";
 import { useUndoHistory } from "@/features/session/composer/useUndoHistory";
-import { VideoChips } from "@/features/session/composer/VideoChips";
+import { UploadChips } from "@/features/session/composer/UploadChips";
 import { type FirstCommand, firstCommand, NEW_AGENT_OFFER, useNewAgentCommands } from "./commands";
 import { MAX_TASK_IMAGES } from "./images";
 import { type DispatchOptions, suggestDispatchName } from "./store";
@@ -46,18 +46,18 @@ export interface DispatchComposerProps {
   repo?: string | null;
   /** `repo` is a folder that is no repository (Rambler hears it as a folder). */
   folder?: boolean;
-  /** Draft key of the task text, images and videos (per target + repo), so an unsent task survives navigation (text and images: reloads too). */
+  /** Draft key of the task text, images and files (per target + repo), so an unsent task survives navigation (text and images: reloads too). */
   draftKey: string;
-  /** The host videos upload to as soon as they are attached; null (Auto) = the host each task goes to, when it is sent. */
+  /** The host files upload to as soon as they are attached; null (Auto) = the host each task goes to, when it is sent. */
   uploadHost: string | null;
   options: DispatchOptions;
   onOptionsChange(options: DispatchOptions): void;
   /**
-   * Sends one task (text, images, videos (`@/core/draftVideos` ids), any mix), or a command the new
+   * Sends one task (text, images, uploads (`@/core/draftUploads` ids), any mix), or a command the new
    * agent runs (`command`; the text as typed); false = refused (the draft stays). The composer clears
    * itself and keeps focus.
    */
-  onSend(prompt: string, images: readonly DraftImage[], videos: readonly string[], command?: FirstCommand): boolean;
+  onSend(prompt: string, images: readonly DraftImage[], uploads: readonly string[], command?: FirstCommand): boolean;
   /** Why sending is impossible right now (no repo, host offline); disables the composer. */
   disabledReason?: string | null;
   placeholder: string;
@@ -67,12 +67,12 @@ export interface DispatchComposerProps {
 /**
  * Multi-line task box: Enter sends (desktop), Shift+Enter is a newline, the send button works
  * everywhere. Clears and keeps focus after each send so tasks can be fired back to back. Images
- * and videos come in by the attach button, paste or drop and go with the task (a task of images or
- * videos alone is fine): images inline, videos uploaded to the host (their paths go with the first
- * prompt). `/` opens the session composer's command palette, narrowed to what a new agent can run;
- * a message that is a command (no attachments) is run by its agent as such, and a line under the
- * text says so, or why it can't be. The footer holds the per-dispatch options: template or model +
- * thinking, and plan mode.
+ * and any other file (videos, PDFs, text, archives…) come in by the attach button, paste or drop
+ * and go with the task (a task of attachments alone is fine): images inline, the others uploaded to
+ * the host (their paths go with the first prompt). `/` opens the session composer's command
+ * palette, narrowed to what a new agent can run; a message that is a command (no attachments) is
+ * run by its agent as such, and a line under the text says so, or why it can't be. The footer
+ * holds the per-dispatch options: template or model + thinking, and plan mode.
  */
 export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchComposerProps>(function DispatchComposer(
   { hostId, repo, folder = false, draftKey, uploadHost, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
@@ -80,7 +80,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
 ) {
   const [text, setText, clearText] = useDraft(draftKey);
   const [images, setImages] = useDraftImages(draftKey);
-  const videos = useDraftVideos(draftKey);
+  const uploads = useDraftUploads(draftKey);
   const [dragging, setDragging] = useState(false);
   const [viewing, setViewing] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -98,7 +98,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   const about = rambleAbout(repo, folder);
   const ramble = useRamblerDictation({ ...(hostId ? { hostId } : {}), ...(about ? { about } : {}), text, setText, field: ta, mobile });
   const dictation = ramble.dictation;
-  const canSend = !disabled && (!!text.trim() || images.length > 0 || videos.length > 0);
+  const canSend = !disabled && (!!text.trim() || images.length > 0 || uploads.length > 0);
   // The `/` palette: omp's commands a new agent can run, and the folder's skills, prompt templates and extension commands.
   const known = useNewAgentCommands(hostId, repo);
   const palette = useSlashPalette({ custom: known.commands, setText, ta, mobile, offer: NEW_AGENT_OFFER, badge: (c) => (c.source === "omp" || c.source === "teleflock" ? null : c.source) });
@@ -114,7 +114,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
     },
   });
   // Judged on what was typed, as the session composer judges it; a message with attachments is a prompt.
-  const asCommand = isSlashDraft(text) && images.length === 0 && videos.length === 0;
+  const asCommand = isSlashDraft(text) && images.length === 0 && uploads.length === 0;
   const routed = asCommand ? firstCommand(expanded, known) : null;
   const template = useSettings((s) => s.templates.find((t) => t.id === options.templateId));
 
@@ -129,9 +129,9 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
 
   const send = async () => {
     if (!canSend) return;
-    const failed = videos.find((v) => v.phase === "failed");
+    const failed = uploads.find((u) => u.phase === "failed");
     if (failed) {
-      toast({ title: "A video didn't upload", description: `${failed.name}: ${failed.error ?? "unknown error"}. Retry it or remove it.`, status: "error" });
+      toast({ title: "A file didn't upload", description: `${failed.name}: ${failed.error ?? "unknown error"}. Retry it or remove it.`, status: "error" });
       return;
     }
     // Paste tokens become their text (or `<attachment>` block), as omp's editor does on submit.
@@ -141,34 +141,33 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
       return;
     }
     const sent = images;
-    const sentVideos = videos.map((v) => v.id);
+    const sentUploads = uploads.map((u) => u.id);
     const command = asCommand ? firstCommand(prepared.text, known) : null;
     if (command && !command.ok) {
       toast({ title: command.title, description: command.description, status: "error" });
       return;
     }
-    if (!onSend(prepared.text.trim(), sent, sentVideos, command?.command)) return;
+    if (!onSend(prepared.text.trim(), sent, sentUploads, command?.command)) return;
     clearText();
     undo.reset("");
     paste.sent(prepared.carried);
-    // Only what was sent: an image or video attached meanwhile stays.
+    // Only what was sent: an image or file attached meanwhile stays.
     setImages((cur) => cur.filter((i) => !sent.includes(i)));
-    // The task waits for its videos' uploads now.
-    detachDraftVideos(draftKey, sentVideos);
+    // The task waits for its uploads now.
+    detachDraftUploads(draftKey, sentUploads);
     ta.current?.focus();
   };
 
   const addFiles = async (files: readonly File[]) => {
     if (!files.length || disabled) return;
-    const vids = files.filter(isVideoFile);
-    if (vids.length) {
-      const { added, skipped } = attachVideos(draftKey, uploadHost, vids);
-      if (skipped) toast({ title: added ? "Some videos were left out" : "Video not attached", description: skipped, status: "error" });
+    const split = splitAttachments(files);
+    if (split.uploads.length) {
+      const { added, skipped } = attachUploads(draftKey, uploadHost, split.uploads);
+      if (skipped) toast({ title: added ? "Some files were left out" : "File not attached", description: skipped, status: "error" });
     }
-    const imgs = files.filter((f) => f.type.startsWith("image/"));
-    if (!imgs.length) return;
+    if (!split.images.length) return;
     try {
-      const { added, skipped } = await attachImages(draftKey, imgs);
+      const { added, skipped } = await attachImages(draftKey, split.images);
       if (skipped) toast({ title: added ? "Some images were left out" : "Image not attached", description: skipped, status: "error" });
     } catch (e) {
       toast({ title: "Couldn't attach image", description: e instanceof Error ? e.message : String(e), status: "error" });
@@ -177,7 +176,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     // `items` too: WebKitGTK (Linux) lists pasted screenshots only there.
-    const files = mediaFiles(e.clipboardData);
+    const files = transferFiles(e.clipboardData);
     if (files.length > 0) {
       e.preventDefault();
       void addFiles(files);
@@ -187,7 +186,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   const onDrop = (e: DragEvent) => {
     setDragging(false);
     if (dragHasFiles(e.dataTransfer) || e.dataTransfer.files.length > 0) e.preventDefault();
-    void addFiles(mediaFiles(e.dataTransfer));
+    void addFiles(transferFiles(e.dataTransfer));
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -231,8 +230,8 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
           ))}
         </div>
       )}
-      <VideoChips videos={videos} onRemove={(id) => removeDraftVideo(draftKey, id)} onRetry={(id) => retryVideos([id])} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 ? "pt-0" : "pt-1")} />
-      <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 || videos.length > 0 ? "pt-0" : "pt-1")} />
+      <UploadChips uploads={uploads} onRemove={(id) => removeDraftUpload(draftKey, id)} onRetry={(id) => retryUploads([id])} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 ? "pt-0" : "pt-1")} />
+      <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 || uploads.length > 0 ? "pt-0" : "pt-1")} />
       {ramble.panel}
       {routed && !palette.open && (
         <p role="status" className={cn("flex min-w-0 items-start gap-1.5 px-3 pb-2 text-2xs font-semibold", routed.ok ? "text-mute" : "text-error")}>
@@ -284,22 +283,22 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
         className={cn(mobile ? "text-[15px]" : "text-[14px]", "disabled:cursor-not-allowed")}
         footer={
           <>
+            {/* No `accept`: any file attaches (on Android an image and video list opens the photo picker, which offers nothing else). */}
             <input
               ref={fileInput}
               type="file"
-              accept="image/*,video/*"
               multiple
               hidden
               onChange={(e) => {
-                if (e.target.files) void addFiles(mediaFiles({ files: e.target.files }));
+                if (e.target.files) void addFiles(Array.from(e.target.files));
                 e.target.value = "";
               }}
             />
             <IconButton
-              label="Attach images or videos"
+              label="Attach files"
               size={mobile ? "md" : "sm"}
               onClick={() => fileInput.current?.click()}
-              disabled={disabled || (images.length >= MAX_TASK_IMAGES && videos.length >= MAX_DRAFT_VIDEOS)}
+              disabled={disabled || (images.length >= MAX_TASK_IMAGES && uploads.length >= MAX_DRAFT_UPLOADS)}
             >
               <Paperclip />
             </IconButton>

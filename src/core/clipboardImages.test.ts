@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { attachImages, dragHasFiles, fitImages, imageChars, imageFiles, MAX_PROMPT_IMAGE_CHARS, shrinkImage } from "./clipboardImages";
+import { attachImages, dragHasFiles, fitImages, imageChars, imageFiles, isVideoFile, MAX_PROMPT_IMAGE_CHARS, shrinkImage, splitAttachments, transferFiles } from "./clipboardImages";
 import { getDraftImages, MAX_DRAFT_IMAGES } from "./draftImages";
 
 const png = (name = "image.png", bytes = 8, lastModified = 1) => new File([new Uint8Array(bytes)], name, { type: "image/png", lastModified });
@@ -37,6 +37,59 @@ describe("imageFiles", () => {
   test("drag-over sees files by kind only", () => {
     expect(dragHasFiles({ items: [item(null, "file", "image/png")] })).toBe(true);
     expect(dragHasFiles({ items: [item(null, "string", "text/plain")] })).toBe(false);
+  });
+});
+
+describe("what a file attaches as", () => {
+  const file = (name: string, type: string) => new File([new Uint8Array(4)], name, { type, lastModified: 7 });
+
+  test("a mixed selection: images inline, a video and a PDF to the host, in the order picked", () => {
+    const shot = png("shot.png");
+    const clip = file("clip.mp4", "video/mp4");
+    const spec = file("spec.pdf", "application/pdf");
+    const split = splitAttachments([spec, shot, clip]);
+    expect(split.images).toEqual([shot]);
+    expect(split.uploads).toEqual([spec, clip]);
+    expect(split.uploads.map(isVideoFile)).toEqual([false, true]);
+  });
+
+  test("a file handed over without a type is told by its extension; such an image gets the type it is sent as", () => {
+    const { images, uploads } = splitAttachments([file("IMG_2041.JPG", ""), file("scan.webp", "application/octet-stream"), file("VID_1.MP4", ""), file("report.pdf", ""), file("notes", "")]);
+    expect(images.map((f) => [f.name, f.type])).toEqual([
+      ["IMG_2041.JPG", "image/jpeg"],
+      ["scan.webp", "image/webp"],
+    ]);
+    expect(uploads.map((f) => [f.name, isVideoFile(f)])).toEqual([
+      ["VID_1.MP4", true],
+      ["report.pdf", false],
+      ["notes", false],
+    ]);
+  });
+
+  test("only the image formats models read go inline; any other image uploads like a file", () => {
+    const { images, uploads } = splitAttachments([file("logo.svg", "image/svg+xml"), file("IMG_0042.HEIC", "image/heic"), file("photo.jpg", "image/jpg"), png("shot.png")]);
+    expect(images.map((f) => [f.name, f.type])).toEqual([
+      ["photo.jpg", "image/jpeg"],
+      ["shot.png", "image/png"],
+    ]);
+    expect(uploads.map((f) => f.name)).toEqual(["logo.svg", "IMG_0042.HEIC"]);
+  });
+
+  test("a TypeScript source the platform calls an MPEG transport stream is no video", () => {
+    expect(isVideoFile(file("index.ts", "video/mp2t"))).toBe(false);
+    expect(isVideoFile(file("worker.mts", "video/mp2t"))).toBe(false);
+    expect(isVideoFile(file("concert.m2ts", "video/mp2t"))).toBe(true);
+    expect(isVideoFile(file("clip.mov", "video/quicktime"))).toBe(true);
+  });
+
+  test("every file of a paste or a drop, dropped folders left out", () => {
+    const spec = file("spec.pdf", "application/pdf");
+    const folder = file("src", "");
+    const dir = { kind: "file", type: "", getAsFile: () => folder, webkitGetAsEntry: () => ({ isDirectory: true }) };
+    expect(transferFiles({ items: [item(spec), dir, item(null, "string", "text/uri-list")], files: [spec, folder] })).toEqual([spec]);
+    // Only a folder in `items`: `files` would hand it over again.
+    expect(transferFiles({ items: [dir], files: [folder] })).toEqual([]);
+    expect(transferFiles({ files: [spec] })).toEqual([spec]);
   });
 });
 

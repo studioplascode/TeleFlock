@@ -2,17 +2,20 @@ import { trackDraftWork } from "./draftFlush";
 import { type DraftImage, MAX_DRAFT_IMAGES, updateDraftImages } from "./draftImages";
 
 /*
- * Image (and video) files out of a paste or a drop. Engines disagree on where they put them:
- * WebKitGTK (the Linux app) lists a pasted screenshot only in `items` (`getAsFile()`), Chromium
- * (WebView2, Android) in both `items` and `files`, and a drop from a file manager in `files`.
- * Then the composers' attach path for images (`attachImages`): very large images scaled down, and
- * the images of one prompt kept within the count and the relay's message size (`fitImages`).
- * Videos are uploaded to the host instead (`draftVideos.ts`, `upload.ts`).
+ * Files out of a paste, a drop or a picker, and what each attaches to a prompt as
+ * (`splitAttachments`): images go inline, every other file (videos, PDFs, text and code,
+ * spreadsheets, Office and OpenDocument files, archives…) is uploaded to the host and named in the
+ * prompt by its path there (`draftUploads.ts`, `upload.ts`). Engines disagree on where they put
+ * pasted and dropped files: WebKitGTK (the Linux app) lists a pasted screenshot only in `items`
+ * (`getAsFile()`), Chromium (WebView2, Android) in both `items` and `files`, and a drop from a file
+ * manager in `files`. Then the composers' attach path for images (`attachImages`): very large images
+ * scaled down, and the images of one prompt kept within the count and the relay's message size
+ * (`fitImages`).
  */
 
 /** The parts of `DataTransfer` read here (structural, so tests can pass plain objects). */
-export interface ImageSource {
-  items?: ArrayLike<Pick<DataTransferItem, "kind" | "type" | "getAsFile">> | null;
+export interface TransferSource {
+  items?: ArrayLike<Pick<DataTransferItem, "kind" | "type" | "getAsFile"> & { webkitGetAsEntry?(): Pick<FileSystemEntry, "isDirectory"> | null }> | null;
   files?: ArrayLike<File> | null;
 }
 
@@ -20,43 +23,90 @@ export interface ImageSource {
  * Files of a clipboard / drag payload that `keep` accepts, in order: those of `items`, or of
  * `files` when `items` lists none. Never both: Chromium hands out one pasted image as two File
  * objects, one per list, whose `lastModified` differ (each is stamped when it is made), so the
- * lists cannot be matched up and merging them attached every pasted image twice.
+ * lists cannot be matched up and merging them attached every pasted image twice. A dropped folder
+ * is listed as a file too, one nothing can read: it is left out (where the engine tells folders
+ * apart, `webkitGetAsEntry`).
  */
-function pickFiles(data: ImageSource | null | undefined, keep: (f: File) => boolean): File[] {
+function pickFiles(data: TransferSource | null | undefined, keep: (f: File) => boolean): File[] {
   if (!data) return [];
   const fromItems: File[] = [];
+  let folders = 0;
   for (const item of Array.from(data.items ?? [])) {
-    const f = item.kind === "file" ? item.getAsFile() : null;
+    if (item.kind !== "file") continue;
+    if (item.webkitGetAsEntry?.()?.isDirectory) {
+      folders++;
+      continue;
+    }
+    const f = item.getAsFile();
     if (f) fromItems.push(f);
   }
-  return (fromItems.length > 0 ? fromItems : Array.from(data.files ?? [])).filter(keep);
+  // Only folders in `items`: `files` would hand them over again.
+  return (fromItems.length > 0 || folders > 0 ? fromItems : Array.from(data.files ?? [])).filter(keep);
+}
+
+/** The platform handed a file over without telling its type (some drops, Android providers): its extension has to. */
+function untyped(f: Pick<File, "type">): boolean {
+  return f.type === "" || f.type === "application/octet-stream";
 }
 
 /** Video containers by extension, for files the platform hands over without a type. */
 const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|avi|wmv|3gp|mpe?g)$/i;
+/** TypeScript sources, which platforms type by their extension as MPEG transport streams (`video/mp2t`). */
+const TS_SOURCE = /\.[cm]?ts$/i;
 
-/** A video: a `video/*` type, or a video extension when the type is missing (some drops, Android providers). */
+/**
+ * A video: a `video/*` type (not a TypeScript source taken for an MPEG transport stream), or a
+ * video extension when the type is missing.
+ */
 export function isVideoFile(f: Pick<File, "name" | "type">): boolean {
-  return f.type.startsWith("video/") || ((f.type === "" || f.type === "application/octet-stream") && VIDEO_EXT.test(f.name));
+  if (f.type.startsWith("video/")) return !(f.type === "video/mp2t" && TS_SOURCE.test(f.name));
+  return untyped(f) && VIDEO_EXT.test(f.name);
+}
+
+/**
+ * Images that go inline, by type: the formats omp hands models (its `SUPPORTED_IMAGE_MIME_TYPES`),
+ * mapped to the type they are sent as. Any other image (SVG, HEIC, TIFF, BMP…) would be refused
+ * inline, so it uploads like any file and the agent reads or converts it there.
+ */
+const INLINE_TYPES: Readonly<Record<string, string>> = { "image/png": "image/png", "image/jpeg": "image/jpeg", "image/jpg": "image/jpeg", "image/gif": "image/gif", "image/webp": "image/webp" };
+/** The same formats by extension, for files the platform hands over without a type. */
+const INLINE_EXT: Readonly<Record<string, string>> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+
+/** The type an image goes inline with (by its type, else its extension); null for every file that uploads. */
+function inlineImageType(f: Pick<File, "name" | "type">): string | null {
+  if (!untyped(f)) return INLINE_TYPES[f.type] ?? null;
+  const dot = f.name.lastIndexOf(".");
+  return dot > 0 ? (INLINE_EXT[f.name.slice(dot + 1).toLowerCase()] ?? null) : null;
+}
+
+/**
+ * What `files` attach to a prompt as, in order: `images` inline (`INLINE_TYPES`; one handed over
+ * without a type, or as `image/jpg`, gets the type it is sent as, so it is read, scaled and sent
+ * as what it is), `uploads` to the host as files: videos and every other file (`draftUploads.ts`).
+ */
+export function splitAttachments(files: Iterable<File>): { images: File[]; uploads: File[] } {
+  const images: File[] = [];
+  const uploads: File[] = [];
+  for (const f of files) {
+    const type = inlineImageType(f);
+    if (!type) uploads.push(f);
+    else images.push(type === f.type ? f : new File([f], f.name, { type, lastModified: f.lastModified }));
+  }
+  return { images, uploads };
 }
 
 /** Image files of a clipboard / drag payload, each once, in order (`items`, else `files`). */
-export function imageFiles(data: ImageSource | null | undefined): File[] {
+export function imageFiles(data: TransferSource | null | undefined): File[] {
   return pickFiles(data, (f) => f.type.startsWith("image/"));
 }
 
-/** Video files of a clipboard / drag payload (see `isVideoFile`), as `imageFiles`. */
-export function videoFiles(data: ImageSource | null | undefined): File[] {
-  return pickFiles(data, isVideoFile);
-}
-
-/** Image and video files of a clipboard / drag payload, as `imageFiles`. */
-export function mediaFiles(data: ImageSource | null | undefined): File[] {
-  return pickFiles(data, (f) => f.type.startsWith("image/") || isVideoFile(f));
+/** Every file of a clipboard / drag payload, as `imageFiles` (dropped folders left out). */
+export function transferFiles(data: TransferSource | null | undefined): File[] {
+  return pickFiles(data, () => true);
 }
 
 /** A drag carries files (drag-over: their contents are not readable yet, only their kind). */
-export function dragHasFiles(data: Pick<ImageSource, "items"> | null | undefined): boolean {
+export function dragHasFiles(data: Pick<TransferSource, "items"> | null | undefined): boolean {
   return Array.from(data?.items ?? []).some((i) => i.kind === "file");
 }
 

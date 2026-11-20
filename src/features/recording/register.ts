@@ -1,4 +1,4 @@
-import { registerVideoSource } from "@/core/draftVideos";
+import { registerUploadSource } from "@/core/draftUploads";
 import { recordingSource } from "./send";
 
 /*
@@ -6,4 +6,4 @@ import { recordingSource } from "./send";
  * device): imported at app start, before drafts load, and by the recording feature itself.
  */
 
-registerVideoSource("recording", recordingSource);
+registerUploadSource("recording", recordingSource);

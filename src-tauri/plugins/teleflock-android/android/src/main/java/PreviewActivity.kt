@@ -1,6 +1,7 @@
 package dev.teleflock.android
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.MimeTypeMap
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -41,7 +43,8 @@ import androidx.core.view.WindowInsetsCompat
  *
  * Navigations follow [PreviewLinks]: loopback pages stay, other web pages open in the browser when
  * tapped. Downloads go to the browser too. Permission requests (camera, microphone, location) are
- * denied, files can be picked for an upload field.
+ * denied, files can be picked for an upload field (any it accepts, several when it takes several:
+ * [chooserIntent]).
  */
 class PreviewActivity : ComponentActivity() {
     private lateinit var web: WebView
@@ -56,7 +59,7 @@ class PreviewActivity : ComponentActivity() {
 
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private val pickFiles = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        fileCallback?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(r.resultCode, r.data))
+        fileCallback?.onReceiveValue(pickedFiles(r.resultCode, r.data))
         fileCallback = null
     }
 
@@ -148,7 +151,7 @@ class PreviewActivity : ComponentActivity() {
                 fileCallback?.onReceiveValue(null)
                 fileCallback = callback
                 return try {
-                    pickFiles.launch(params.createIntent())
+                    pickFiles.launch(chooserIntent(params))
                     true
                 } catch (_: ActivityNotFoundException) {
                     fileCallback = null
@@ -157,6 +160,36 @@ class PreviewActivity : ComponentActivity() {
             }
         }
         w.setDownloadListener { url, _, _, _, _ -> if (PreviewLinks.isWebUrl(url)) openInBrowser(url) }
+    }
+
+    /**
+     * The system picker for an upload field: the WebView's own request (GET_CONTENT for openable
+     * files, several when the field takes several), asking for the field's whole accept list
+     * ([FileChooser.mimeTypes]) under the any-file type, so a list that names a document opens the
+     * document picker rather than the photo picker. WebViews before 101 typed the request with the
+     * list's first entry as it stood (`image/png`, or `.pdf`, which nothing opens) and set no list
+     * and no multiple pick. A folder or save request goes as the WebView made it.
+     */
+    private fun chooserIntent(params: WebChromeClient.FileChooserParams): Intent {
+        val intent = params.createIntent()
+        if (intent.action != Intent.ACTION_GET_CONTENT && intent.action != Intent.ACTION_OPEN_DOCUMENT) return intent
+        val types = FileChooser.mimeTypes(params.acceptTypes) { MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
+        intent.removeExtra(Intent.EXTRA_MIME_TYPES)
+        if (types.size == 1) {
+            intent.type = types[0]
+        } else {
+            intent.type = "*/*"
+            if (types.isNotEmpty()) intent.putExtra(Intent.EXTRA_MIME_TYPES, types.toTypedArray())
+        }
+        if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        return intent
+    }
+
+    /** The files picked: all of a multiple pick (the picker lists them in `clipData`, which `FileChooserParams.parseResult` never reads). */
+    private fun pickedFiles(resultCode: Int, data: Intent?): Array<Uri>? {
+        if (resultCode != Activity.RESULT_OK) return null
+        val picked = data?.clipData?.let { clip -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri } }.orEmpty()
+        return if (picked.isNotEmpty()) picked.toTypedArray() else WebChromeClient.FileChooserParams.parseResult(resultCode, data)
     }
 
     /** Title, subtitle and the window's buttons. */

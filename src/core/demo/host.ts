@@ -379,7 +379,7 @@ export class DemoHost implements SimHost {
   });
   /** tf-hostd's automations (`./automations`); studio-pc plays a host whose tf-hostd predates them. */
   private automations?: DemoAutomations;
-  /** `upload.*` (videos for prompts, terminal pastes): offsets only, nothing stored. */
+  /** `upload.*` (files for prompts, terminal pastes): offsets only, nothing stored. */
   private uploads?: DemoUploads;
   /** Background jobs and daemon services (`jobs.*`, `services.*`, `./jobs`). */
   private demoJobs?: DemoJobs;

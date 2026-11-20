@@ -1,6 +1,6 @@
 import { type CoreClient, core, drafts, navigate, parseAgentKey } from "@/core";
 import { attachImages } from "@/core/clipboardImages";
-import { attachVideoSource, hydrateDraftVideos, type VideoSource } from "@/core/draftVideos";
+import { attachUploadSource, type DraftUploadSource, hydrateDraftUploads } from "@/core/draftUploads";
 import type { RecordingDetail, RecordingInfo } from "@/core/gen";
 import { type UploadedFile, type UploadOptions, type UploadSource, uploadFile } from "@/core/upload";
 import { toast } from "@/design";
@@ -28,7 +28,7 @@ const realIo: RecordingIo = {
 /*
  * Sending a recording to an agent: a new task in Dispatch or a prompt to an existing session, both
  * through the composer, so the user sees the task text before it goes. The recording attaches as a
- * draft video with a source (`attachVideoSource`): nothing leaves the device until the prompt is
+ * draft upload with a source (`attachUploadSource`): nothing leaves the device until the prompt is
  * sent; then its files go to the agent's host (`upload.*`): the video with the review's cuts
  * applied, the screenshots, and the timeline written with their paths on that host. A few
  * screenshots also go as images in the prompt.
@@ -155,8 +155,8 @@ export async function uploadRecording(id: string, hostId: string, opts: UploadOp
   }
 }
 
-/** The draft video a recording attaches as. */
-export function recordingSource(id: string): VideoSource {
+/** The draft upload a recording attaches as. */
+export function recordingSource(id: string): DraftUploadSource {
   return { upload: (hostId, opts) => uploadRecording(id, hostId, opts) };
 }
 
@@ -193,9 +193,9 @@ export async function sendToAgent(id: string, agentKey: string): Promise<void> {
     const { skipped } = await attachImages(key, imageFilesOf(images));
     if (skipped) toast({ title: "Some screenshots were left out", description: skipped, status: "error" });
   }
-  await hydrateDraftVideos(key);
+  await hydrateDraftUploads(key);
   const v = taskVideo(p);
-  const { skipped } = attachVideoSource(key, null, v, v.video);
+  const { skipped } = attachUploadSource(key, null, v, v.video);
   if (skipped) toast({ title: "The recording was left out", description: skipped, status: "error" });
   closeReview();
   const { hostId, agentId } = parseAgentKey(agentKey);

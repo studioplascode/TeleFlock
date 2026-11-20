@@ -4,10 +4,10 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { AnimatePresence, motion } from "motion/react";
-import { ClipboardCopy, ClipboardPaste, Cpu, Search, Eye, ImageUp, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
+import { ClipboardCopy, ClipboardPaste, Cpu, Search, Eye, FileUp, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
 import { type CSSProperties, type Ref, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { draftKey, openLink, useHosts, useSettings } from "@/core";
-import { dragHasFiles, mediaFiles } from "@/core/clipboardImages";
+import { dragHasFiles, transferFiles } from "@/core/clipboardImages";
 import type { TermMode, TermOpened, TermTarget, TunnelInfo } from "@/core/gen";
 import {
   Button,
@@ -34,7 +34,7 @@ import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
 import { localhostUrlRanges } from "./frames";
 import { ImeCommits } from "./imeCommit";
-import { pastePathsInput, pastedMedia, pasteTextInput, pathsText, readClipboard } from "./mediaPaste";
+import { pastedFiles, pastePathsInput, pasteTextInput, pathsText, readClipboard } from "./mediaPaste";
 import { ExtraKeys, type ExtraKey, type ModLatch, type ModState } from "./ExtraKeys";
 import { applyMods, encodeKey } from "./keys";
 import { observeTransform } from "./observeScale";
@@ -604,10 +604,11 @@ export function TerminalPane({
   }, []);
 
   /**
-   * Images / videos pasted, dropped or picked: upload them to the host, then paste their host paths
-   * into the pane (omp attaches them; a shell gets the path). Control mode only.
+   * Files pasted, dropped or picked: upload them to the host, then paste their host paths into the
+   * pane (omp attaches images and videos, other paths stay text; a shell gets the paths). Control
+   * mode only.
    */
-  const sendMedia = useCallback(
+  const sendFiles = useCallback(
     async (files: readonly Blob[]) => {
       const attached = () => {
         const s = sessionRef.current;
@@ -654,33 +655,33 @@ export function TerminalPane({
     if (!term || !interactive) return;
     try {
       const clip = await readClipboard();
-      if (clip.media.length > 0) void sendMedia(clip.media);
+      if (clip.media.length > 0) void sendFiles(clip.media);
       else if (clip.text) sendText(clip.text);
     } catch {
       toast({ title: "Paste unavailable", description: "Allow clipboard access, or use Ctrl+V.", status: "error" });
     }
     term.focus();
-  }, [interactive, sendMedia, sendText]);
+  }, [interactive, sendFiles, sendText]);
 
   // Ctrl+V / the webview's own Paste. Capture phase on an ancestor, so it runs before xterm's paste
-  // listener: images or videos with no text are uploaded, text goes in as one bracketed paste.
+  // listener: files with no text are uploaded, text goes in as one bracketed paste.
   useEffect(() => {
     const wrap = wrapRef.current;
     const term = termRef.current;
     if (!inst || !wrap || !term || !interactive) return;
     const onPaste = (e: ClipboardEvent) => {
       if (!(e.target instanceof Node) || !term.element?.contains(e.target)) return;
-      const files = pastedMedia(e.clipboardData);
+      const files = pastedFiles(e.clipboardData);
       const text = files.length === 0 ? (e.clipboardData?.getData("text/plain") ?? "") : "";
       if (files.length === 0 && !text) return;
       e.preventDefault();
       e.stopPropagation();
-      if (files.length > 0) void sendMedia(files);
+      if (files.length > 0) void sendFiles(files);
       else sendText(text);
     };
     wrap.addEventListener("paste", onPaste, true);
     return () => wrap.removeEventListener("paste", onPaste, true);
-  }, [inst, interactive, sendMedia, sendText]);
+  }, [inst, interactive, sendFiles, sendText]);
   // An input-method commit WebKitGTK inserts with no compositionstart (imeCommit.ts): sent from
   // here once, the textarea put back as it was, so xterm neither repeats stale text nor sends it twice.
   useEffect(() => {
@@ -978,8 +979,8 @@ export function TerminalPane({
       className={cn("relative min-h-0 flex-1 overflow-hidden", compact ? "p-1" : "px-2.5 pt-2 pb-1")}
       style={frameStyle}
       onClick={() => interactive && termRef.current?.focus()}
-      // Dropped images / videos: uploaded, then their host paths are pasted (control mode). Other
-      // files are refused, and no drop ever navigates the webview to the file.
+      // Dropped files: uploaded, then their host paths are pasted (control mode). No drop ever
+      // navigates the webview to the file.
       onDragOver={(e) => {
         if (compact || !dragHasFiles(e.dataTransfer)) return;
         e.preventDefault();
@@ -994,13 +995,13 @@ export function TerminalPane({
         if (compact || (!dragHasFiles(e.dataTransfer) && e.dataTransfer.files.length === 0)) return;
         e.preventDefault();
         if (!interactive) return;
-        const files = mediaFiles(e.dataTransfer);
+        const files = transferFiles(e.dataTransfer);
         if (files.length === 0) {
-          toast({ title: "Only images and videos", description: "Drop an image or a video to paste its path on the host.", status: "error" });
+          toast({ title: "Folders can't be uploaded", description: "Drop files to paste their paths on the host.", status: "error" });
           return;
         }
         termRef.current?.focus();
-        void sendMedia(files);
+        void sendFiles(files);
       }}
     >
       <div
@@ -1040,7 +1041,7 @@ export function TerminalPane({
             className="pointer-events-none absolute inset-0 z-raised grid place-items-center bg-[rgb(12_10_20/0.62)] shadow-[inset_0_0_0_2px_var(--color-accent),inset_0_0_36px_-8px_rgb(163_92_240/0.6)]"
           >
             <span className="flex items-center gap-2 rounded-full bg-[rgb(20_20_28/0.92)] px-3.5 py-2 text-xs font-bold text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]">
-              <ImageUp className="size-4 text-accent-hi" />
+              <FileUp className="size-4 text-accent-hi" />
               Drop to upload · its host path is pasted
             </span>
           </motion.div>
@@ -1197,16 +1198,16 @@ export function TerminalPane({
       )}
       {showExtraKeys && (
         <>
+          {/* No `accept`: any file goes (on Android an image and video list opens the photo picker, which offers nothing else). */}
           <input
             ref={pickRef}
             type="file"
-            accept="image/*,video/*"
             multiple
             hidden
             onChange={(e) => {
               const files = [...(e.currentTarget.files ?? [])];
               e.currentTarget.value = "";
-              if (files.length > 0) void sendMedia(files);
+              if (files.length > 0) void sendFiles(files);
             }}
           />
           <ExtraKeys
@@ -1214,7 +1215,7 @@ export function TerminalPane({
             onKey={onExtraKey}
             onSetMod={onSetMod}
             onPaste={() => void paste()}
-            onPickMedia={() => pickRef.current?.click()}
+            onPickFiles={() => pickRef.current?.click()}
             className={cn(
               "shrink-0 border-t border-line bg-[linear-gradient(180deg,var(--color-tile-1),var(--color-chrome))] transition-opacity duration-300",
               !live && "pointer-events-none opacity-45",

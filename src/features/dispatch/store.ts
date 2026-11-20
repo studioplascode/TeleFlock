@@ -3,7 +3,7 @@ import { createJSONStorage, persist, type StateStorage } from "zustand/middlewar
 import { aiNamingEnabled, apiError, core, type DraftImage, getAgentViews, getHostStates, suggestBranch, toApiError, useSettings } from "@/core";
 import { CHAT_TARGET, CHATS_NEED_UPDATE, chatsUnsupported, isChatRepo } from "@/core/chats";
 import type { Agent, AgentSpec, AutoAnswer, BranchList, Column, StartTarget, ThinkingLevel, Workspace } from "@/core/gen";
-import { discardVideos, getVideo, releaseVideos, retryVideos, uploadDraftVideos, whenUploaded, withVideoRefs } from "@/core/draftVideos";
+import { discardUploads, getUpload, releaseUploads, retryUploads, startUploads, type UploadKind, whenUploaded, withUploadRefs } from "@/core/draftUploads";
 import { classifyHerdrError, describeError, type HerdrFailure } from "@/features/workspace/shared/errors";
 import { hostTakesRoles, launchOverrides } from "@/features/agentRoles/roles";
 import { hostDecides, specAutoAnswer } from "@/features/autoAnswer/format";
@@ -60,28 +60,28 @@ export interface DispatchOptions {
 
 /**
  * `naming` (omp's tiny model is naming the task; skipped when AI naming is off) → `uploading`
- * (only with videos still on their way to the host) → `queued` → `creating` (worktree.create in
+ * (only with files still on their way to the host) → `queued` → `creating` (worktree.create in
  * flight; in place or a chat: agent.start) → `started` (herdr answered; the agent's own progress
- * comes from host state), `failed` (herdr refused, or a video didn't upload), or `unknown` (the
+ * comes from host state), `failed` (herdr refused, or a file didn't upload), or `unknown` (the
  * request timed out or the connection dropped: the host may still be creating it, so the entry
  * keeps looking for its agent). A `queued`/`creating` entry that is no longer in flight was
  * interrupted by a reload; a `naming` one never reached the host and resumes under its fallback
- * name; an `uploading` one fails (the page that could read the video is gone).
+ * name; an `uploading` one fails (the page that could read the file is gone).
  */
 export type DispatchPhase = "naming" | "uploading" | "queued" | "creating" | "started" | "failed" | "unknown";
 
-/** A video sent with a task: uploaded to the entry's host, its path goes with the first prompt. */
-export interface DispatchVideo {
+/** A file sent with a task (a video, a browser recording, any other file): uploaded to the entry's host, its path goes with the first prompt. */
+export interface DispatchUpload {
   name: string;
   size: number;
   /** Absolute path on the host, once uploaded. */
   path?: string;
-  /** The upload in this page (`@/core/draftVideos`) until it is done. */
+  /** The upload in this page (`@/core/draftUploads`) until it is done. */
   upload?: string;
   /** Its own reference text once uploaded (a browser recording: timeline, video, screenshots). */
   ref?: string;
-  /** A browser recording (its chip says so). */
-  kind?: "recording";
+  /** What it is when not a video (its chip and prompt line say so). */
+  kind?: UploadKind;
 }
 
 export interface DispatchError {
@@ -141,8 +141,8 @@ export interface DispatchEntry {
   sessionId?: string;
   /** Images sent with the prompt (kept in IndexedDB by id, `images.ts`). */
   images?: number;
-  /** Videos sent with the prompt (each a reference line with its host path). */
-  videos?: DispatchVideo[];
+  /** Files uploaded for the prompt (each a reference line with its host path). */
+  uploads?: DispatchUpload[];
   /** The host it went to; absent (entries before 0.5) = the thread's host. */
   hostId?: string;
   /** That host's checkout root of the repository (in place: the folder it runs in); absent = the thread's repo (a chat has none). */
@@ -321,7 +321,7 @@ export const useDispatch = create<DispatchState>()(
     }),
     {
       name: "tf.dispatch",
-      version: 2,
+      version: 3,
       storage: createJSONStorage<Persisted>(() => safeLocalStorage),
       partialize: (s): Persisted => ({
         threads: slimThreads(s.threads, MAX_STORED_ENTRIES, MAX_STORED_PROMPT),
@@ -336,9 +336,19 @@ export const useDispatch = create<DispatchState>()(
         remotes: s.remotes,
       }),
       // v1 → v2: bases remembered back when the default base was the local default branch.
+      // v2 → v3: an entry's uploads were `videos` while nothing else was uploaded.
       migrate: (state, version) => {
         const s = (state ?? {}) as Partial<Persisted>;
         if (version < 2) s.legacyBases = Object.fromEntries(Object.keys(s.bases ?? {}).map((k) => [k, true as const]));
+        if (version < 3) {
+          for (const list of Object.values(s.threads ?? {})) {
+            for (const e of list as (DispatchEntry & { videos?: DispatchUpload[] })[]) {
+              if (!e.videos) continue;
+              e.uploads = e.videos;
+              delete e.videos;
+            }
+          }
+        }
         return s as Persisted;
       },
     },
@@ -347,7 +357,7 @@ export const useDispatch = create<DispatchState>()(
 
 /**
  * Images of entries that leave the threads (dismissed, cleared, cut by the cap, pruned) go too, and
- * so do the uploads of their videos that never reached the agent (dropped on the host as well).
+ * so do their uploads that never reached the agent (dropped on the host as well).
  */
 useDispatch.subscribe((s, prev) => {
   if (s.threads === prev.threads) return;
@@ -360,11 +370,11 @@ useDispatch.subscribe((s, prev) => {
     for (const e of before) {
       if (kept.has(e.id)) continue;
       if (e.images) gone.push(e.id);
-      for (const v of e.videos ?? []) if (v.upload && !v.path) uploads.push(v.upload);
+      for (const u of e.uploads ?? []) if (u.upload && !u.path) uploads.push(u.upload);
     }
   }
   deleteEntryImages(gone);
-  if (uploads.length) discardVideos(uploads);
+  if (uploads.length) discardUploads(uploads);
 });
 
 // ---------------------------------------------------------------- running
@@ -408,14 +418,14 @@ export function goalCommand(task: string): string {
 
 /**
  * The agent spec of an entry for `hostId`, the host it goes to: its images read back from storage
- * (an entry whose images are gone fails), a reference line per uploaded video after the task, and
+ * (an entry whose images are gone fails), a reference line per uploaded file after the task, and
  * its own decide-for-me policy only when that host has decide for me (Auto: whichever host it got).
  */
 async function specOf(e: DispatchEntry, hostId: string): Promise<AgentSpec> {
   const template = useSettings.getState().templates.find((t) => t.id === e.options.templateId);
-  const videos = e.videos ?? [];
-  if (videos.some((v) => !v.path)) throw apiError("videos_missing", "The task's videos didn't reach the host", { hint: "Retry uploads them again" });
-  const task = withVideoRefs(e.prompt.trim(), videos.map((v) => ({ name: v.name, size: v.size, path: v.path ?? "", ...(v.ref ? { ref: v.ref } : {}) })));
+  const uploads = e.uploads ?? [];
+  if (uploads.some((u) => !u.path)) throw apiError("uploads_missing", "The task's files didn't reach the host", { hint: "Retry uploads them again" });
+  const task = withUploadRefs(e.prompt.trim(), uploads.map((u) => ({ name: u.name, size: u.size, path: u.path ?? "", ...(u.kind ? { kind: u.kind } : {}), ...(u.ref ? { ref: u.ref } : {}) })));
   const images = e.images ? await loadEntryImages(e.id) : null;
   if (e.images && !images) {
     throw apiError("images_missing", "The task's images are no longer stored on this device", { hint: "Dismiss it and send the task again with its images" });
@@ -438,24 +448,24 @@ async function specOf(e: DispatchEntry, hostId: string): Promise<AgentSpec> {
 }
 
 /**
- * `videos` once uploaded to `hostId`: those not started yet start, failed ones start over (a retry).
- * Their uploads in this page are forgotten then; a video this page no longer has fails the entry.
+ * `uploads` once on `hostId`: those not started yet start, failed ones start over (a retry). Their
+ * uploads in this page are forgotten then; a file this page no longer has fails the entry.
  */
-async function uploadedVideos(hostId: string, videos: readonly DispatchVideo[]): Promise<DispatchVideo[]> {
-  if (videos.some((v) => !v.path && !(v.upload && getVideo(v.upload)))) {
-    throw apiError("videos_missing", "The task's videos are no longer on this device", { hint: "Dismiss it and send the task again with its videos" });
+async function uploadedFiles(hostId: string, uploads: readonly DispatchUpload[]): Promise<DispatchUpload[]> {
+  if (uploads.some((u) => !u.path && !(u.upload && getUpload(u.upload)))) {
+    throw apiError("uploads_missing", "The task's files are no longer on this device", { hint: "Dismiss it and send the task again with its files" });
   }
-  const ids = videos.flatMap((v) => (!v.path && v.upload ? [v.upload] : []));
-  uploadDraftVideos(ids, hostId);
-  retryVideos(ids);
+  const ids = uploads.flatMap((u) => (!u.path && u.upload ? [u.upload] : []));
+  startUploads(ids, hostId);
+  retryUploads(ids);
   await whenUploaded(ids);
-  const out = videos.map((v): DispatchVideo => {
-    const up = v.upload ? getVideo(v.upload) : undefined;
-    const path = v.path ?? up?.path;
-    const ref = v.ref ?? up?.ref;
-    return path ? { name: v.name, size: up?.size ?? v.size, path, ...(ref ? { ref } : {}), ...(v.kind ? { kind: v.kind } : {}) } : v;
+  const out = uploads.map((u): DispatchUpload => {
+    const up = u.upload ? getUpload(u.upload) : undefined;
+    const path = u.path ?? up?.path;
+    const ref = u.ref ?? up?.ref;
+    return path ? { name: u.name, size: up?.size ?? u.size, path, ...(ref ? { ref } : {}), ...(u.kind ? { kind: u.kind } : {}) } : u;
   });
-  releaseVideos(ids);
+  releaseUploads(ids);
   return out;
 }
 
@@ -477,7 +487,7 @@ function settled(id: string): void {
 const find = (key: string, id: string) => useDispatch.getState().threads[key]?.find((x) => x.id === id);
 
 /**
- * Sends entry `id` of thread `key` (after its videos uploaded). `adopt`: a retry after a start whose
+ * Sends entry `id` of thread `key` (after its files uploaded). `adopt`: a retry after a start whose
  * answer got lost; herdr refusing an in-place entry's name then means the first start's agent may
  * be coming up under it, so the entry stays unconfirmed (`DispatchError.held`) instead of failing.
  */
@@ -486,14 +496,14 @@ async function run(key: string, id: string, adopt = false): Promise<void> {
   inflight.add(id);
   let release: (() => void) | undefined;
   try {
-    // Videos first: the agent gets their paths on the host with its first prompt.
+    // Uploads first: the agent gets their paths on the host with its first prompt.
     const sending = find(key, id);
-    if (sending?.videos?.some((v) => !v.path)) {
+    if (sending?.uploads?.some((u) => !u.path)) {
       store().patch(key, id, { phase: "uploading", error: undefined });
-      const videos = await uploadedVideos(entryHost(key, sending), sending.videos);
+      const uploads = await uploadedFiles(entryHost(key, sending), sending.uploads);
       // Dismissed while uploading: its uploads went with it.
       if (!find(key, id)) return;
-      store().patch(key, id, { videos });
+      store().patch(key, id, { uploads });
     }
     store().patch(key, id, { phase: "queued", error: undefined });
     release = await slot(key);
@@ -606,15 +616,18 @@ export function suggestDispatchName(hostId: string, repo: string, prompt: string
 /** What a task without text is named after. */
 const IMAGE_TASK = "image task";
 const VIDEO_TASK = "video task";
+const FILE_TASK = "file task";
 
-/** The text a task is named after: a command's task (`commandTask`), else its prompt, else what it carries. */
-function taskText(e: Pick<DispatchEntry, "prompt" | "videos" | "command">): string {
+/** The text a task is named after: a command's task (`commandTask`), else its prompt, else what it carries (a video first). */
+function taskText(e: Pick<DispatchEntry, "prompt" | "uploads" | "command">): string {
   if (e.command) return commandTask(e.command).text;
-  return e.prompt.trim() ? e.prompt : e.videos?.length ? VIDEO_TASK : IMAGE_TASK;
+  if (e.prompt.trim()) return e.prompt;
+  if (!e.uploads?.length) return IMAGE_TASK;
+  return e.uploads.some((u) => u.kind !== "file") ? VIDEO_TASK : FILE_TASK;
 }
 
 /** Its name without AI naming: the slug of the text it is named after; a command without a task: the command's own words (`commandSlug`). */
-function fallbackSlug(e: Pick<DispatchEntry, "prompt" | "videos" | "command">): string {
+function fallbackSlug(e: Pick<DispatchEntry, "prompt" | "uploads" | "command">): string {
   return e.command ? commandSlug(e.command) : baseSlug(taskText(e));
 }
 
@@ -648,8 +661,8 @@ export function dispatchTask(args: {
   repo: string;
   prompt: string;
   images?: readonly DraftImage[];
-  /** Videos attached in the composer (`@/core/draftVideos` ids): uploaded to `hostId`, then sent as reference lines. */
-  videos?: readonly string[];
+  /** Files attached in the composer (`@/core/draftUploads` ids): uploaded to `hostId`, then sent as reference lines. */
+  uploads?: readonly string[];
   base?: string;
   baseLabel?: string;
   placed?: string;
@@ -667,11 +680,11 @@ export function dispatchTask(args: {
   const inPlace = !chat && args.inPlace === true;
   const s = useDispatch.getState();
   const taken = [...args.taken];
-  const videos = (args.videos ?? []).flatMap((upload): DispatchVideo[] => {
-    const v = getVideo(upload);
-    return v ? [{ name: v.name, size: v.size, ...(v.kind ? { kind: v.kind } : {}), ...(v.path && v.hostId === args.hostId ? { path: v.path, ...(v.ref ? { ref: v.ref } : {}) } : { upload }) }] : [];
+  const uploads = (args.uploads ?? []).flatMap((upload): DispatchUpload[] => {
+    const u = getUpload(upload);
+    return u ? [{ name: u.name, size: u.size, ...(u.kind ? { kind: u.kind } : {}), ...(u.path && u.hostId === args.hostId ? { path: u.path, ...(u.ref ? { ref: u.ref } : {}) } : { upload }) }] : [];
   });
-  const named = { prompt: args.prompt, videos, command: args.command?.line };
+  const named = { prompt: args.prompt, uploads, command: args.command?.line };
   const name = uniqueSlug(fallbackSlug(named), reservedNames(args.hostId, taken));
   const suggest =
     args.suggest !== undefined
@@ -693,15 +706,15 @@ export function dispatchTask(args: {
     hostId: args.hostId,
     ...(chat ? {} : { repo: args.repo }),
     ...(images.length ? { images: images.length } : {}),
-    ...(videos.length ? { videos } : {}),
+    ...(uploads.length ? { uploads } : {}),
     ...(args.placed ? { placed: args.placed } : {}),
   };
   void saveEntryImages(entry.id, images);
   // Uploads start now (Auto: on the host just picked), alongside the naming.
-  const uploading = videos.flatMap((v) => (v.upload ? [v.upload] : []));
-  if (uploading.length) uploadDraftVideos(uploading, args.hostId);
+  const uploading = uploads.flatMap((u) => (u.upload ? [u.upload] : []));
+  if (uploading.length) startUploads(uploading, args.hostId);
   // Already uploaded (the composer started them on this host): nothing left to wait for here.
-  releaseVideos((args.videos ?? []).filter((id) => !uploading.includes(id)));
+  releaseUploads((args.uploads ?? []).filter((id) => !uploading.includes(id)));
   s.add(key, entry);
   s.setOptions(args.options);
   const resolveBase = chat || inPlace ? undefined : args.resolveBase;
@@ -801,7 +814,7 @@ export function resumeInterruptedNaming(): void {
 
 /**
  * Startup: interrupted naming goes ahead; uploads cut short by the reload fail (only the page that
- * picked a video can read it); stored images of entries that are gone are dropped.
+ * picked a file can read it); stored images of entries that are gone are dropped.
  */
 function afterHydration(): void {
   resumeInterruptedNaming();
@@ -809,7 +822,7 @@ function afterHydration(): void {
   for (const [k, list] of Object.entries(threads)) {
     for (const e of list) {
       if (e.phase !== "uploading" || inflight.has(e.id)) continue;
-      patch(k, e.id, { phase: "failed", error: { title: "The app reloaded while the videos were uploading", hint: "Dismiss it and send the task again with its videos", kind: "other" } });
+      patch(k, e.id, { phase: "failed", error: { title: "The app reloaded while the files were uploading", hint: "Dismiss it and send the task again with its files", kind: "other" } });
     }
   }
   const live = new Set(Object.values(useDispatch.getState().threads).flatMap((list) => list.filter((e) => e.images).map((e) => e.id)));

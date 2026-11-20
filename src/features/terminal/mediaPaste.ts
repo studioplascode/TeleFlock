@@ -1,11 +1,12 @@
-import { type ImageSource, mediaFiles } from "@/core/clipboardImages";
+import { type TransferSource, transferFiles } from "@/core/clipboardImages";
 
 /*
- * Images and videos pasted, dropped or picked into a terminal reach its pane as their host paths,
- * the way a native terminal pastes a dropped file's path: each file is uploaded to the host
+ * Files pasted, dropped or picked into a terminal reach its pane as their host paths, the way a
+ * native terminal pastes a dropped file's path: each file is uploaded to the host
  * (`@/core/upload`), then the absolute paths go in as one bracketed paste. omp's editor turns a
  * paste made only of image / video paths into attachments (pi-tui `extractImagePastePathsFromText`:
- * `[Image #1]`, a contact sheet for a video); a shell just gets the text.
+ * `[Image #1]`, a contact sheet for a video); any other path (a PDF, a log) stays text in the
+ * prompt, for the agent to read; a shell just gets the text.
  */
 
 const PASTE_START = "\x1b[200~";
@@ -60,14 +61,14 @@ export function isMediaType(type: string): boolean {
 }
 
 /** How the upload indicator names a file: its name, else what it is (a pasted bitmap has none). */
-export function mediaLabel(file: Blob & { name?: string }): string {
-  return file.name || (file.type.startsWith("video/") ? "video" : "image");
+export function fileLabel(file: Blob & { name?: string }): string {
+  return file.name || (file.type.startsWith("video/") ? "video" : file.type.startsWith("image/") ? "image" : "file");
 }
 
-/** The media files of a paste event, when its clipboard holds no text (text pastes as before). */
-export function pastedMedia(data: (ImageSource & Pick<DataTransfer, "getData">) | null | undefined): File[] {
+/** The files of a paste event, when its clipboard holds no text (text pastes as before). */
+export function pastedFiles(data: (TransferSource & Pick<DataTransfer, "getData">) | null | undefined): File[] {
   if (!data || data.getData("text/plain").trim()) return [];
-  return mediaFiles(data);
+  return transferFiles(data);
 }
 
 /** The parts of `ClipboardItem` read here (structural, so tests can pass plain objects). */

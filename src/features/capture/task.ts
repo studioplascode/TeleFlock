@@ -1,4 +1,4 @@
-import type { VideoSource } from "@/core/draftVideos";
+import type { DraftUploadSource } from "@/core/draftUploads";
 
 /*
  * A task that comes in from outside the app's own composers: Android's share sheet (a screenshot,
@@ -17,15 +17,15 @@ export interface TaskImage {
 
 export type TaskSource = "share" | "capture" | "recording";
 
-/** A video the task brings that uploads itself once the task goes out (a browser recording: `attachVideoSource`). */
+/** A video the task brings that uploads itself once the task goes out (a browser recording: `attachUploadSource`). */
 export interface TaskVideo {
   name: string;
   size: number;
   mime: string;
   kind?: "recording";
-  /** `<kind>:<id>` (`DraftVideo.source`). */
+  /** `<kind>:<id>` (`DraftUpload.source`). */
   source: string;
-  video: VideoSource;
+  video: DraftUploadSource;
 }
 
 export interface PrefilledTask {

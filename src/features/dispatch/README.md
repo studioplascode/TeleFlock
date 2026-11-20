@@ -95,10 +95,10 @@ export function resolveAgent(entry, agents, scope: { repo; workspaces }): Agent 
 export function recentFolders(threads, folders, hostId): { root; at }[];  // folders that are no repository root dispatched to on the host, most recent first (the repo chip's "Recent folders")
 ```
 
-Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | dataTransfer)` reads
+Shared helpers used here: `@/core/clipboardImages` (`transferFiles(clipboardData | dataTransfer)` reads
 the files of `items`, else of `files`, never both — WebKitGTK puts pasted screenshots only in `items`, Chromium in both;
-`dragHasFiles`; `attachImages` scales images > 3 MB to ≤ 2560 px and adds them within the caps,
-as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`, `providerQuota`, `explainPick`).
+`splitAttachments` sends PNG/JPEG/GIF/WebP inline and every other file to the host; `dragHasFiles`; `attachImages`
+scales images > 3 MB to ≤ 2560 px and adds them within the caps, as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`, `providerQuota`, `explainPick`).
 
 ## Behaviour
 - Top bar: target chip (more than one host, or any host group): single hosts and every host group
@@ -164,15 +164,19 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   a branch list it can't be told apart, so it counts as untouched too). Auto sends (and a send
   before the branch list is in) resolve the base on the host the task goes to (`resolveBase`): a
   remembered branch that host lacks falls back to its default.
-- Videos: the same attach button (`image/*,video/*`), paste or drop; chips with name, size, upload
-  progress, retry and remove (`@/core/draftVideos`, memory only). A single-host thread uploads each
-  video as soon as it is attached; Auto uploads to the host each task goes to, when it is sent.
-  `dispatchTask({ videos })` stores `videos: { name, size, path?, upload? }[]` on the entry, which
-  waits in `uploading` ("Uploading the video · 45%") before `queued`; the first prompt then carries
-  one `Attached video "<name>" (<size>): <host path> (read it to see it)` line per video (after the
-  task, inside a template's framing). A failed upload fails the entry (Retry uploads it again); a
-  reload mid-upload fails it ("send the task again"); dismissing it drops unsent uploads on the host.
-  A video-only task is named `video-task`.
+- Files (videos, PDFs, text and code, spreadsheets, Office and OpenDocument files, archives, any
+  other file): the same attach button (no `accept`, so Android opens the document picker, not the
+  photo picker), paste or drop; chips with name, size, upload progress, retry and remove
+  (`@/core/draftUploads`, kept across reloads once uploaded). A single-host thread uploads each file
+  as soon as it is attached; Auto uploads to the host each task goes to, when it is sent.
+  `dispatchTask({ uploads })` stores `uploads: { name, size, path?, upload?, kind? }[]` on the entry
+  (store v3 renamed the earlier `videos`), which waits in `uploading` ("Uploading the file · 45%")
+  before `queued`; the first prompt then carries one `Attached video "<name>" (<size>): <host path>
+  (read it to see it)` or `Attached file "<name>" (<size>): <host path> (read it to see its
+  contents)` line per upload (after the task, inside a template's framing). A failed upload fails
+  the entry (Retry uploads it again); a reload mid-upload fails it ("send the task again");
+  dismissing it drops unsent uploads on the host. A task of a video alone is named `video-task`, of
+  other files `file-task`.
 - Images: attach button, paste (clipboard `items`, else `files`) or drop into the composer; thumbnails
   with remove and a lightbox; persisted with the draft (`useDraftImages` on the target + repo draft
   key). At most 8 per task and ~9 MB in total (base64 ≤ 12 MiB, under the relay's 16 MiB message
@@ -276,7 +280,7 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   `/exit`), acts on a running turn (`/queue`) or on omp for every agent (`/logout`, `/reload-plugins`), nor what omp
   shows in its own TUI only (`/usage`, `/settings`, bare `/goal`, `/model roles`) or TeleFlock's controls of a running
   agent (`/stop`, `/terminal`) — the catalog's `notFirst` and modes (`@/core/ompCommands`). A message is a command when
-  what was typed starts with `/` and it carries no images or videos, as in the session composer (a leading space makes
+  what was typed starts with `/` and it carries no images or files, as in the session composer (a leading space makes
   it text; a paste token doesn't count). A line above the text says "Runs /plan in the new agent" (plus that `/plan`,
   `/vibe`, `/goal` or `/guided-goal` picks the mode, so the Plan option is left off, and that a template's text isn't
   added to a command: its model, thinking and plan still apply), or why it can't run (`firstCommand`: unknown, a skill

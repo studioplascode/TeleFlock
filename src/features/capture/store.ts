@@ -19,7 +19,7 @@ export interface AppliedPrefill {
   after: string;
   /** The images it added (by identity). */
   images: DraftImage[];
-  /** The videos it added (`@/core/draftVideos` ids). */
+  /** The videos it added (`@/core/draftUploads` ids). */
   videos?: string[];
   /** Why images were left out (caps), if any. */
   skipped?: string;

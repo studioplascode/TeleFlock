@@ -10,7 +10,26 @@ import type { DemoClock } from "./clock";
 const BYTES_PER_MS = 4 * 1024;
 const MAX_CHUNK = 1024 * 1024;
 const MAX_FILE = 2 * 1024 ** 3;
-const EXT_BY_MIME: Record<string, string> = { "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm", "video/x-matroska": "mkv", "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+/** The types tf-hostd names a file by when its name has no extension (`ops::upload::ext_for_mime`), the common ones. */
+const EXT_BY_MIME: Record<string, string> = {
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/webm": "webm",
+  "video/x-matroska": "mkv",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "application/pdf": "pdf",
+  "text/plain": "txt",
+  "text/markdown": "md",
+  "text/csv": "csv",
+  "application/json": "json",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "application/zip": "zip",
+};
 
 interface Upload {
   size: number;

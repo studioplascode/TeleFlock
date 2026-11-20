@@ -55,7 +55,7 @@ export interface DispatchWorld {
   quotas?: Readonly<Record<string, QuotaReading | null | undefined>>;
 }
 
-/** The composer draft (text, images, videos) of a thread: per target + repo. */
+/** The composer draft (text, images, uploads) of a thread: per target + repo. */
 export function dispatchDraftKey(target: string, repo: string): string {
   return draftKey("dispatch.task", target, repo);
 }
@@ -219,8 +219,8 @@ export interface SendRequest {
   repo: string;
   prompt: string;
   images: readonly DraftImage[];
-  /** Videos attached in the composer (`@/core/draftVideos` ids). */
-  videos?: readonly string[];
+  /** Files attached in the composer (`@/core/draftUploads` ids). */
+  uploads?: readonly string[];
   options: DispatchOptions;
   /** The message is a command its new agent runs (`AgentSpec.command`, hostd ≥ 0.9.1) instead of a prompt; `prompt` is the text as typed. */
   command?: FirstCommand;
@@ -335,7 +335,7 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
   const agents = (w.states[to]?.agents ?? []).map((a) => a.name);
   // A chat or a task in the folder itself has no branch list or base: its name is deduped against the host's agents (and dispatches).
   if (chat || inPlace) {
-    return { ok: true, hostId: to, args: { key, hostId: to, repo: root, prompt: req.prompt, command, images, videos: req.videos, placed, options: req.options, taken: agents, ...(inPlace ? { inPlace } : {}) } };
+    return { ok: true, hostId: to, args: { key, hostId: to, repo: root, prompt: req.prompt, command, images, uploads: req.uploads, placed, options: req.options, taken: agents, ...(inPlace ? { inPlace } : {}) } };
   }
   const stored = w.dispatch.bases[key];
   const legacy = w.dispatch.legacyBases[key] === true;
@@ -351,7 +351,7 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
       prompt: req.prompt,
       command,
       images,
-      videos: req.videos,
+      uploads: req.uploads,
       base: base.param,
       baseLabel: base.shown,
       placed,

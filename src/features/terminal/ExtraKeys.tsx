@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ClipboardPaste, ImagePlus, Lock } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ClipboardPaste, Lock, Paperclip } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef } from "react";
 import { cn, spring } from "@/design";
 import { haptic } from "@/features/shell/haptics";
@@ -50,8 +50,8 @@ export interface ExtraKeysProps {
   onKey(key: ExtraKey): void;
   onSetMod(mod: keyof ModState, latch: ModLatch): void;
   onPaste(): void;
-  /** Opens the image / video picker (the file is uploaded and its host path pasted). */
-  onPickMedia(): void;
+  /** Opens the file picker (the file is uploaded and its host path pasted). */
+  onPickFiles(): void;
   className?: string;
 }
 
@@ -64,7 +64,7 @@ const keyCls =
  * and paging auto-repeat while held; Ctrl/Alt latch for the next key, and lock with a double tap or
  * a long press.
  */
-export function ExtraKeys({ mods, onKey, onSetMod, onPaste, onPickMedia, className }: ExtraKeysProps) {
+export function ExtraKeys({ mods, onKey, onSetMod, onPaste, onPickFiles, className }: ExtraKeysProps) {
   // `repeated` marks a hold that already auto-repeated, so the trailing click doesn't send once more.
   const repeat = useRef<{ delay?: number; every?: number; repeated?: boolean }>({});
   const lastModTap = useRef<{ mod: keyof ModState; at: number } | null>(null);
@@ -250,17 +250,17 @@ export function ExtraKeys({ mods, onKey, onSetMod, onPaste, onPickMedia, classNa
         <motion.button
           type="button"
           tabIndex={-1}
-          aria-label="Paste an image or video"
-          title="Paste an image or video: uploads it and pastes its path on the host"
+          aria-label="Paste a file"
+          title="Paste a file: uploads it and pastes its path on the host"
           whileTap={{ scale: 0.88 }}
           transition={spring.press}
           className={cn(keyCls, "text-mute")}
           onClick={() => {
-            onPickMedia();
+            onPickFiles();
             haptic("tick");
           }}
         >
-          <ImagePlus />
+          <Paperclip />
         </motion.button>
       </div>
     </div>

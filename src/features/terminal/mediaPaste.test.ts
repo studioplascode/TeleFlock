@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type ClipItem, pastePathsInput, pastedMedia, pasteTextInput, pathsText, quotePath, readClipItems, readClipboard } from "./mediaPaste";
+import { type ClipItem, pastedFiles, pastePathsInput, pasteTextInput, pathsText, quotePath, readClipItems, readClipboard } from "./mediaPaste";
 
 describe("quotePath", () => {
   test("leaves plain paths bare", () => {
@@ -37,7 +37,7 @@ describe("pasteTextInput", () => {
   });
 });
 
-describe("pastedMedia", () => {
+describe("pastedFiles", () => {
   const png = new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
   const mp4 = new File([new Uint8Array([4])], "clip.mp4", { type: "video/mp4" });
   const pdf = new File([new Uint8Array([5])], "doc.pdf", { type: "application/pdf" });
@@ -47,15 +47,14 @@ describe("pastedMedia", () => {
     items: files.map((f) => ({ kind: "file", type: f.type, getAsFile: () => f })),
   });
 
-  test("images and videos when the clipboard has no text", () => {
-    expect(pastedMedia(clipboard("", [png, mp4, pdf])).map((f) => f.name)).toEqual(["shot.png", "clip.mp4"]);
-    expect(pastedMedia(clipboard(" \n", [png])).map((f) => f.name)).toEqual(["shot.png"]);
+  test("every file when the clipboard has no text", () => {
+    expect(pastedFiles(clipboard("", [png, mp4, pdf])).map((f) => f.name)).toEqual(["shot.png", "clip.mp4", "doc.pdf"]);
+    expect(pastedFiles(clipboard(" \n", [png])).map((f) => f.name)).toEqual(["shot.png"]);
   });
 
   test("text on the clipboard keeps the text paste", () => {
-    expect(pastedMedia(clipboard("ls -la", [png]))).toEqual([]);
-    expect(pastedMedia(clipboard("", [pdf]))).toEqual([]);
-    expect(pastedMedia(null)).toEqual([]);
+    expect(pastedFiles(clipboard("ls -la", [png, pdf]))).toEqual([]);
+    expect(pastedFiles(null)).toEqual([]);
   });
 });
 

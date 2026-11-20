@@ -76,7 +76,7 @@ const busy = new Set<string>();
 let reportedBusy = false;
 
 /**
- * Work a restart would lose started or ended (`what`: e.g. `"videos"`, an upload in flight).
+ * Work a restart would lose started or ended (`what`: e.g. `"uploads"`, files going to a host).
  * Desktop app: while any goes on, the shell's updater doesn't restart the app by itself
  * (`drafts_busy`, `src-tauri/src/drafts.rs`).
  */

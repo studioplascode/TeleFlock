@@ -2,7 +2,7 @@ import { motion } from "motion/react";
 import { Check, FolderOpen, GitBranch, ImageOff, Play, RotateCcw, Server, ShieldCheck, SquareTerminal, X } from "lucide-react";
 import { createContext, memo, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 import { type AgentView, agentKey, navigate, useAgent, useCore, useResuming } from "@/core";
-import { type DraftVideo, useVideoUploads } from "@/core/draftVideos";
+import { type DraftUpload, useUploads } from "@/core/draftUploads";
 import type { Column } from "@/core/gen";
 import { AgentGlyph, Elapsed, Lightbox, LightboxTrigger, Shimmer, StatusPill, type Status, cn, formatAge, spring, useNow } from "@/design";
 import { canReview, openAgent, openTerminal, resumeParked } from "@/features/board/agentActions";
@@ -16,9 +16,9 @@ import { ACTIONS, agentStateWord, isFresh } from "@/features/shell/vocab";
 import { Ticks } from "@/features/shell/Ticks";
 import { AiMark } from "@/features/workspace/shared/ai";
 import { tildify } from "@/features/workspace/shared/paths";
-import { VideoChips } from "@/features/session/composer/VideoChips";
+import { UploadChips } from "@/features/session/composer/UploadChips";
 import { useEntryImages } from "./images";
-import { type DispatchEntry, type DispatchVideo, entryHost, entryRepo, inWorktree, isInFlight, useDispatch } from "./store";
+import { type DispatchEntry, type DispatchUpload, entryHost, entryRepo, inWorktree, isInFlight, useDispatch } from "./store";
 import { APPEAR_GRACE_MS, START_TIMEOUT_MS } from "./thread";
 
 /** Thread-wide handlers and facts the items need (kept out of props so items stay memoised). */
@@ -45,7 +45,7 @@ const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeri
 /** Launch steps after the request leaves the composer. */
 type Step = "naming" | "uploading" | "queued" | "creating" | "starting";
 
-const STEP_LABEL: Record<Step, string> = { naming: "Naming the branch", uploading: "Uploading videos", queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
+const STEP_LABEL: Record<Step, string> = { naming: "Naming the branch", uploading: "Uploading files", queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
 /** In place: no branch or worktree; its host opens a workspace in the folder and starts it there. */
 const IN_PLACE_STEP_LABEL: Record<Step, string> = { ...STEP_LABEL, naming: "Naming the agent", creating: "Opening the folder" };
 /** A chat's steps: no branch or worktree; its host makes its folder and starts it. */
@@ -109,7 +109,7 @@ function optionsSummary(e: DispatchEntry): string {
 }
 
 /**
- * One dispatch: the message (images, videos, text) as a user bubble, then the agent's live reply card.
+ * One dispatch: the message (images, files, text) as a user bubble, then the agent's live reply card.
  * `index` (its place in the thread) is what moves it: it measures its layout only when that changes.
  */
 export const DispatchItem = memo(function DispatchItem({ entry, agentId, index }: { entry: DispatchEntry; agentId?: string; index: number }) {
@@ -124,7 +124,7 @@ export const DispatchItem = memo(function DispatchItem({ entry, agentId, index }
           <span className="font-semibold tabular">{(today ? timeFmt : dayFmt).format(entry.createdAt)}</span>
         </div>
         {!!entry.images && <EntryImages id={entry.id} count={entry.images} mobile={ctx.mobile} />}
-        {!!entry.videos?.length && <EntryVideos videos={entry.videos} mobile={ctx.mobile} />}
+        {!!entry.uploads?.length && <EntryUploads uploads={entry.uploads} mobile={ctx.mobile} />}
         {entry.prompt.trim() && (
           <div
             className={cn(
@@ -186,41 +186,41 @@ function EntryImages({ id, count, mobile }: { id: string; count: number; mobile:
   );
 }
 
-/** The uploads of `videos` still running in this page. */
-function useEntryUploads(videos: readonly DispatchVideo[]): DraftVideo[] {
-  const ids = useMemo(() => videos.flatMap((v) => (v.upload && !v.path ? [v.upload] : [])), [videos]);
-  return useVideoUploads(ids);
+/** The uploads of `uploads` still running in this page. */
+function useEntryUploads(uploads: readonly DispatchUpload[]): DraftUpload[] {
+  const ids = useMemo(() => uploads.flatMap((u) => (u.upload && !u.path ? [u.upload] : [])), [uploads]);
+  return useUploads(ids);
 }
 
-/** The videos sent with a task, as chips: their upload's progress while it runs, else uploaded (or not). */
-function EntryVideos({ videos, mobile }: { videos: readonly DispatchVideo[]; mobile: boolean }) {
-  const live = useEntryUploads(videos);
-  const shown = videos.map(
-    (v, i): DraftVideo =>
-      live.find((u) => u.id === v.upload) ?? {
-        id: v.upload ?? `sent-${i}`,
-        name: v.name,
-        size: v.size,
+/** The files sent with a task, as chips: their upload's progress while it runs, else uploaded (or not). */
+function EntryUploads({ uploads, mobile }: { uploads: readonly DispatchUpload[]; mobile: boolean }) {
+  const live = useEntryUploads(uploads);
+  const shown = uploads.map(
+    (u, i): DraftUpload =>
+      live.find((l) => l.id === u.upload) ?? {
+        id: u.upload ?? `sent-${i}`,
+        name: u.name,
+        size: u.size,
         mime: "",
         hostId: null,
-        phase: v.path ? "done" : "failed",
-        sent: v.path ? v.size : 0,
-        ...(v.path ? { path: v.path } : { error: "Not uploaded" }),
-        ...(v.kind ? { kind: v.kind } : {}),
+        phase: u.path ? "done" : "failed",
+        sent: u.path ? u.size : 0,
+        ...(u.path ? { path: u.path } : { error: "Not uploaded" }),
+        ...(u.kind ? { kind: u.kind } : {}),
       },
   );
-  return <VideoChips videos={shown} mobile={mobile} className="max-w-[min(720px,88%)] justify-end" />;
+  return <UploadChips uploads={shown} mobile={mobile} className="max-w-[min(720px,88%)] justify-end" />;
 }
 
-/** A task's videos on their way to the host: one bar for all of them. */
-function Uploading({ videos }: { videos: readonly DispatchVideo[] }) {
-  const live = useEntryUploads(videos);
-  const total = live.reduce((n, v) => n + v.size, 0);
-  const pct = total ? Math.floor((live.reduce((n, v) => n + v.sent, 0) / total) * 100) : 0;
+/** A task's files on their way to the host: one bar for all of them. */
+function Uploading({ uploads }: { uploads: readonly DispatchUpload[] }) {
+  const live = useEntryUploads(uploads);
+  const total = live.reduce((n, u) => n + u.size, 0);
+  const pct = total ? Math.floor((live.reduce((n, u) => n + u.sent, 0) / total) * 100) : 0;
   return (
     <div className="mt-2 flex items-center gap-3" role="status">
       <Shimmer className="text-xs font-semibold">
-        {live.length > 1 ? `Uploading ${live.length} videos` : "Uploading the video"} · {pct}%
+        {live.length > 1 ? `Uploading ${live.length} files` : live[0]?.kind === "file" ? "Uploading the file" : "Uploading the video"} · {pct}%
       </Shimmer>
       <span className="relative ml-auto h-1.5 w-20 overflow-hidden rounded-full bg-ink/10" aria-hidden>
         <span className="absolute inset-y-0 left-0 bg-accent transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
@@ -427,7 +427,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
   }
 
   if (shown.k === "step") {
-    if (shown.step === "uploading") return <Uploading videos={entry.videos ?? []} />;
+    if (shown.step === "uploading") return <Uploading uploads={entry.uploads ?? []} />;
     return <Progress step={shown.step} labels={entry.chat ? CHAT_STEP_LABEL : entry.inPlace ? IN_PLACE_STEP_LABEL : STEP_LABEL} />;
   }
 

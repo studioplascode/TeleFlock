@@ -118,16 +118,27 @@ const [images, setImages, clearImages] = useDraftImages(key);                   
   them (an added image lands after them, a clear stays a clear); nothing is written before that.
   Edit with updaters (`setImages(cur => …)`, remove by identity), not lists built from a stale render.
   At open, entries older than 30 days and all but the newest 40 are swept.
-- Videos (`draftVideos.ts`, through `upload.ts`): in memory, with each draft's list written through
-  to IndexedDB `tf.draftVideos`/`videos` (`hydrateDraftVideos`, on first `useDraftVideos(key)`): an
-  uploaded video comes back as it was, one cut off mid-upload as failed ("attach it again": the
-  browser reads a picked file only while that page lives; switching agents or views keeps the upload going). `attachVideos(key, hostId
-  | null, files)` (≤ 4 per prompt, ≤ 2 GiB each, video mime or extension) starts the upload at once
-  when the host is known, one upload per host at a time; `uploadDraftVideos(ids, hostId)` starts
-  waiting ones (Dispatch Auto), `whenUploaded(ids)` resolves with `{name, size, path}` once all are
-  up (rejects `upload_failed`), `withVideoRefs(text, refs)` appends one `Attached video "<name>"
-  (<size>): <host path> (read it to see it)` line each. Removing a chip (`removeDraftVideo`) drops
-  the upload on the host, finished or not; a sent one is `detachDraftVideos` + `releaseVideos`.
+- What a file attaches as (`clipboardImages.ts`): `transferFiles(clipboardData | dataTransfer)`
+  takes every file of a paste or drop (`items`, else `files`; dropped folders left out), and
+  `splitAttachments(files)` sends PNG, JPEG, GIF and WebP inline as images (the formats omp hands
+  models; one without a type, as Android providers and some drops hand them over, by its
+  extension) and everything else to the host as an upload: videos (`isVideoFile`: `video/*`, or a
+  video extension without a type; a `.ts` source typed `video/mp2t` is no video), PDFs, text and
+  code, spreadsheets, Office and OpenDocument files, archives, other images (SVG, HEIC…).
+- Uploads (`draftUploads.ts`, through `upload.ts`): in memory, with each draft's list written
+  through to IndexedDB `tf.draftVideos`/`videos` (the names from when only videos uploaded;
+  `hydrateDraftUploads`, on first `useDraftUploads(key)`): an uploaded file comes back as it was,
+  one cut off mid-upload as failed ("attach it again": the browser reads a picked file only while
+  that page lives; switching agents or views keeps the upload going). `attachUploads(key, hostId |
+  null, files)` (≤ `MAX_DRAFT_UPLOADS` (8) per prompt, ≤ 2 GiB each, the same file once; a video
+  stays a video, any other file is `kind: "file"`) starts the upload at once when the host is
+  known, one upload per host at a time; `startUploads(ids, hostId)` starts waiting ones (Dispatch
+  Auto), `whenUploaded(ids)` resolves with `{name, size, path, kind}` once all are up (rejects
+  `upload_failed`), `withUploadRefs(text, refs)` appends one line each: `Attached video "<name>"
+  (<size>): <host path> (read it to see it)` or `Attached file "<name>" (<size>): <host path> (read
+  it to see its contents)`. Removing a chip (`removeDraftUpload`) drops the upload on the host,
+  finished or not; a sent one is `detachDraftUploads` + `releaseUploads`. A browser recording
+  attaches with a source that uploads itself (`attachUploadSource`, `registerUploadSource`).
   `uploadFile(hostId, file, {onProgress, signal, mime})` → `{path, size, sha256, uploadId}` is the
   reusable uploader (terminal pastes use it too; architecture §3.13).
 - Answers: `answerDraftKey(agentKey, requestId, field)` (`"other"` is shared by the ask card, board

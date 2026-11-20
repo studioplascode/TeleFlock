@@ -1,9 +1,10 @@
 import { type CoreError, toApiError } from "@/core/errors";
 import { MAX_UPLOAD_BYTES, type UploadOptions, type UploadedFile, formatBytes, uploadFile } from "@/core/upload";
-import { mediaLabel } from "./mediaPaste";
+import { fileLabel } from "./mediaPaste";
 
-type Media = Blob & { name?: string };
-type Upload = (hostId: string, file: Media, opts: UploadOptions) => Promise<UploadedFile>;
+/** A picked or dropped file, or a pasted bitmap (no name). */
+type Pasted = Blob & { name?: string };
+type Upload = (hostId: string, file: Pasted, opts: UploadOptions) => Promise<UploadedFile>;
 
 /** What the terminal's upload indicator shows: every running batch summed. */
 export interface UploadProgress {
@@ -53,17 +54,17 @@ export class TermUploads {
   };
   readonly progress = (): UploadProgress | null => this.view;
 
-  async run(hostId: string, files: readonly Media[]): Promise<BatchResult> {
+  async run(hostId: string, files: readonly Pasted[]): Promise<BatchResult> {
     const result: BatchResult = { paths: [], cancelled: false, skipped: [] };
     const todo = files.filter((f) => {
       const reason = f.size === 0 ? "The file is empty." : f.size > MAX_UPLOAD_BYTES ? `It is ${formatBytes(f.size)}; the host takes up to ${formatBytes(MAX_UPLOAD_BYTES)}.` : null;
-      if (reason) result.skipped.push({ name: mediaLabel(f), reason });
+      if (reason) result.skipped.push({ name: fileLabel(f), reason });
       return !reason;
     });
     const [first] = todo;
     if (!first) return result;
     const batch: Batch = {
-      label: todo.length === 1 ? mediaLabel(first) : `${todo.length} files`,
+      label: todo.length === 1 ? fileLabel(first) : `${todo.length} files`,
       files: todo.length,
       sent: 0,
       total: todo.reduce((n, f) => n + f.size, 0),
@@ -89,7 +90,7 @@ export class TermUploads {
     } catch (e) {
       const error = toApiError(e);
       if (error.code === "cancelled" || batch.ctrl.signal.aborted) result.cancelled = true;
-      else result.failed = { name: mediaLabel(current), error };
+      else result.failed = { name: fileLabel(current), error };
     } finally {
       this.batches.delete(batch);
       this.publish();

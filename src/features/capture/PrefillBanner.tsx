@@ -1,7 +1,7 @@
 import { MonitorPlay, Share2, X, Zap } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { type AgentView, useCore, useDraft, useDraftImages } from "@/core";
-import { useDraftVideos } from "@/core/draftVideos";
+import { useDraftUploads } from "@/core/draftUploads";
 import { AgentGlyph, Button, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, IconButton, cn } from "@/design";
 import { dispatchDraftKey } from "@/features/dispatch/send";
 import { ACTIONS, agentStateWord, LANE_ORDER } from "@/features/shell/vocab";
@@ -27,7 +27,7 @@ export function PrefillBanner({ target, repo, mobile }: { target: string | undef
   // Draft hooks need a key; "" is a draft nobody writes.
   const [text] = useDraft(key ?? "");
   const [images] = useDraftImages(key ?? "");
-  const videos = useDraftVideos(key ?? "");
+  const uploads = useDraftUploads(key ?? "");
   const [picking, setPicking] = useState(false);
 
   // A task that came in before any repo was picked lands in the first thread picked.
@@ -36,7 +36,7 @@ export function PrefillBanner({ target, repo, mobile }: { target: string | undef
   }, [waiting, target, repo]);
 
   const mine = !!applied && applied.key === key;
-  const holds = text.trim() !== "" || images.length > 0 || videos.some((v) => applied?.videos?.includes(v.id));
+  const holds = text.trim() !== "" || images.length > 0 || uploads.some((u) => applied?.videos?.includes(u.id));
   // Sent (or cleared) from the composer: nothing left to say.
   useEffect(() => {
     if (mine && !holds) dismissPrefill();

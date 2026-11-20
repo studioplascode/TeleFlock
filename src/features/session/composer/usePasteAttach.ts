@@ -114,7 +114,7 @@ export interface PasteAttach {
   remove(n: number): void;
   /** Takes out the markers of a paste this device no longer has. */
   removeMissing(n: number): void;
-  /** Text pastes: true when it was taken (the composer does nothing more). Images and videos go first. */
+  /** Text pastes: true when it was taken (the composer does nothing more). Pasted files go first. */
   onPaste(e: ClipboardEvent<HTMLTextAreaElement>): boolean;
   /** The textarea's new value (`onChange`): tokens a stray edit cut into are repaired. Sets the draft; returns the text and caret that stand. */
   change(next: string, caret: number, composing?: boolean): { text: string; caret: number };

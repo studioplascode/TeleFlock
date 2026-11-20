@@ -487,8 +487,9 @@ fn unique_path(dir: &Path, file_name: &str, reserved: impl Fn(&Path) -> bool) ->
 /// The file name an upload gets: the client's name (its last path component) reduced to letters,
 /// digits, `-`, `_` and `.` (anything else becomes `-`), without leading or trailing dots and
 /// dashes (no hidden files, nothing a command line reads as an option), at most 64 characters before
-/// the extension. The extension is kept, lowercased (omp's read tool tells videos by it), or taken
-/// from `mime` when the name has none. Windows device names (`CON`, `COM1`, …) get `-file`.
+/// the extension. The extension is kept, lowercased (omp's read tool tells videos and documents by
+/// it), or taken from `mime` when the name has none. Windows device names (`CON`, `COM1`, …) get
+/// `-file`.
 pub fn sanitize(name: &str, mime: Option<&str>) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
     let (stem, ext) = match base.rsplit_once('.') {
@@ -531,7 +532,8 @@ fn is_windows_device(stem: &str) -> bool {
     }
 }
 
-/// Extension for a name without one.
+/// Extension for a name without one (an Android provider's display name often has none: a Drive
+/// document is "Meeting notes", `application/pdf`).
 fn ext_for_mime(mime: &str) -> Option<&'static str> {
     let essence = mime.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
     Some(match essence.as_str() {
@@ -548,6 +550,30 @@ fn ext_for_mime(mime: &str) -> Option<&'static str> {
         "image/jpeg" => "jpg",
         "image/gif" => "gif",
         "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "text/tab-separated-values" => "tsv",
+        "text/html" => "html",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        "application/rtf" | "text/rtf" => "rtf",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.oasis.opendocument.text" => "odt",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        "application/vnd.oasis.opendocument.presentation" => "odp",
+        "application/epub+zip" => "epub",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        "application/x-tar" => "tar",
+        "application/x-7z-compressed" => "7z",
+        "application/vnd.rar" | "application/x-rar-compressed" => "rar",
         _ => return None,
     })
 }
@@ -671,6 +697,10 @@ mod tests {
             ("name.with.dots.MOV", None, "name.with.dots.mov"),
             ("weird.ext-with-dash", Some("video/mp4"), "weird.ext-with-dash.mp4"),
             ("spaces   and\ttabs .webm", None, "spaces-and-tabs.webm"),
+            ("Meeting notes", Some("application/pdf"), "Meeting-notes.pdf"),
+            ("Budget", Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), "Budget.xlsx"),
+            ("", Some("application/zip"), "upload.zip"),
+            ("README", Some("application/octet-stream"), "README"),
         ];
         for (name, mime, want) in cases {
             assert_eq!(sanitize(name, mime), want, "{name:?}");

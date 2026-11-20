@@ -4,10 +4,10 @@ import { core } from "./client";
 import { apiError, toApiError } from "./errors";
 
 /*
- * Files sent to a host in chunks (`upload.*`, architecture §3.12): videos for prompts, images
- * pasted into a terminal. The host keeps them under `<hostd home>/uploads/<day>/<name>` and answers
- * the absolute path; the caller hands that path to the agent as text (it reads the file with its
- * own tools).
+ * Files sent to a host in chunks (`upload.*`, architecture §3.13): videos and documents for
+ * prompts, files pasted into a terminal. The host keeps them under
+ * `<hostd home>/uploads/<day>/<name>` and answers the absolute path; the caller hands that path to
+ * the agent as text (it reads the file with its own tools).
  *
  * One chunk per request, one request at a time (the host refuses chunks out of order). The chunk
  * size follows the link: about 3 s of data per chunk, 64 KiB to 1 MiB, halved after a timeout, so

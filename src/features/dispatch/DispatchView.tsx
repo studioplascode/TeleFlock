@@ -202,12 +202,12 @@ export function DispatchView() {
   const repoName = chat ? CHAT_CHOICE : repo ? ((auto ? autoRepo?.name : recents.find((r) => r.root === repo)?.name) ?? basename(repo)) : null;
 
   const composer = useRef<DispatchComposerHandle>(null);
-  const send = (prompt: string, images: readonly DraftImage[], videos: readonly string[], command?: FirstCommand): boolean => {
+  const send = (prompt: string, images: readonly DraftImage[], uploads: readonly string[], command?: FirstCommand): boolean => {
     if (!target || !repo || !key) return false;
     // The view's branch list is the single host's (Auto's is the preview host's, the stand-in base).
     const sent = sendTask(
       { profiles, status, states, dispatch: useDispatch.getState(), quotas },
-      { target, repo, prompt, images, videos, command, options, branches: auto ? undefined : branches.data, baseHint: base },
+      { target, repo, prompt, images, uploads, command, options, branches: auto ? undefined : branches.data, baseHint: base },
     );
     if (!sent.ok) toast({ title: sent.title, description: sent.description, status: "error" });
     return sent.ok;
@@ -444,9 +444,9 @@ export function DispatchView() {
       disabledReason={disabledReason}
       placeholder={
         chat
-          ? "Ask anything: each message starts a new chat (/ for commands; paste or drop images and videos)"
+          ? "Ask anything: each message starts a new chat (/ for commands; paste or drop images and files)"
           : repo
-            ? `Describe a task for ${repoName}${inPlace ? " (no worktree)" : ""}… (/ for commands; paste or drop images and videos)`
+            ? `Describe a task for ${repoName}${inPlace ? " (no worktree)" : ""}… (/ for commands; paste or drop images and files)`
             : "Pick a repository to dispatch to"
       }
       mobile={mobile}

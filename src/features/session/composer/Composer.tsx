@@ -2,8 +2,8 @@ import { ArrowUp, AtSign, CornerDownRight, FileText, ListPlus, Lock, Mic, MicOff
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useCore, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
-import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, isVideoFile, MAX_PROMPT_IMAGE_CHARS, mediaFiles } from "@/core/clipboardImages";
-import { attachVideos, detachDraftVideos, releaseVideos, removeDraftVideo, retryVideos, uploadDraftVideos, useDraftVideos, type VideoRef, whenUploaded, withVideoRefs } from "@/core/draftVideos";
+import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, MAX_PROMPT_IMAGE_CHARS, splitAttachments, transferFiles } from "@/core/clipboardImages";
+import { attachUploads, detachDraftUploads, releaseUploads, removeDraftUpload, retryUploads, startUploads, type UploadRef, useDraftUploads, whenUploaded, withUploadRefs } from "@/core/draftUploads";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import { useHerdrDown, useHostName } from "@/features/hosts/HerdrControls";
 import { herdrNotRunning } from "@/features/hosts/herdrHealth";
@@ -26,7 +26,7 @@ import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { PasteChips, PasteMenu } from "./PasteChips";
 import { usePasteAttach } from "./usePasteAttach";
 import { useUndoHistory } from "./useUndoHistory";
-import { VideoChips } from "./VideoChips";
+import { UploadChips } from "./UploadChips";
 
 /**
  * First-use caption while the agent works (mounted only then, so idle sessions don't use up its
@@ -101,7 +101,7 @@ const MENTION_RE = /(^|\s)@([^\s@]*)$/;
 /**
  * Composer: Enter sends (steer while the agent works, prompt when idle), Alt+Enter queues a
  * follow-up, Esc stops. `/` opens the command palette, `@` searches files in the agent's cwd,
- * images paste/drop in as attachments, and so do videos (uploaded to the host as files the agent reads).
+ * images paste/drop in as attachments, and so does any other file (uploaded to the host, the agent reads it there).
  * Ctrl+Z / Ctrl+Shift+Z undo and redo every edit of the text, the app's own included (`useUndoHistory`).
  */
 export function Composer({ agentKey, mobile = false, className, autoFocus = false }: ComposerProps) {
@@ -112,8 +112,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const draftKey = composerDraftKey(agentKey);
   const [text, setText] = useDraft(draftKey);
   const [images, setImages] = useDraftImages(draftKey);
-  // Videos upload to the host as soon as they are attached (kept in memory, not across restarts).
-  const videos = useDraftVideos(draftKey);
+  // Other files (videos, documents) upload to the host as soon as they are attached.
+  const uploads = useDraftUploads(draftKey);
   const focusNonce = useSessionUi((s) => s.composerFocus[agentKey]);
   const [popup, setPopup] = useState<Popup | null>(null);
   /** Attachment open in the lightbox. */
@@ -121,7 +121,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const [sel, setSel] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [sending, run] = usePending();
-  /** A send waiting for its videos to finish uploading. */
+  /** A send waiting for its files to finish uploading. */
   const [waitingUploads, setWaitingUploads] = useState(false);
   const uploadWait = useRef(false);
   const ta = useRef<HTMLTextAreaElement>(null);
@@ -143,12 +143,12 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const working = agent?.column === "running" || agent?.live.streaming === true || agent?.live.tool != null;
   const queue = meta?.queue ?? agent?.omp?.queue;
   const cwd = meta?.cwd ?? agent?.cwd;
-  /** The latest render's agent state, for a send that waited for its videos. */
+  /** The latest render's agent state, for a send that waited for its uploads. */
   const live = useRef({ working, caps });
   live.current = { working, caps };
   // omp's quick commands (`!ls`, `!!git status`, `$ print(1)`), judged on what was typed as slash
   // commands are, never with attachments: they run in the session and go to the model only as output.
-  const quick = images.length === 0 && videos.length === 0 ? quickCommand(text) : null;
+  const quick = images.length === 0 && uploads.length === 0 ? quickCommand(text) : null;
   const quickBlocked = quick ? quickUnavailable(caps) : null;
   const [altHeld, setAltHeld] = useState(false);
 
@@ -317,7 +317,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   };
 
   const send = async (followUp: boolean) => {
-    if (!text.trim() && images.length === 0 && videos.length === 0) return;
+    if (!text.trim() && images.length === 0 && uploads.length === 0) return;
     // Paste tokens become their text (or `<attachment>` block) first, as omp's editor does on submit.
     const prepared = await paste.prepare(text);
     if (!prepared.ok) {
@@ -329,7 +329,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     // A leading space escapes a slash: " /path is a file" goes to the model as text. A command is judged on
     // what was typed (paste tokens still unexpanded), so a pasted log or path that starts with "/" is text.
     const escaped = text.startsWith(" /");
-    if (isSlashDraft(text) && images.length === 0 && videos.length === 0) {
+    if (isSlashDraft(text) && images.length === 0 && uploads.length === 0) {
       const okRun = await run(runSlash(slashCtx, body));
       if (okRun) {
         setText("");
@@ -369,33 +369,33 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       toast({ title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.`, status: "error" });
       return;
     }
-    // A send already waits for its videos: another one would send them twice.
+    // A send already waits for its uploads: another one would send them twice.
     if (uploadWait.current) {
-      toast({ title: "Sending once the videos are uploaded", status: "idle", duration: 2600 });
+      toast({ title: "Sending once the files are uploaded", status: "idle", duration: 2600 });
       return;
     }
     const typed = escaped ? full.slice(1) : body;
-    // Videos go as one line each with their path on the host, once uploaded (the agent reads them).
-    const sentVideos = videos.map((v) => v.id);
-    let refs: VideoRef[] = [];
-    if (sentVideos.length) {
+    // Uploads go as one line each with their path on the host, once uploaded (the agent reads them).
+    const sentUploads = uploads.map((u) => u.id);
+    let refs: UploadRef[] = [];
+    if (sentUploads.length) {
       uploadWait.current = true;
       setWaitingUploads(true);
       try {
         // A recording waits for the send before it leaves the device.
-        uploadDraftVideos(sentVideos, hostId);
-        refs = await whenUploaded(sentVideos);
+        startUploads(sentUploads, hostId);
+        refs = await whenUploaded(sentUploads);
       } catch (e) {
         const { title, hint } = errorText(e);
-        toast({ title: "Video not uploaded", description: hint ? `${title} — ${hint}` : title, status: "error" });
+        toast({ title: "File not uploaded", description: hint ? `${title} — ${hint}` : title, status: "error" });
         return;
       } finally {
         uploadWait.current = false;
         setWaitingUploads(false);
       }
     }
-    const prompt = withVideoRefs(typed, refs);
-    // Every video was removed while the send waited, and nothing else was in it.
+    const prompt = withUploadRefs(typed, refs);
+    // Every upload was removed while the send waited, and nothing else was in it.
     if (!prompt.trim() && images.length === 0) return;
     // Read after the wait: the agent may have started or ended a turn meanwhile.
     const at = live.current;
@@ -419,8 +419,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       takeSent();
       setImages((cur) => cur.filter((i) => !sentImages.includes(i)));
       // Sent: off the draft, their files stay on the host for the agent.
-      detachDraftVideos(draftKey, sentVideos);
-      releaseVideos(sentVideos);
+      detachDraftUploads(draftKey, sentUploads);
+      releaseUploads(sentUploads);
       paste.sent(prepared.carried);
       setPopup(null);
       if (delivery === "followUp") steerDone.current?.();
@@ -430,18 +430,16 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const abort = () => void run(hostCall(hostId, "agent.abort", { agentId }, { failure: "Stop failed" }));
 
   const addFiles = async (files: Iterable<File>) => {
-    const all = [...files];
-    const vids = all.filter(isVideoFile);
-    if (vids.length > 0) {
-      const { added, skipped } = attachVideos(draftKey, hostId, vids);
-      if (skipped) toast({ title: added ? "Some videos were left out" : "Video not attached", description: skipped, status: "error" });
+    const split = splitAttachments(files);
+    if (split.uploads.length > 0) {
+      const { added, skipped } = attachUploads(draftKey, hostId, split.uploads);
+      if (skipped) toast({ title: added ? "Some files were left out" : "File not attached", description: skipped, status: "error" });
     }
-    const imgs = all.filter((f) => f.type.startsWith("image/"));
-    if (imgs.length === 0) return;
+    if (split.images.length === 0) return;
     try {
       // Very large images (a Linux screenshot paste) are scaled down; the total stays under the
       // relay's message limit.
-      const { added, skipped } = await attachImages(draftKey, imgs);
+      const { added, skipped } = await attachImages(draftKey, split.images);
       if (skipped) toast({ title: added ? "Some images were left out" : "Image not attached", description: skipped, status: "error" });
     } catch (e) {
       toast({ title: "Couldn't attach image", description: e instanceof Error ? e.message : String(e), status: "error" });
@@ -490,7 +488,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     }
     if (e.key === "Enter" && !e.shiftKey && !mobile) {
       // Empty composer + pending ask: let Enter bubble so the ask card sends its selection.
-      if (ui && !text.trim() && images.length === 0 && videos.length === 0) return;
+      if (ui && !text.trim() && images.length === 0 && uploads.length === 0) return;
       e.preventDefault();
       void send(e.altKey);
     } else if (e.key === "Enter" && mobile && (e.ctrlKey || e.metaKey)) {
@@ -501,7 +499,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     // `items` too: WebKitGTK (Linux) lists pasted screenshots only there.
-    const files = mediaFiles(e.clipboardData);
+    const files = transferFiles(e.clipboardData);
     if (files.length > 0) {
       e.preventDefault();
       void addFiles(files);
@@ -510,13 +508,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const onDrop = (e: DragEvent) => {
     setDragging(false);
-    // Any file: never let the webview navigate to it; images and videos are attached.
+    // Any file: never let the webview navigate to it; every file is attached.
     if (dragHasFiles(e.dataTransfer) || e.dataTransfer.files.length > 0) e.preventDefault();
-    const files = mediaFiles(e.dataTransfer);
+    const files = transferFiles(e.dataTransfer);
     if (files.length > 0) void addFiles(files);
   };
 
-  const hasContent = text.trim() !== "" || images.length > 0 || videos.length > 0;
+  const hasContent = text.trim() !== "" || images.length > 0 || uploads.length > 0;
   // Phone, nothing typed: one row (text + attach/mic/stop) so the transcript keeps the height;
   // the first character expands to the full toolbar with send.
   const inline = mobile && !hasContent && !dictation.listening && !dictation.error;
@@ -641,14 +639,14 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
             ))}
           </div>
         )}
-        <VideoChips
-          videos={videos}
-          onRemove={(id) => removeDraftVideo(draftKey, id)}
-          onRetry={(id) => retryVideos([id])}
+        <UploadChips
+          uploads={uploads}
+          onRemove={(id) => removeDraftUpload(draftKey, id)}
+          onRetry={(id) => retryUploads([id])}
           mobile={mobile}
           className={cn("px-3 pb-1", images.length > 0 ? "pt-1" : "pt-3")}
         />
-        <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-1", images.length > 0 || videos.length > 0 ? "pt-1" : "pt-3")} />
+        <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-1", images.length > 0 || uploads.length > 0 ? "pt-1" : "pt-3")} />
         <Lightbox
           images={images.map((img, i) => ({ src: img.preview, alt: `attachment ${i + 1}` }))}
           index={viewing !== null && viewing < images.length ? viewing : null}
@@ -697,10 +695,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           className={cn("text-[14px]", mobile && "min-h-[1lh] text-[15px]", inline && "min-w-[30%] flex-1 overflow-hidden whitespace-nowrap")}
           footer={
             <>
+              {/* No `accept`: any file attaches. On Android a list of image and video types opens the photo picker, which offers nothing else. */}
               <input
                 ref={fileInput}
                 type="file"
-                accept="image/*,video/*"
                 multiple
                 hidden
                 onChange={(e) => {
@@ -708,7 +706,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   e.target.value = "";
                 }}
               />
-              <IconButton label="Attach images or videos" size={mobile ? "md" : "sm"} onClick={() => fileInput.current?.click()} disabled={!!disabledReason}>
+              <IconButton label="Attach files" size={mobile ? "md" : "sm"} onClick={() => fileInput.current?.click()} disabled={!!disabledReason}>
                 <Paperclip />
               </IconButton>
               {dictation.supported && (
@@ -791,7 +789,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   <IconButton
                     label={
                       waitingUploads
-                        ? "Sending once the videos are uploaded"
+                        ? "Sending once the files are uploaded"
                         : followMode
                           ? "Queue follow-up (Alt+Enter)"
                           : `${quick ? (quick.python ? "Run Python" : "Run command") : working ? "Steer" : "Send"}${mobile ? "" : " (Enter)"}`
@@ -809,7 +807,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           }
         />
         {dragging && (
-          <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-[22px] bg-accent/10 text-sm font-bold text-accent-ink backdrop-blur-[2px]">Drop images or videos to attach</div>
+          <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-[22px] bg-accent/10 text-sm font-bold text-accent-ink backdrop-blur-[2px]">Drop files to attach</div>
         )}
       </GlowBorder>
     </div>
