@@ -235,6 +235,7 @@ import type { UploadProgress } from "./UploadProgress";
 import type { UploadRef } from "./UploadRef";
 import type { UsageParams } from "./UsageParams";
 import type { UsageReport } from "./UsageReport";
+import type { UseAccountParams } from "./UseAccountParams";
 import type { WorkspaceCloseParams } from "./WorkspaceCloseParams";
 import type { WorkspaceCreateParams } from "./WorkspaceCreateParams";
 import type { WorkspaceRef } from "./WorkspaceRef";
@@ -296,6 +297,7 @@ export interface HostMethods {
   "agent.retry": { params: RetryParams; result: RetryResult };
   "agent.autoResumeNow": { params: AgentRef; result: RetryResult };
   "agent.autoResumeCancel": { params: AgentRef; result: Empty };
+  "agent.useAccount": { params: UseAccountParams; result: RetryResult };
   "agent.refusalRetry": { params: RefusalRetryParams; result: RetryResult };
   "agent.setAutoAnswer": { params: SetAutoAnswerParams; result: Empty };
   "agent.autoAnswerCancel": { params: AutoAnswerRef; result: Empty };

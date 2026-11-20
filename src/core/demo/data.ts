@@ -13,6 +13,8 @@ export const MODELS: (ModelInfo & { label: string; inPerM: number; outPerM: numb
   { provider: "openai", id: "gpt-5.5", label: "gpt-5.5", thinking: ["minimal", "low", "medium", "high", "xhigh"], contextWindow: 400_000, inPerM: 2.5, outPerM: 15 },
   { provider: "openai-codex", id: "gpt-6-luna", label: "luna", thinking: ["low", "medium", "high"], contextWindow: 272_000, inPerM: 0.4, outPerM: 1.6 },
   { provider: "google", id: "gemini-3-pro", label: "gemini-3-pro", thinking: ["low", "high"], contextWindow: 1_000_000, inPerM: 2, outPerM: 12 },
+  // Served to some organizations only (the demo's model access: `./resume`, `./limits`).
+  { provider: "anthropic", id: "claude-mythos-5-2", label: "mythos-5-2", thinking: ["off", "low", "medium", "high", "xhigh", "max"], contextWindow: 200_000, inPerM: 25, outPerM: 125 },
 ];
 
 export const ROLES: RoleBinding[] = [

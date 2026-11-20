@@ -5,7 +5,7 @@
  * time passes. Readings come the way hostd sends them: every minute for the last hour, older ones
  * evenly spaced over the period. Deterministic per host id and clock time.
  */
-import type { AccountLimits, Agent, LimitAccount, LimitSample, LimitWindow } from "../gen";
+import type { AccountLimits, Agent, LimitAccount, LimitSample, LimitWindow, ModelAccess } from "../gen";
 import { hash } from "./rng";
 
 const MIN = 60_000;
@@ -45,6 +45,8 @@ interface AccountSpec {
   windows: WindowSpec[];
   resetsAvailable?: number;
   work: Work;
+  /** What the agents' requests showed about models on it (hostd's model access, §3.22), `ago` ms before now. */
+  models?: { model: string; denied: boolean; ago: number }[];
 }
 
 /** Time the account's agents worked from epoch 0 to `t`. */
@@ -117,8 +119,9 @@ function codex(rate5: number, rate7: number, phase: number, off: number): Window
 function specs(hostId: string): AccountSpec[] {
   const off = offset(hostId);
   return [
-    { provider: "anthropic", label: "you@flock.dev", plan: "Max 20x", windows: claude(0.24, 0.0062, 0.0025, 2 * HOUR, off), resetsAvailable: 1, work: AROUND_THE_CLOCK },
-    { provider: "anthropic", label: "team@acme.io", org: "Acme", plan: "Team", windows: claude(0.4, 0.012, 0, 4 * HOUR, off), work: { every: 6 * HOUR, on: HOUR, shift: off } },
+    // Claude Mythos runs on your Max account; the team seat's organization has no access to it.
+    { provider: "anthropic", label: "you@flock.dev", plan: "Max 20x", windows: claude(0.24, 0.0062, 0.0025, 2 * HOUR, off), resetsAvailable: 1, work: AROUND_THE_CLOCK, models: [{ model: "claude-mythos-5-2", denied: false, ago: 6 * MIN }] },
+    { provider: "anthropic", label: "team@acme.io", org: "Acme", plan: "Team", windows: claude(0.4, 0.012, 0, 4 * HOUR, off), work: { every: 6 * HOUR, on: HOUR, shift: off }, models: [{ model: "claude-mythos-5-2", denied: true, ago: 2 * HOUR }] },
     { provider: "openai-codex", label: "you@flock.dev", plan: "pro", windows: codex(0.22, 0.0025, 4.5 * HOUR, off), work: AROUND_THE_CLOCK },
   ];
 }
@@ -139,6 +142,7 @@ function report(s: AccountSpec, now: number): LimitAccount {
     resetsAvailable: s.resetsAvailable,
     notes: [],
     disabled: false,
+    models: s.models?.map((m): ModelAccess => ({ model: m.model, denied: m.denied, at: now - m.ago })),
   };
 }
 

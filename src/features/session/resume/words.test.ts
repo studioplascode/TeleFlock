@@ -150,4 +150,21 @@ describe("resume words", () => {
   test("/retry in the composer is the native retry", () => {
     expect(findCommand("retry")?.modeFor("")).toBe("native");
   });
+
+  test("model access: a refused model, the accounts left out, a move, and the user's pin with its offer", () => {
+    const mythos = { provider: "anthropic", model: "claude-mythos-5-2" };
+    // Waiting on a limit with an account that has no access left out of the count.
+    const waiting = stripWords(ticket({ ...mythos, noAccess: ["team@example.test"] }), NOW, UTC);
+    expect(waiting.detail).toContain("Not counted, no access to claude-mythos-5-2: team@example.test");
+    // A refused model, moved to an account that serves it.
+    const moved = ticket({ ...mythos, kind: kind("providerError"), refusedModel: true, noAccess: ["team@example.test"], movedTo: "dev@example.test", resumeAt: NOW + 60_000 });
+    expect(stripWords(moved, NOW, UTC).text.startsWith("No model access · resumes")).toBe(true);
+    expect(stripWords(moved, NOW, UTC).detail).toContain("Moved to dev@example.test: team@example.test has no access to claude-mythos-5-2");
+    expect(badgeText(moved, NOW, UTC).startsWith("No access · ")).toBe(true);
+    // The user's own pin refuses it: it waits, offering the account that serves it.
+    const held = ticket({ ...mythos, status: "manual", kind: kind("providerError"), refusedModel: true, reason: "team@example.test (your pin) has no access to claude-mythos-5-2", userPin: "team@example.test", offer: { key: "anthropic|email:dev@example.test", label: "dev@example.test" } });
+    expect(stripWords(held, NOW, UTC).text).toBe("Won't resume by itself — team@example.test (your pin) has no access to claude-mythos-5-2");
+    expect(ticketActions(held)?.use).toEqual({ key: "anthropic|email:dev@example.test", label: "Use dev@example.test for this session", hint: expect.stringContaining("serves claude-mythos-5-2") });
+    expect(ticketActions(ticket())?.use).toBeUndefined();
+  });
 });

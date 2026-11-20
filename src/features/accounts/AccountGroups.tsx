@@ -29,6 +29,7 @@ import {
   useNow,
 } from "@/design";
 import { formatPlan, paceAlert, paceStatus, tierLabel, windowLabel } from "@/features/usage/limitsUi";
+import { ModelAccessLines } from "@/features/usage/ModelAccessLines";
 import { describeError } from "@/features/workspace/shared/errors";
 import { ExpiredLogin } from "./ExpiredLogin";
 import { ProviderMark } from "./ProviderMark";
@@ -228,6 +229,7 @@ function AccountRow({ account, index, providerName, host, hostId, lastOne, singl
               ))}
             </div>
           )}
+          <ModelAccessLines models={account.models} />
         </div>
         {canPrefer && (
           <Tooltip content={account.preferred ? "Stop preferring it (omp picks by remaining quota)" : (account.preferBlocked ?? "Prefer for new sessions: omp tries it first")}>

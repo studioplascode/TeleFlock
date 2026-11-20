@@ -1,9 +1,9 @@
-import { Hand, Hourglass, PowerOff, RotateCw, TimerOff, X } from "lucide-react";
+import { ArrowRightLeft, Hand, Hourglass, PowerOff, RotateCw, TimerOff, X } from "lucide-react";
 import { useAgent } from "@/core";
 import type { AgentEnded, AutoResume } from "@/core/gen";
 import { Button, cn, Tooltip, useNow } from "@/design";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
-import { cancelAutoResume, resumeNow, useResumePending } from "./actions";
+import { cancelAutoResume, resumeNow, useAccount, useResumePending } from "./actions";
 import { endedWords, stripWords, ticketTickMs } from "./words";
 
 const BASE = "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 rounded-md px-2.5 py-1.5 text-xs";
@@ -53,7 +53,13 @@ function Strip({ agentKey, ar, ended, mobile }: { agentKey: string; ar: AutoResu
         </span>
       </Tooltip>
       {a && (
-        <span className="ml-auto flex shrink-0 items-center gap-1">
+        // Capped at the strip's width, so on a phone a third button (the account offer) wraps to its own row instead of running off the screen.
+        <span className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-1">
+          {a.use && (
+            <Button size="sm" variant="primary" icon={<ArrowRightLeft />} loading={pending} title={a.use.hint} onClick={() => void useAccount(agentKey, a.use as { key: string; label: string })}>
+              {a.use.label}
+            </Button>
+          )}
           <Button size="sm" variant="secondary" icon={<RotateCw />} loading={pending} title={a.resumeHint} onClick={() => void resumeNow(agentKey)}>
             {a.resume}
           </Button>

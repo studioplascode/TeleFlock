@@ -12,6 +12,9 @@ const KINDS: Record<string, { word: string; short: string; usage?: true }> = {
   providerError: { word: "Provider error", short: "Provider error" },
 };
 const STOPPED = { word: "Stopped", short: "Stopped" };
+/** The provider refused the model on the account omp used (no access to it): not a limit (§3.22 "Model access"). */
+const NO_ACCESS = { word: "No model access", short: "No access", usage: true as const };
+const kindOf = (ar: AutoResume) => (ar.refusedModel ? NO_ACCESS : (KINDS[ar.kind] ?? STOPPED));
 
 /**
  * An agent's omp ended without anyone closing it (herdr stopped or crashed, a reboot, omp crashed): an
@@ -64,6 +67,8 @@ export interface TicketActions {
   /** One line each: what the action does (tooltips, menu second lines). */
   resumeHint: string;
   cancelHint: string;
+  /** The session is pinned by the user to an account that refuses its model: "Use <account> for this session" (`agent.useAccount`). */
+  use?: { key: string; label: string; hint: string };
 }
 
 /** Null while it resumes. A restart ticket continues (an ended card is brought back first); a limit resumes. */
@@ -84,9 +89,12 @@ export function ticketActions(ar: AutoResume, o: TicketOptions = {}): TicketActi
       : { resume, cancel: "Don't auto-continue", dismiss: false, resumeHint, cancelHint: "It stays stopped until you continue it" };
   }
   const resumeHint = ACTIONS.resumeNow.description;
+  const use = ar.offer
+    ? { key: ar.offer.key, label: `Use ${ar.offer.label} for this session`, hint: `Pin this session to ${ar.offer.label}${ar.model ? `, which serves ${ar.model}` : ""}, and resume (omp's /session pin)` }
+    : undefined;
   return manual
-    ? { resume: ACTIONS.resumeNow.label, cancel: ACTIONS.dismissAutoResume.label, dismiss: true, resumeHint, cancelHint: ACTIONS.dismissAutoResume.description }
-    : { resume: ACTIONS.resumeNow.label, cancel: ACTIONS.noAutoResume.label, dismiss: false, resumeHint, cancelHint: ACTIONS.noAutoResume.description };
+    ? { resume: ACTIONS.resumeNow.label, cancel: ACTIONS.dismissAutoResume.label, dismiss: true, resumeHint, cancelHint: ACTIONS.dismissAutoResume.description, use }
+    : { resume: ACTIONS.resumeNow.label, cancel: ACTIONS.noAutoResume.label, dismiss: false, resumeHint, cancelHint: ACTIONS.noAutoResume.description, use };
 }
 
 const BASIS: Record<string, string> = {
@@ -140,12 +148,12 @@ export function endedWords(e: AgentEnded, now: number, o: ClockOptions & { herdr
 }
 
 function limitText(ar: AutoResume, now: number, o: ClockOptions): string {
-  const kind = KINDS[ar.kind] ?? STOPPED;
+  const kind = kindOf(ar);
   switch (ar.status) {
     case "waiting":
       return ar.resumeAt != null ? `${kind.word} · ${ar.basis === "backoff" ? "checks again" : "resumes"} ${formatResumeAt(ar.resumeAt, now, o)}` : kind.word;
     case "checking":
-      return KINDS[ar.kind]?.usage ? "Checking usage…" : "Checking…";
+      return (kind as { usage?: boolean }).usage ? "Checking usage…" : "Checking…";
     case "resuming":
       return "Resuming…";
     default:
@@ -167,8 +175,11 @@ export function stripWords(ar: AutoResume, now: number, o: TicketOptions = {}): 
   if (!ended) detail.push(`${ar.root ? "Stopped" : "Subagents stopped"} ${formatClock(ar.since, now, o)}`);
   const basis = ar.status === "waiting" && ar.basis && !restart ? BASIS[ar.basis] : undefined;
   if (basis) detail.push(basis);
-  // Accounts the provider refused the model on: hostd left their room and resets out (§3.22 "Model access").
-  if (ar.noAccess?.length) detail.push(`Not counted, no access to ${ar.model ?? "the model"}: ${ar.noAccess.join(", ")}`);
+  // Accounts the provider refused the model on: hostd left their room and resets out, and moved the
+  // session off one of them unless the user pinned it there (§3.22 "Model access").
+  const without = `no access to ${ar.model ?? "the model"}`;
+  if (ar.movedTo) detail.push(`Moved to ${ar.movedTo}${ar.noAccess?.length ? `: ${ar.noAccess.join(", ")} ${ar.noAccess.length === 1 ? "has" : "have"} ${without}` : ""}`);
+  else if (ar.noAccess?.length) detail.push(`Not counted, ${without}: ${ar.noAccess.join(", ")}`);
   const tone = ar.status === "manual" ? "manual" : ar.status === "waiting" ? "wait" : "busy";
   return { text: parts.join(" · "), detail, tone, actions: ticketActions(ar, o) };
 }
@@ -184,7 +195,7 @@ export function badgeText(ar: AutoResume, now: number, o: TicketOptions = {}): s
     if (ar.status === "resuming") return o.ended ? "coming back…" : "Continuing…";
     return o.ended ? "coming back" : "Continuing soon";
   }
-  const kind = KINDS[ar.kind] ?? STOPPED;
+  const kind = kindOf(ar);
   switch (ar.status) {
     case "waiting":
       return ar.resumeAt != null ? `${kind.short} · ${formatResumeAt(ar.resumeAt, now, o)}` : kind.short;

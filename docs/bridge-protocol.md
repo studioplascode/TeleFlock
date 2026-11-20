@@ -585,6 +585,22 @@ omp's completion probe (`task/completion-probe.ts`) asks a running subagent how 
 - **Off.** No question while omp's `task.completionProbe` is off, nor without `welcome.caps.progress`.
 - **To hostd.** `CtlState.progress?: {pct: number, stage?: string, at: number, since: number}` in `hello.state` and `state` events: `at` when the agent answered, `since` the run's `agent_start` (epoch ms on the omp host); absent before the first answer and after the run ends. hostd exposes it as `OmpInfo.progress` while the board's turn runs (docs/architecture.md §4) and drops it when the turn ends, a background wait nobody resumed ends, or the bridge goes away.
 
+## Bridge 2.7.0
+
+TeleFlock 0.9.6. hostd keeps serving 2.6.0 and older bridges: it moves a session only where `caps.pinAccount` says so, and learns the refusing account from the transcript where `turn_error` has no `credentialId`; a session keeps the bridge its omp process loaded, so a session started before the update is not moved until the agent restarts (Mark done, then Resume).
+
+### Pin an account (`caps.pinAccount`)
+
+An account can have usage left and no access to a model (Anthropic answers with a 404 `not_found_error` "model: …"; architecture §3.22 "Model access"). hostd moves a session off such an account through omp's own `/session pin`.
+
+|op|params|result|Mechanism|hostd timeout|
+|---|---|---|---|---|
+|`pinAccount`|`credentialId` (omp's stored credential, `auth_credentials.id`); `agentId`: a subagent (its own session, from omp's agent registry, revived with `ensureLive` if parked; needs `caps.subagentCtl`), else the main session|`{provider, label}`|The main AgentSession's `pinCurrentProviderOAuthAccount(credentialId)` (omp ≥ 18.20, what `/session pin` runs): an explicit pin omp's ranking, reserve and reclaim never move, saved with the session (`credential_pin`), taken by a revived subagent; omp still skips it while it is blocked. Refused with `busy` while the session streams, `invalid_params` for an API key ("omp pins signed-in accounts only") or a credential that is no signed-in account of the provider of the session's model (`listCurrentProviderOAuthAccounts`), `unavailable` when omp does not pin it. `label`: omp's label of the account.|10 s|
+
+- **Flag.** `caps.pinAccount`: the main session has `pinCurrentProviderOAuthAccount` and `listCurrentProviderOAuthAccounts`.
+- **`turn_error`** (no flag): `credentialId|null`, the stored credential omp wrote on the failed message.
+- **Tests:** `bun test host/teleflock-bridge/pin.test.ts` (the pin, and each refusal with its reason).
+
 ## TUI mechanics (why some ops need the TUI)
 
 - **Composer submit.** TUI-only commands (`/plan`, `/goal`, `/fork`, `/handoff`, `/export`, `/fast`, `/queue`, `slash`) run through the main composer's own Enter handler (`editor.onSubmit(text)`), exactly as if the operator typed them. No herdr keystroke injection is involved.

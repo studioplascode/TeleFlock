@@ -133,9 +133,15 @@ pub struct PersistData {
     pub originals: HashMap<String, BTreeMap<String, Vec<Option<String>>>>,
     /// Which account serves which model, as omp's requests showed it (`crate::model_access`).
     pub model_access: crate::model_access::Book,
-    /// When this host first saw each omp session (root session id → ms): evidence of model access
-    /// from before then was written on another host (`crate::model_access`).
-    pub model_access_arrivals: BTreeMap<String, tf_proto::Millis>,
+    /// Where each omp session's transcripts stood when this host first saw it or last imported it
+    /// (root session id → boundary): earlier lines may be another host's (`crate::model_access`).
+    pub model_access_imports: BTreeMap<String, crate::model_access::Boundary>,
+    /// The accounts TeleFlock pinned sessions to (root session id → pin): omp records them as
+    /// explicit, like the user's own `/session pin`, which TeleFlock never replaces.
+    pub model_access_pins: BTreeMap<String, crate::model_access::OwnPin>,
+    /// Where the model-access scan of each omp session's own file stands (root session id →
+    /// cursor), so a restart does not read long transcripts from the start again.
+    pub model_access_scans: BTreeMap<String, crate::model_access::Cursor>,
 }
 
 impl UsageLedger {

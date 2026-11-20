@@ -379,6 +379,15 @@ async fn run(ctx: &Arc<Ctx>, job: &Arc<Job>, src: &MoveCheck, plan: &Plan, undo:
     let (file, placed) = unpack(&plan.session_archive, &agent_cwd).await?;
     undo.push(Undo::RemoveSession { file: file.clone() });
     journal(undo)?;
+    // Its transcripts were written on another host up to here, and credential ids name other
+    // accounts there: a fresh boundary for model access (§3.22), also over an older local copy.
+    let imported = std::path::PathBuf::from(&file);
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(id) = crate::model_access::session_of_file(&imported) {
+            crate::model_access::mark(&id, &imported, true);
+        }
+    })
+    .await;
     if placed == ompcli::Placed::Forked {
         job.note("This host had another copy of this session that went its own way: the moved one continues as a fork of it.".into());
     }

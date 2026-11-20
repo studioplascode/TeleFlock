@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { projectWindow } from "@/core/limits";
 import type { LimitWindow } from "@/core/gen";
-import { expiredLogin, formatPlan, formatSpanShort, paceAlert, paceStatus, tierLabel, windowLabel } from "./limitsUi";
+import { expiredLogin, formatPlan, formatSpanShort, modelAccessLines, paceAlert, paceStatus, tierLabel, windowLabel } from "./limitsUi";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -127,3 +127,16 @@ describe("expiredLogin", () => {
     expect(expiredLogin("Claude", undefined)).toEqual({ ...stopped, detail: undefined });
   });
 });
+
+describe("modelAccessLines", () => {
+  test("a refusal first, then what the account serves, newest first; nothing known: no lines", () => {
+    const lines = modelAccessLines([
+      { model: "claude-opus-5", denied: false, at: NOW - HOUR },
+      { model: "claude-mythos-5-2", denied: true, at: NOW - DAY },
+      { model: "claude-sonnet-5", denied: false, at: NOW - MIN },
+    ]);
+    expect(lines.map((l) => l.text)).toEqual(["No access to claude-mythos-5-2", "Serves claude-sonnet-5", "Serves claude-opus-5"]);
+    expect(modelAccessLines(undefined)).toEqual([]);
+  });
+});
+

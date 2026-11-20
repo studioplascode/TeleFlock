@@ -7,4 +7,13 @@ export type LimitSession = { sessionId: string, provider: string,
 /**
  * `LimitAccount.key`; absent when omp hasn't pinned the session to an account yet.
  */
-accountKey?: string, };
+accountKey?: string, 
+/**
+ * The pin is explicit (`/session pin`, or an account TeleFlock moved the session to): omp's
+ * ranking never moves it. Absent from older daemons.
+ */
+explicit?: boolean, 
+/**
+ * omp's stored credential the session is pinned to (an id of this host's omp).
+ */
+credentialId?: number, };

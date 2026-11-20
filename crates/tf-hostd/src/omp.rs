@@ -687,8 +687,6 @@ impl OmpSession {
         if st.first_prompt.is_none() {
             st.first_prompt = first_prompt_in(&update.events);
         }
-        // Which account served which model (§3.22 "Model access").
-        crate::model_access::note(&self.session_id, st.replica.take_credentials());
         changed_usage(st)
     }
 
@@ -2098,8 +2096,9 @@ const ARTIFACTS_LOCATE_EVERY: Duration = Duration::from_secs(10);
 /// Tails the session's artifacts dir (subagent and advisor transcripts, which collab never
 /// mirrors) into the replica's spend and throughput. See [`crate::artifacts`].
 async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
-    // (omp session id the ledger belongs to, artifacts dir, ledger)
-    let mut tail: Option<(String, std::path::PathBuf, tf_collab::ArtifactLedger)> = None;
+    // (omp session id the ledger belongs to, session file, artifacts dir, ledger, the session file's
+    // own tail for model access)
+    let mut tail: Option<(String, std::path::PathBuf, std::path::PathBuf, tf_collab::ArtifactLedger, crate::model_access::MainScan)> = None;
     let mut next_locate = Instant::now();
     let mut last_growth: Option<Instant> = None;
     let mut was_replaying = false;
@@ -2118,7 +2117,7 @@ async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
             return;
         }
         let Some(inner) = weak.upgrade() else { return };
-        if tail.as_ref().is_some_and(|(id, _, _)| *id != sid) {
+        if tail.as_ref().is_some_and(|(id, ..)| *id != sid) {
             tail = None;
         }
         if tail.is_none() {
@@ -2138,20 +2137,46 @@ async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
                 }
             };
             debug!(session = %sid, file = %file.display(), "artifact scan: session file");
-            tail = Some((sid.clone(), crate::artifacts::artifacts_dir(&file), tf_collab::ArtifactLedger::default()));
+            // What the transcripts hold now may have been written on another host (§3.22 "Model
+            // access"): the first sight of a session sets its boundary.
+            let (id, f) = (sid.clone(), file.clone());
+            let Ok(main) = tokio::task::spawn_blocking(move || {
+                crate::model_access::mark(&id, &f, false);
+                crate::model_access::MainScan::open(&id, &f)
+            })
+            .await
+            else {
+                continue;
+            };
+            tail = Some((sid.clone(), file.clone(), crate::artifacts::artifacts_dir(&file), tf_collab::ArtifactLedger::default(), main));
         }
-        let Some((id, dir, mut ledger)) = tail.take() else { continue };
+        let Some((id, file, dir, mut ledger, mut main)) = tail.take() else { continue };
         let scanned = tokio::task::spawn_blocking(move || {
             let (calls, presented) = crate::artifacts::scan_live(&dir, &mut ledger);
             let uses = ledger.take_credentials();
             (dir, ledger, calls, presented, uses)
         })
         .await;
+        // The session's own file, for model access: one session catches up at a time, in chunks.
+        let turn = crate::model_access::scan_turn().await;
+        let sid_of = id.clone();
+        let own = tokio::task::spawn_blocking(move || {
+            let (uses, more) = main.read(&file);
+            main.save(&sid_of);
+            (file, main, uses, more)
+        })
+        .await;
+        drop(turn);
+        let Ok((file, main, own_uses, more)) = own else { continue };
+        if more {
+            last_growth = Some(Instant::now());
+        }
         let (calls, presented) = match scanned {
-            Ok((dir, ledger, calls, presented, uses)) => {
-                // Subagents and advisors make provider requests too (§3.22 "Model access").
+            Ok((dir, ledger, calls, presented, mut uses)) => {
+                // Which account served which model, the session's and its subagents' (§3.22 "Model access").
+                uses.extend(own_uses);
                 crate::model_access::note(&id, uses);
-                tail = Some((id, dir, ledger));
+                tail = Some((id, file, dir, ledger, main));
                 (calls, presented)
             }
             Err(e) => {
@@ -2164,7 +2189,7 @@ async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
             let signals = presented.into_iter().map(|artifact| Signal::Presented { artifact }).collect();
             let _ = inner.updates.send(OmpUpdate::Signals { session_id: session.session_id.clone(), signals });
         }
-        let Some((_, _, ledger)) = tail.as_ref() else { continue };
+        let Some((_, _, _, ledger, _)) = tail.as_ref() else { continue };
         let now = now_ms();
         let (changed, replaying, usage) = {
             let mut st = session.lock();

@@ -49,7 +49,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tf_collab::CredentialUse;
+use tf_collab::{CredentialUse, TranscriptTail};
 use tf_proto::{Millis, ModelAccess};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -212,13 +212,36 @@ fn fingerprint(row: &CredRow) -> Option<String> {
 /// One noted request; `local`: its credential id is this host's (it happened here).
 type Noted = (CredentialUse, bool);
 
-/// What of `uses` (requests of a session this host first saw at `arrived`) can be learned: what
-/// happened since by its credential id, earlier requests only by their account's fingerprint.
-fn admissible(uses: Vec<CredentialUse>, arrived: Millis) -> Vec<Noted> {
-    uses.into_iter().filter(|u| u.at >= arrived || u.account.is_some()).map(|u| {
-        let local = u.at >= arrived;
-        (u, local)
-    }).collect()
+/// Where a session's transcripts stood when this host took them as they were: when it first saw
+/// the session, and again at every import (a move here, a re-import that replaced an older local
+/// copy). Lines up to there may have been written by another host's omp; what omp appends after
+/// them is this host's. Positions, not times: clocks differ between hosts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Boundary {
+    /// When it was set, by this host's clock: an imported request never counts as newer.
+    pub at: Millis,
+    /// Transcript (`""`: the session's own file; else relative to its artifacts folder) → its
+    /// length then. A transcript not listed was not there: all of it is this host's.
+    pub files: BTreeMap<String, u64>,
+}
+
+/// What of `uses` (requests of a session whose transcripts stood at `boundary`) can be learned:
+/// lines written after it by their credential id; earlier ones (and all of a session with no
+/// boundary) only by their account's fingerprint, dated no later than the boundary.
+fn admissible(uses: Vec<CredentialUse>, boundary: Option<&Boundary>) -> Vec<Noted> {
+    uses.into_iter()
+        .filter_map(|mut u| {
+            let local = boundary.is_some_and(|b| b.files.get(&u.file).is_none_or(|len| u.end > *len));
+            if !local {
+                u.account.as_ref()?;
+                if let Some(b) = boundary {
+                    u.at = u.at.min(b.at);
+                }
+            }
+            Some((u, local))
+        })
+        .collect()
 }
 
 /// The stored credential a noted request was on: by its account's fingerprint when omp recorded one
@@ -301,15 +324,183 @@ pub fn init(persist: Arc<Persist>, cancel: CancellationToken) {
 }
 
 /// Requests of omp session `session_id` (its root session; assistant messages that name their
-/// credential): what this host may learn of them ([`admissible`]) is folded in shortly.
+/// credential, with where they are in its transcripts): what this host may learn of them
+/// ([`admissible`], against the session's [`Boundary`]) is folded in shortly.
 pub fn note(session_id: &str, uses: Vec<CredentialUse>) {
     let Some(persist) = PERSIST.get().filter(|_| !uses.is_empty()) else { return };
+    let boundary = persist.read(|d| d.model_access_imports.get(session_id).cloned());
+    push(admissible(uses, boundary.as_ref()));
+}
+
+/// Sets the [`Boundary`] of omp session `session_id`, whose file is `session_file`, to where its
+/// transcripts stand now: at an import (`fresh`: a move here, a re-import over an older local copy),
+/// or when this host first sees the session (only when it has none). Blocking I/O.
+pub fn mark(session_id: &str, session_file: &Path, fresh: bool) {
+    let Some(persist) = PERSIST.get() else { return };
+    if !fresh && persist.read(|d| d.model_access_imports.contains_key(session_id)) {
+        return;
+    }
+    let mut files: BTreeMap<String, u64> = crate::artifacts::transcript_lengths(&crate::artifacts::artifacts_dir(session_file)).into_iter().collect();
+    files.insert(String::new(), std::fs::metadata(session_file).map_or(0, |m| m.len()));
+    let boundary = Boundary { at: now_ms(), files };
+    persist.update(|d| {
+        if fresh || !d.model_access_imports.contains_key(session_id) {
+            d.model_access_imports.insert(session_id.to_owned(), boundary);
+        }
+    });
+    if fresh {
+        info!(session = session_id, "model access: imported session; its earlier lines count by fingerprint only");
+    }
+}
+
+/// The omp session id of a session file omp named `<time>_<session id>.jsonl`.
+pub fn session_of_file(file: &Path) -> Option<String> {
+    let stem = file.file_stem()?.to_str()?;
+    stem.rsplit_once('_').map(|(_, id)| id.to_owned()).filter(|id| !id.is_empty())
+}
+
+/// Bytes of a session file read per artifact-scan tick: a long transcript is caught up over several
+/// ticks, never in one go.
+const SCAN_BUDGET: u64 = 32 << 20;
+/// The read buffer (one per session file scan, reused).
+const CHUNK: usize = 256 << 10;
+/// A scan's cursor is saved once it moved this far, or this long after it moved.
+const CURSOR_STEP: u64 = 1 << 20;
+const CURSOR_EVERY: Duration = Duration::from_secs(60);
+/// One session file catches up at a time (after a restart every live session starts one).
+static SCANS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| tokio::sync::Semaphore::new(1));
+
+/// Where the scan of a session file stands (`state.json` `modelAccessScans`): a line boundary, and
+/// the file it belongs to (a replaced file is read again from the start).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Cursor {
+    pub offset: u64,
+    /// The file's device and inode (Unix): another file at the same path starts over.
+    pub id: Option<(u64, u64)>,
+    /// When it was saved, by this host's clock.
+    pub at: Millis,
+}
+
+fn file_id(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// The model-access scan of one session's own file: its requests, read in chunks into one buffer
+/// with a bounded line carry ([`TranscriptTail`]), a budget per tick, and a cursor kept across
+/// restarts so a long transcript is not read from the start again.
+pub struct MainScan {
+    tail: TranscriptTail,
+    buf: Vec<u8>,
+    id: Option<(u64, u64)>,
+    saved: u64,
+    saved_at: Instant,
+}
+
+impl MainScan {
+    /// Goes on where the last scan of omp session `session_id`'s file `file` stopped, when it is still
+    /// that file and no shorter than then; else from the start. Blocking I/O.
+    pub fn open(session_id: &str, file: &Path) -> MainScan {
+        let meta = std::fs::metadata(file).ok();
+        let id = meta.as_ref().and_then(file_id);
+        let len = meta.as_ref().map_or(0, std::fs::Metadata::len);
+        let cursor = PERSIST.get().and_then(|p| p.read(|d| d.model_access_scans.get(session_id).cloned()));
+        let offset = cursor.filter(|c| c.offset <= len && (c.id.is_none() || c.id == id)).map_or(0, |c| c.offset);
+        MainScan { tail: TranscriptTail::resume_at(offset), buf: vec![0; CHUNK], id, saved: offset, saved_at: Instant::now() }
+    }
+
+    /// The requests omp appended to `file` since the last read, at most [`SCAN_BUDGET`] bytes of
+    /// them; and whether more is waiting. A file that shrank or was replaced is read again from the
+    /// start. Blocking I/O.
+    pub fn read(&mut self, file: &Path) -> (Vec<CredentialUse>, bool) {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut f) = std::fs::File::open(file) else { return (vec![], false) };
+        let Ok(meta) = f.metadata() else { return (vec![], false) };
+        let id = file_id(&meta);
+        if meta.len() < self.tail.offset() || (self.id.is_some() && id != self.id) {
+            self.tail = TranscriptTail::resume_at(0);
+            (self.id, self.saved) = (id, 0);
+        }
+        if f.seek(SeekFrom::Start(self.tail.offset())).is_err() {
+            return (vec![], false);
+        }
+        let mut read = 0u64;
+        while read < SCAN_BUDGET {
+            match f.read(&mut self.buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    self.tail.ingest("", &self.buf[..n]);
+                    read += n as u64;
+                }
+            }
+        }
+        (self.tail.take(), self.tail.offset() < meta.len())
+    }
+
+    /// Saves the cursor of omp session `session_id` once it moved enough ([`CURSOR_STEP`],
+    /// [`CURSOR_EVERY`]).
+    pub fn save(&mut self, session_id: &str) {
+        let at = self.tail.boundary();
+        if at == self.saved || (at < self.saved + CURSOR_STEP && self.saved_at.elapsed() < CURSOR_EVERY) {
+            return;
+        }
+        let Some(persist) = PERSIST.get() else { return };
+        let cursor = Cursor { offset: at, id: self.id, at: now_ms() };
+        persist.update(|d| d.model_access_scans.insert(session_id.to_owned(), cursor));
+        (self.saved, self.saved_at) = (at, Instant::now());
+    }
+}
+
+/// A turn to catch a session file up ([`MainScan::read`]): one at a time.
+pub async fn scan_turn() -> Option<tokio::sync::SemaphorePermit<'static>> {
+    SCANS.acquire().await.ok()
+}
+
+/// An account TeleFlock pinned a session to (`state.json` `modelAccessPins`): omp records the pin as
+/// explicit, as it does the user's `/session pin`; this tells the two apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnPin {
+    pub provider: String,
+    /// omp's stored credential (this host's id).
+    pub credential_id: i64,
+    pub at: Millis,
+}
+
+/// The credential TeleFlock pinned omp session `session_id` to for `provider`, if it did.
+pub fn own_pin(session_id: &str, provider: &str) -> Option<i64> {
+    PERSIST.get()?.read(|d| d.model_access_pins.get(session_id).filter(|p| p.provider == provider).map(|p| p.credential_id))
+}
+
+/// TeleFlock pinned omp session `session_id` to `credential_id` of `provider` (`None`: the user chose
+/// an account, which is theirs from now on).
+pub fn set_own_pin(session_id: &str, provider: &str, credential_id: Option<i64>) {
+    let Some(persist) = PERSIST.get() else { return };
     let now = now_ms();
-    let arrived = match persist.read(|d| d.model_access_arrivals.get(session_id).copied()) {
-        Some(at) => at,
-        None => persist.update(|d| *d.model_access_arrivals.entry(session_id.to_owned()).or_insert(now)),
-    };
-    push(admissible(uses, arrived));
+    persist.update(|d| {
+        match credential_id {
+            Some(credential_id) => d.model_access_pins.insert(session_id.to_owned(), OwnPin { provider: provider.to_owned(), credential_id, at: now }),
+            None => d.model_access_pins.remove(session_id),
+        };
+        d.model_access_pins.retain(|_, p| now - p.at < FORGET_MS);
+    });
+}
+
+/// The signed-in credential omp uses for the account its usage report names `provider` / `ident`
+/// (a pin takes one; omp pins signed-in accounts only).
+pub(crate) async fn credential_for(provider: &str, ident: &Ident) -> Option<i64> {
+    let mut resolver = RESOLVER.lock().await;
+    resolver.reload().await;
+    resolver.active(provider).filter(|(_, c)| c.oauth && c.identity_key.as_deref().is_some_and(|ik| identity_matches(ik, ident))).map(|(id, _)| *id).min()
 }
 
 /// Requests this host's own omp recorded ([`omp_blocks`]): its credential ids are this host's.
@@ -364,7 +555,8 @@ pub async fn settle() {
         }
         let now = now_ms();
         prune(&mut d.model_access, now);
-        d.model_access_arrivals.retain(|_, at| now - *at < FORGET_MS);
+        d.model_access_imports.retain(|_, b| now - b.at < FORGET_MS);
+        d.model_access_scans.retain(|_, c| now - c.at < FORGET_MS);
     });
 }
 
@@ -413,9 +605,33 @@ pub fn omp_blocks(db: &Path) -> Vec<CredentialUse> {
             let (provider, _) = provider_key.rsplit_once(':')?;
             let model = scope.strip_prefix(MODEL_SCOPE).filter(|m| !m.is_empty())?;
             let at = if updated < 100_000_000_000 { updated * 1000 } else { updated };
-            Some(CredentialUse { credential_id, provider: provider.to_owned(), model: model.to_owned(), denied: true, at, account: None })
+            Some(CredentialUse { credential_id, provider: provider.to_owned(), model: model.to_owned(), denied: true, at, account: None, file: String::new(), end: 0 })
         })
         .collect()
+}
+
+/// omp's live blocks on whole accounts of this host (`auth_credential_blocks`, scope `''` or
+/// `shared`, `blocked_until_ms` ahead): `(provider, credential id)` → when the block ends. omp skips
+/// such an account until then (a usage-limit 429 blocks it), whatever the usage report it caches for
+/// minutes still says.
+pub async fn omp_account_blocks() -> HashMap<(String, i64), Millis> {
+    let db = omp_agent_dir().join("agent.db");
+    tokio::task::spawn_blocking(move || account_blocks(&db, now_ms())).await.unwrap_or_default()
+}
+
+fn account_blocks(db: &Path, now: Millis) -> HashMap<(String, i64), Millis> {
+    let Some(conn) = open_ro(db).ok().flatten() else { return HashMap::new() };
+    let rows = conn
+        .prepare("SELECT credential_id, provider_key, blocked_until_ms FROM auth_credential_blocks WHERE block_scope IN ('', 'shared') AND blocked_until_ms > ?1")
+        .and_then(|mut stmt| stmt.query_map([now], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?.collect::<Result<Vec<_>, _>>());
+    let mut out = HashMap::new();
+    for (credential, provider_key, until) in rows.unwrap_or_default() {
+        // `<provider>:<credential type>`.
+        let Some((provider, _)) = provider_key.rsplit_once(':') else { continue };
+        let e = out.entry((provider.to_owned(), credential)).or_insert(until);
+        *e = (*e).max(until);
+    }
+    out
 }
 
 /// [`omp_blocks`] of omp's own `agent.db`, noted.
@@ -496,34 +712,65 @@ mod tests {
         (row, c)
     }
 
-    fn refusal(id: i64, at: Millis, account: Option<String>) -> CredentialUse {
-        CredentialUse { credential_id: id, provider: "anthropic".into(), model: "claude-mythos-5-2".into(), denied: true, at, account }
+    /// A refusal of Claude Mythos 5.2 on credential `id`, in the session's own file, its line ending at `end`.
+    fn refusal(id: i64, end: u64, account: Option<String>) -> CredentialUse {
+        CredentialUse { credential_id: id, provider: "anthropic".into(), model: "claude-mythos-5-2".into(), denied: true, at: 1_000 * H, account, file: String::new(), end }
     }
 
     #[test]
-    fn a_moved_session_teaches_by_id_only_what_happened_here() {
-        let arrived = 1_000 * H;
-        // On host B, credential 7 is another account than host A's credential 7, and A's account
-        // is B's credential 9.
-        let (_, b7) = cred(7, "b-seven@example.test");
-        let (a_row, b9) = cred(9, "a-seven@example.test");
-        let creds: HashMap<i64, Cred> = [(7, b7.clone()), (9, b9.clone())].into();
-        // A's credential 7 was refused before the session came here, with no fingerprint: nothing.
-        let noted = admissible(vec![refusal(7, arrived - H, None)], arrived);
-        assert!(noted.is_empty(), "B's credential 7 is not marked");
-        // The same refusal with the fingerprint omp recorded on A: it names B's credential 9.
-        let print = fingerprint(&a_row);
-        let noted = admissible(vec![refusal(7, arrived - H, print.clone())], arrived);
-        assert_eq!(noted.len(), 1);
-        assert_eq!(resolve(&creds, &noted[0]).map(|c| c.key.as_str()), Some(b9.key.as_str()), "the denial carries over to the same account");
-        // A fingerprint this host does not know, from before the arrival: nothing.
-        let noted = admissible(vec![refusal(7, arrived - H, Some("00".repeat(32)))], arrived);
+    fn a_session_that_went_to_another_host_and_came_back_teaches_by_id_only_what_was_written_here() {
+        // Host A's credential 7 is not host B's credential 7. The session ran on A (bytes up to 1 000),
+        // moved to B, where B's credential 7 was refused Claude Mythos 5.2 (the line ending at 1 500),
+        // and came back to A, which re-imported it (2 000 bytes then): a fresh boundary.
+        let (a7_row, a7) = cred(7, "a-seven@example.test");
+        let (b7_row, _) = cred(7, "b-seven@example.test");
+        let (_, a9) = cred(9, "b-seven@example.test");
+        let creds: HashMap<i64, Cred> = [(7, a7.clone()), (9, a9.clone())].into();
+        let back = Boundary { at: 2_000 * H, files: [(String::new(), 2_000)].into() };
+        // B's refusal on its credential 7, without a fingerprint: it does not mark A's 7.
+        assert!(admissible(vec![refusal(7, 1_500, None)], Some(&back)).is_empty());
+        // After coming back, a refusal A's omp appends on its credential 7 is learned.
+        let noted = admissible(vec![refusal(7, 2_100, None)], Some(&back));
+        assert_eq!(resolve(&creds, &noted[0]).map(|c| c.key.as_str()), Some(a7.key.as_str()));
+        // B's refusal with the fingerprint omp recorded on B names B's account, which is this host's
+        // credential 9: it carries over to that account, dated no later than the re-import.
+        let noted = admissible(vec![refusal(7, 1_500, fingerprint(&b7_row))], Some(&back));
+        assert_eq!(resolve(&creds, &noted[0]).map(|c| c.key.as_str()), Some(a9.key.as_str()));
+        assert!(noted[0].0.at <= back.at);
+        // A fingerprint this host does not know: nothing.
+        let noted = admissible(vec![refusal(7, 1_500, Some("00".repeat(32)))], Some(&back));
         assert_eq!(resolve(&creds, &noted[0]), None);
-        // Written here after the arrival: learned by its id.
-        let noted = admissible(vec![refusal(7, arrived + 1, None)], arrived);
-        assert_eq!(resolve(&creds, &noted[0]).map(|c| c.key.as_str()), Some(b7.key.as_str()));
-        // omp's fingerprint: SHA-256 of provider, account id, email, organization and project.
-        assert_eq!(print.map(|p| p.len()), Some(64));
+        // A's own fingerprint on an imported line names A's credential 7.
+        let noted = admissible(vec![refusal(3, 900, fingerprint(&a7_row))], Some(&back));
+        assert_eq!(resolve(&creds, &noted[0]).map(|c| c.key.as_str()), Some(a7.key.as_str()));
+        // A transcript the boundary does not list appeared after it: all of it is this host's.
+        let child = CredentialUse { file: "Scout.jsonl".into(), ..refusal(7, 10, None) };
+        assert_eq!(admissible(vec![child], Some(&back)).len(), 1);
+        // No boundary yet: only fingerprints count.
+        assert!(admissible(vec![refusal(7, 2_100, None)], None).is_empty());
+        assert_eq!(session_of_file(Path::new("/s/2026-09-21T14-13-20-000Z_sess-0001.jsonl")).as_deref(), Some("sess-0001"));
+    }
+
+    #[test]
+    fn the_session_file_scan_goes_on_where_it_stopped_and_starts_over_on_a_new_file() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let line = |id: i64| {
+            format!("{{\"type\":\"message\",\"timestamp\":\"2026-09-21T14:13:20.000Z\",\"message\":{{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-mythos-5-2\",\"credentialId\":{id},\"stopReason\":\"stop\",\"timestamp\":1790000000000,\"content\":[]}}}}\n")
+        };
+        std::fs::write(&file, line(3)).unwrap();
+        let mut scan = MainScan::open("s", &file);
+        let (uses, more) = scan.read(&file);
+        assert_eq!((uses.len(), more), (1, false));
+        std::fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(line(5).as_bytes()).unwrap();
+        let (uses, _) = scan.read(&file);
+        assert_eq!(uses.iter().map(|u| u.credential_id).collect::<Vec<_>>(), vec![5], "only what was appended");
+        // Another file at the same path (omp rewrote it): read from the start.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&file, format!("{}{}", line(7), line(8))).unwrap();
+        let (uses, _) = scan.read(&file);
+        assert_eq!(uses.len(), 2);
     }
 
     #[test]
@@ -542,7 +789,7 @@ mod tests {
         .unwrap();
         drop(conn);
         let got = omp_blocks(&db);
-        assert_eq!(got, vec![CredentialUse { credential_id: 3, provider: "anthropic".into(), model: "claude-mythos-5-2".into(), denied: true, at: 1_790_000_000_000, account: None }]);
+        assert_eq!(got, vec![CredentialUse { credential_id: 3, provider: "anthropic".into(), model: "claude-mythos-5-2".into(), denied: true, at: 1_790_000_000_000, account: None, file: String::new(), end: 0 }]);
         assert!(omp_blocks(&dir.path().join("none.db")).is_empty(), "no store: nothing");
     }
 }

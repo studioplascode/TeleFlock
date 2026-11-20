@@ -7,6 +7,7 @@ import { Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, To
 import { ExpiredLogin } from "@/features/accounts/ExpiredLogin";
 import { providerName } from "@/features/accounts/providers";
 import { formatPlan, PROVIDER_NAMES, paceAlert, paceStatus, tierLabel, windowLabel } from "./limitsUi";
+import { ModelAccessLines } from "./ModelAccessLines";
 
 /** One account across the hosts that report it (the same login is often on several hosts). */
 interface AccountRow {
@@ -130,6 +131,7 @@ function AccountTile({ row, hostNames, now }: { row: AccountRow; hostNames: Reco
           <span className="min-w-0 break-words">{account.error ?? "No limits reported."}</span>
         </div>
       )}
+      <ModelAccessLines models={account.models} />
       {account.notes.length > 0 && <p className="text-[11px] text-mute-2">{account.notes.join(" · ")}</p>}
       <div className="mt-auto flex flex-wrap items-center gap-1.5 text-[10.5px] font-semibold text-mute-2">
         {fetchedAt != null && (

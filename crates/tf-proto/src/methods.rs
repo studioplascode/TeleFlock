@@ -16,7 +16,7 @@ use crate::accounts::{
 use crate::app::{DiagReport, HostProfile, HostSecrets, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
 use crate::autoanswer::{AutoAnswer, AutoAnswerPostponeParams, AutoAnswerRef, AutoAnswerReviewParams, AutoAnswerReviewed, SetAutoAnswerParams};
 use crate::artifacts::{ArtifactContent, ArtifactParams, LocalWriteParams, LocalWritten, SessionArtifacts};
-use crate::autoresume::{AutoResumeConfig, AutoResumeSetParams, RefusalFallback, RefusalFallbackSetParams, RefusalRetryParams, RetryParams, RetryResult};
+use crate::autoresume::{AutoResumeConfig, AutoResumeSetParams, RefusalFallback, RefusalFallbackSetParams, RefusalRetryParams, RetryParams, RetryResult, UseAccountParams};
 use crate::chats::{ChatDeleteParams, ChatDeletion, ChatFolders};
 use crate::cleanup::{
     CleanupRemoveParams, CleanupReport, CleanupScanParams, CleanupStorage, CleanupStorageParams, CleanupStorageRunParams, IdleShells,
@@ -1038,6 +1038,11 @@ wire_struct! {
         pub provider: String,
         /// `LimitAccount.key`; absent when omp hasn't pinned the session to an account yet.
         pub account_key: Option<String>,
+        /// The pin is explicit (`/session pin`, or an account TeleFlock moved the session to): omp's
+        /// ranking never moves it. Absent from older daemons.
+        pub explicit: Option<bool>,
+        /// omp's stored credential the session is pinned to (an id of this host's omp).
+        pub credential_id: Option<i64>,
     }
 }
 
@@ -1472,6 +1477,8 @@ methods!(HostMethod, "HostMethods", {
     "agent.retry" => AgentRetry(RetryParams) -> RetryResult;
     "agent.autoResumeNow" => AgentAutoResumeNow(AgentRef) -> RetryResult;
     "agent.autoResumeCancel" => AgentAutoResumeCancel(AgentRef) -> Empty;
+    // Model access (limit_resume.rs, §3.22): "Use <account> for this session" (omp's `/session pin`), then resume.
+    "agent.useAccount" => AgentUseAccount(UseAccountParams) -> RetryResult;
     // Refusal fallback (refusal.rs, §3.22): "Retry with <model>" after a provider refusal.
     "agent.refusalRetry" => AgentRefusalRetry(RefusalRetryParams) -> RetryResult;
     "agent.setAutoAnswer" => AgentSetAutoAnswer(SetAutoAnswerParams) -> Empty;

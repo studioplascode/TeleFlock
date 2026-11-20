@@ -113,6 +113,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentAutoAnswerPostpone(p) => unit(crate::autoanswer::postpone(ctx, p)),
         M::AgentAutoResumeNow(p) => to_value(crate::recovery::resume_now(ctx, &p.agent_id).await?),
         M::AgentAutoResumeCancel(p) => unit(crate::recovery::cancel(ctx, &p.agent_id)),
+        M::AgentUseAccount(p) => to_value(crate::limit_resume::use_account(ctx, &p.agent_id, &p.key).await?),
         M::AgentRetry(p) => to_value(crate::limit_resume::retry(ctx, &p.agent_id, p.subagent_id.as_deref()).await?),
         M::AgentRefusalRetry(p) => to_value(crate::refusal::retry(ctx, p).await?),
         M::AgentBrowserAttach(p) => to_value(ctx.browser.attach(client, p).await?),

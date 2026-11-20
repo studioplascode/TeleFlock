@@ -20,7 +20,7 @@ const CLEAR_MS = 3500;
 /** A retried subagent finishes after this long. */
 const SUB_RETRY_MS = 8000;
 
-const METHODS: Record<string, true> = { "agent.retry": true, "agent.autoResumeNow": true, "agent.autoResumeCancel": true, "host.autoResume": true, "host.autoResumeSet": true };
+const METHODS: Record<string, true> = { "agent.retry": true, "agent.autoResumeNow": true, "agent.autoResumeCancel": true, "agent.useAccount": true, "host.autoResume": true, "host.autoResumeSet": true };
 
 /** What the resume demo needs from its DemoHost (closures over the host's state). */
 export interface ResumeHost {
@@ -96,6 +96,38 @@ const SEEDS: Seed[] = [
     // `noAccess`: a linked account whose requests were refused the model (§3.22 "Model access") is
     // left out of when usage is back.
     ticket: (now, stopped) => ({ status: "waiting", kind: "usageLimit", reason: "Claude Max 5-hour limit reached", provider: "anthropic", model: "claude-opus-5", resumeAt: now + 120 * MIN, basis: "window", since: now - 25 * MIN, attempts: 0, root: true, subagentIds: stopped, noAccess: ["team@example.test"] }),
+  },
+  {
+    // Claude Mythos on an account the user pinned (`/session pin`) whose organization has no access to it
+    // (§3.22 "Model access"): TeleFlock never moves the user's pin, so it waits and offers the account
+    // that serves Mythos.
+    def: { id: "mythos", kind: "omp", workspace: "w12", column: "review", model: "mythos-5-2", thinking: "high", since: 1_200, age: 3_600, ctxPct: 18, cost: 0.9, title: "Fuzz the invoice CSV importer", files: [] },
+    line: "Won't resume by itself: team@acme.io (your pin) has no access to claude-mythos-5-2",
+    steps: [
+      { t: "user", text: "Fuzz the invoice CSV importer and report every input that crashes it." },
+      think("Start from the column parser, then the date and amount fields.", 2400),
+      { t: "fail", error: '404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-mythos-5-2"}}', status: 404 },
+    ],
+    ticket: (now) => ({
+      status: "manual", kind: "providerError", reason: "team@acme.io (your pin) has no access to claude-mythos-5-2", provider: "anthropic", model: "claude-mythos-5-2",
+      since: now - 4 * MIN, attempts: 0, root: true, subagentIds: [], refusedModel: true, noAccess: ["team@acme.io"], userPin: "team@acme.io",
+      offer: { key: "anthropic|email:you@flock.dev", label: "you@flock.dev" },
+    }),
+  },
+  {
+    // Claude Mythos stopped on an account without access to it; hostd moved the session to the account
+    // that serves Mythos (omp's `/session pin`, §3.22 "Model access") and resumes it shortly.
+    def: { id: "mythos-moved", kind: "omp", workspace: "w12", column: "review", model: "mythos-5-2", thinking: "high", since: 600, age: 2_400, ctxPct: 9, cost: 0.41, title: "Review the session-store migration for data loss", files: [] },
+    line: "No model access: moved to you@flock.dev, resumes shortly",
+    steps: [
+      { t: "user", text: "Review the session-store migration for anything that could lose sessions." },
+      think("Read the migration and the rollback path first.", 1800),
+      { t: "fail", error: '404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-mythos-5-2"}}', status: 404 },
+    ],
+    ticket: (now) => ({
+      status: "waiting", kind: "providerError", reason: "No access to claude-mythos-5-2 on the account omp used (anthropic)", provider: "anthropic", model: "claude-mythos-5-2",
+      resumeAt: now + 5 * MIN, basis: "window", since: now - 2 * MIN, attempts: 0, root: true, subagentIds: [], refusedModel: true, noAccess: ["team@acme.io"], movedTo: "you@flock.dev",
+    }),
   },
   {
     def: { id: "i18n", kind: "omp", workspace: "w12", column: "review", model: "luna", thinking: "medium", since: 10_800, age: 14_400, ctxPct: 23, cost: 0.32, title: "Translate the pricing page into German and French", files: [] },
@@ -177,6 +209,12 @@ export class DemoResume {
       case "agent.autoResumeCancel":
         this.ticket(this.host.ompSim(p.agentId), undefined);
         return {};
+      case "agent.useAccount": {
+        // hostd pins the session to the account (omp's `/session pin`) and resumes its ticket.
+        const sim = this.host.ompSim(p.agentId);
+        if (typeof p.key !== "string" || !p.key.startsWith("anthropic|")) throw apiError("invalid_params", "not a signed-in account of the session's provider");
+        return this.resumeNow(sim);
+      }
       case "agent.autoResumeNow":
         return this.resumeNow(this.host.ompSim(p.agentId));
       default:

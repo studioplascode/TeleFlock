@@ -292,6 +292,10 @@ pub struct BridgeCaps {
     /// feed as a `message_end` of its `bashExecution` / `pythonExecution` message.
     #[serde(default)]
     pub shell: bool,
+    /// `pinAccount` (2.7.0): omp's `/session pin` for the main session, so hostd moves a session off
+    /// an account the provider refuses its model on (`crate::limit_resume`, §3.22 "Model access").
+    #[serde(default)]
+    pub pin_account: bool,
 }
 
 impl BridgeCaps {
@@ -487,6 +491,17 @@ pub struct TurnError {
     /// When the failed turn began: the time of the failing session's last user message
     /// (`caps.refusals`; refusal fallback does one fallback per turn).
     pub prompt_at: Option<Millis>,
+    /// omp's stored credential of the failed request (bridge 2.7.0): which account refused.
+    pub credential_id: Option<i64>,
+}
+
+/// `pinAccount` result (2.7.0 `caps.pin_account`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PinnedAccount {
+    pub provider: String,
+    /// omp's label of the account (its email, else its account id).
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1144,6 +1159,14 @@ impl BridgeHandle {
     ) -> Result<RefusedRetry, BridgeError> {
         let params = json!({ "agentId": agent_id, "model": model, "thinking": thinking, "notice": notice });
         self.typed(session_id, "retryRefused", params, TUI).await
+    }
+
+    /// Pins omp's stored credential `credential_id` to the session's main AgentSession (2.7.0
+    /// `caps.pin_account`): omp's `/session pin`, an explicit pin its ranking never moves.
+    /// `agent_id`: a subagent of the session (its own session is pinned, never the main one); `None`:
+    /// the main session.
+    pub async fn pin_account(&self, session_id: &str, credential_id: i64, agent_id: Option<&str>) -> Result<PinnedAccount, BridgeError> {
+        self.typed(session_id, "pinAccount", json!({ "credentialId": credential_id, "agentId": agent_id }), QUICK).await
     }
 
     /// Points the omp process's `browser.cdpUrl` at `cdp_url` as a runtime override, never written

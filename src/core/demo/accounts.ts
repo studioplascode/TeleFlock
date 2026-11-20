@@ -257,6 +257,7 @@ export class DemoAccounts {
         windows: report?.windows ?? [],
         windowsAt: report?.fetchedAt,
         windowsError: c.oauth && !c.disabled && !report?.windows.length ? (report?.error ?? "omp reported no limit windows for this account") : undefined,
+        models: report?.models,
       };
     });
     accounts.sort(

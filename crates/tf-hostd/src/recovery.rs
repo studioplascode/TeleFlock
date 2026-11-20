@@ -34,7 +34,7 @@ use tracing::{info, warn};
 
 use tf_proto::autoresume::{AutoResume, AutoResumeConfig, AutoResumeKind, AutoResumeStatus, ResumeBasis, RetryResult, RetryVia};
 use tf_proto::model::{ActivityKind, Agent, HerdrState};
-use tf_proto::{ApiError, Millis};
+use tf_proto::{AccountOffer, ApiError, Millis};
 
 use crate::daemon::Daemon;
 use crate::ops::Ctx;
@@ -98,6 +98,21 @@ pub struct Ticket {
     /// decided: their room and resets did not count (`crate::limit_resume`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_access: Vec<String>,
+    /// The provider refused the model on the account omp used (no access), not a limit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refused_model: bool,
+    /// The subagent whose own request was refused (its registry id and omp session id): only its
+    /// session may move to another account, never its parent's. `None`: the main session's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_by: Option<RefusedBy>,
+    /// The account (label) TeleFlock moved the session to, off one that refuses the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<String>,
+    /// The user's pin (label) refuses the model: it waits for the user ([`AccountOffer`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<AccountOffer>,
     /// The session's file: cards that only know the file (a parked card from an older build)
     /// still match, and a restart relaunches it.
     #[serde(default)]
@@ -125,6 +140,20 @@ pub struct TicketInit {
     pub basis: Option<ResumeBasis>,
     /// Accounts known to have no access to the model ([`Ticket::no_access`]).
     pub no_access: Vec<String>,
+    /// [`Ticket::refused_model`].
+    pub refused_model: bool,
+    /// [`Ticket::refused_by`].
+    pub refused_by: Option<RefusedBy>,
+}
+
+/// A subagent whose own request the provider refused the model on ([`Ticket::refused_by`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefusedBy {
+    /// Its id in omp's agent registry.
+    pub agent_id: String,
+    /// Its own omp session id (its account pin is keyed by it).
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +364,8 @@ impl Recovery {
                     t.resume_at = init.resume_at;
                     t.basis = init.basis;
                     t.no_access = init.no_access;
+                    t.refused_model = init.refused_model;
+                    t.refused_by = init.refused_by;
                     t.missing_since = None;
                     false
                 }
@@ -353,6 +384,11 @@ impl Recovery {
                             root: init.root,
                             subagent_ids: init.subagent_ids,
                             no_access: init.no_access,
+                            refused_model: init.refused_model,
+                            refused_by: init.refused_by,
+                            moved_to: None,
+                            user_pin: None,
+                            offer: None,
                             session_file: init.session_file,
                             manual: None,
                             missing_since: None,
@@ -439,6 +475,11 @@ impl Recovery {
                     root: init.root,
                     subagent_ids: init.subagent_ids,
                     no_access: Vec::new(),
+                    refused_model: false,
+                    refused_by: None,
+                    moved_to: None,
+                    user_pin: None,
+                    offer: None,
                     session_file: init.session_file,
                     manual,
                     missing_since: None,
@@ -457,6 +498,17 @@ impl Recovery {
             t.basis = Some(basis);
         }
         self.changed(session);
+    }
+
+    /// Changes the ticket of `session_id` (what model access did about its account, §3.22).
+    pub(crate) fn annotate(&self, session: &str, session_id: &str, f: impl FnOnce(&mut Ticket)) {
+        let found = {
+            let mut d = self.lock();
+            d.sessions.get_mut(session).and_then(|s| s.get_mut(session_id)).map(f).is_some()
+        };
+        if found {
+            self.changed(session);
+        }
     }
 
     /// When the user dismissed the limit ticket of root omp session `session_id` (within a day).
@@ -519,6 +571,10 @@ impl Recovery {
             root: t.root,
             subagent_ids: t.subagent_ids.clone(),
             no_access: t.no_access.clone(),
+            refused_model: t.refused_model.then_some(true),
+            moved_to: t.moved_to.clone(),
+            user_pin: t.user_pin.clone(),
+            offer: t.offer.clone(),
         }
     }
 
@@ -847,6 +903,14 @@ async fn resume_limit(ctx: &Ctx, session_id: &str, ticket: &Ticket) -> Result<Re
                 return Err(ApiError::new(RESCHEDULED, "no account of the provider has access to the model"));
             }
         }
+    }
+    // Off an account that refuses the model, before it goes on (§3.22 "Model access"); a pin the
+    // user set waits for them (Resume by hand goes on with it).
+    if let Some(why) = crate::limit_resume::steer_ticket(ctx, session_id, ticket).await
+        && let Some(r) = get()
+    {
+        r.hold(&ctx.herdr_session, session_id, why);
+        return Err(ApiError::new(RESCHEDULED, "the session is pinned to an account without access to the model"));
     }
     let b = bridge.ok_or_else(|| {
         ApiError::new("not_connected", "TeleFlock's bridge in omp is not connected").with_hint("Resume it in the terminal: press F5 in omp").retryable()

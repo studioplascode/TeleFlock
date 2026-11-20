@@ -100,8 +100,14 @@ import type {
  *         2/5/10/30/60-minute backoff, billed to the session as a `model_usage` entry, off with omp's
  *         `task.completionProbe`), and `state.progress {pct, stage?, at, since}` carries the answer
  *         until the run ends.
+ *  2.7.0: - `pinAccount`: `pinAccount {credentialId}` is omp's `/session pin` for the main session
+ *           (`AgentSession.pinCurrentProviderOAuthAccount`): an explicit pin omp's ranking never
+ *           moves; refused while the session streams, for an API key or another provider's
+ *           credential. hostd moves a session off an account the provider refuses its model on.
+ *         - (no flag) `turn_error` carries the failed request's `credentialId` (omp's stored
+ *           credential), so hostd knows which account a refusal came from.
  */
-const BRIDGE_VERSION = "2.6.0";
+const BRIDGE_VERSION = "2.7.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -4265,6 +4271,36 @@ export interface RetrySession extends AgentSessionLike {
 }
 export const isRetrySession = (s: unknown): s is RetrySession => isSession(s) && "retry" in s && typeof s.retry === "function";
 
+/** The parts of omp's AgentSession `/session pin` uses (omp ≥ 18.20). */
+export interface PinSession {
+	readonly isStreaming?: boolean;
+	listCurrentProviderOAuthAccounts(): Promise<{ provider: string; accounts: Array<{ credentialId?: unknown; label?: unknown; email?: unknown }> } | undefined>;
+	pinCurrentProviderOAuthAccount(credentialId: number): boolean;
+	readonly modelRegistry?: { authStorage?: { credentials?: { list?(provider: string): Array<{ id?: unknown; credential?: { type?: unknown } }> } } };
+}
+export const isPinSession = (s: unknown): s is PinSession =>
+	isObj(s) && typeof s.pinCurrentProviderOAuthAccount === "function" && typeof s.listCurrentProviderOAuthAccounts === "function";
+
+/**
+ * 2.7.0 `pinAccount`: pins omp's stored credential `credentialId` to `session` the way `/session pin`
+ * does (an explicit pin: omp's ranking, reserve and reclaim never move it; omp still skips it while it
+ * is blocked). Only a signed-in account of the provider of the session's model, and only while the
+ * session does not stream (omp refuses then too): `busy`, `invalid_params` with the reason otherwise.
+ */
+export async function pinSessionAccount(session: PinSession, credentialId: number): Promise<{ provider: string; label: string }> {
+	if (session.isStreaming) return fail("busy", "the session is streaming; an account can be pinned once its turn ended");
+	const listed = (await session.listCurrentProviderOAuthAccounts()) ?? fail("invalid_params", "the session has no model to pin an account for");
+	const account = listed.accounts.find(a => a.credentialId === credentialId);
+	if (!account) {
+		const stored = session.modelRegistry?.authStorage?.credentials?.list?.(listed.provider)?.find(c => c.id === credentialId);
+		if (stored && stored.credential?.type !== "oauth") return fail("invalid_params", `credential ${credentialId} is an API key: omp pins signed-in accounts only`);
+		return fail("invalid_params", `credential ${credentialId} is not a signed-in ${listed.provider} account (the session's model is ${listed.provider}'s)`);
+	}
+	if (!session.pinCurrentProviderOAuthAccount(credentialId)) return fail("unavailable", `credential ${credentialId} cannot be pinned to this session now`);
+	const label = typeof account.label === "string" && account.label ? account.label : typeof account.email === "string" && account.email ? account.email : `#${credentialId}`;
+	return { provider: listed.provider, label };
+}
+
 /** The parts of omp's `AsyncJobManager` a subagent resume uses. */
 export interface ResumeJobs {
 	register(type: string, label: string, run: (ctx: { jobId?: string; signal: AbortSignal }) => Promise<unknown>, options?: Json): string;
@@ -8283,9 +8319,11 @@ function bridge(pi: ExtensionAPI) {
 	};
 
 	/** `hello.caps` of the resume features (2.3.0: `refusals`). */
-	const resumeCaps = (ctx: ExtensionContext): { retry: boolean; resumeTree: boolean; turnError: boolean; limitGuard: boolean; refusals: boolean } => {
+	const resumeCaps = (ctx: ExtensionContext): { retry: boolean; resumeTree: boolean; turnError: boolean; limitGuard: boolean; refusals: boolean; pinAccount: boolean } => {
 		const main = mainRetry(ctx);
 		return {
+			// 2.7.0
+			pinAccount: isPinSession(main),
 			retry: main !== undefined,
 			resumeTree: main?.asyncJobManager !== undefined && internals.resume?.task !== undefined && internals.lifecycle !== undefined,
 			turnError: internals.registry !== undefined,
@@ -8331,6 +8369,8 @@ function bridge(pi: ExtensionAPI) {
 			refusal: refusalInfo(tail),
 			modelName: modelName(provider, tail.model),
 			promptAt: turnStart(session?.agent?.state?.messages ?? []) ?? null,
+			// 2.7.0: the stored credential of the failed request (omp writes it on the message)
+			credentialId: typeof tail.credentialId === "number" && Number.isInteger(tail.credentialId) ? tail.credentialId : null,
 		};
 	};
 
@@ -8962,6 +9002,26 @@ function bridge(pi: ExtensionAPI) {
 				return agentCmd(p);
 			case "retry":
 				return retryOp(ctx, p);
+			case "pinAccount": {
+				const id = num(p, "credentialId") ?? fail("invalid_params", 'missing "credentialId"');
+				const agentId = str(p, "agentId");
+				if (!agentId || agentId === ctx.agent?.id) {
+					const session = agentSession ?? findSession(ctx);
+					if (!isPinSession(session)) return fail("unsupported", "this omp cannot pin an account to a session");
+					return await pinSessionAccount(session, id);
+				}
+				// A subagent's own session (its pin is keyed by its session id; a revived subagent takes
+				// it), reached through omp's agent registry: never its parent's.
+				await loadPersistedRoster(ctx);
+				const reg = internals.registry;
+				const lifecycle = internals.lifecycle;
+				if (!reg || !lifecycle) return fail("unsupported", "this omp cannot reach its subagents' sessions");
+				const ref = reg.get(agentId) ?? fail("not_found", `no agent ${agentId}`);
+				if (ref.kind !== "sub") return fail("invalid_params", `agent ${agentId} is not a subagent`);
+				const live: unknown = await lifecycle.global().ensureLive(agentId);
+				if (!isPinSession(live)) return fail("unsupported", "this omp cannot pin an account to a subagent");
+				return await pinSessionAccount(live, id);
+			}
 			case "retryRefused":
 				return retryRefusedOp(ctx, p);
 			case "resumeTree":

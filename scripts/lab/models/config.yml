@@ -1,0 +1,29 @@
+# Model access lab omp settings (isolated agent dir; setup.sh copies this in): side calls (titles and
+# the like) on Sonnet, which both accounts serve; the agent under test starts on Claude Mythos 5.2
+# explicitly. No approvals, no setup wizard, no update checks.
+modelRoles:
+  default: anthropic/claude-sonnet-5
+  smol: anthropic/claude-sonnet-5
+  slow: anthropic/claude-sonnet-5
+  vision: anthropic/claude-sonnet-5
+  plan: anthropic/claude-sonnet-5
+  commit: anthropic/claude-sonnet-5
+  tiny: anthropic/claude-sonnet-5
+  memory: anthropic/claude-sonnet-5
+  task: anthropic/claude-sonnet-5
+  advisor: anthropic/claude-sonnet-5
+  widget: anthropic/claude-sonnet-5
+  judge: anthropic/claude-sonnet-5
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+# omp gives up on a limit whose retry-after is longer than this: the stop is the host's to resume.
+retry:
+  maxDelayMs: 5000
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

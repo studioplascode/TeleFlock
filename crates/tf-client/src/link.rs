@@ -64,7 +64,7 @@ pub fn timeout_for(method: &str) -> Duration {
         // `agent.archive {archived: false}` and `agent.prompt` resume a parked agent.
         "agent.start" | "agent.resume" | "agent.archive" | "agent.prompt" | "host.resume" | "worktree.create"
         // `agent.autoResumeNow` may relaunch omp (a restart ticket brings an ended agent back).
-        | "automation.run" | "agent.autoResumeNow" => LAUNCH_TIMEOUT,
+        | "automation.run" | "agent.autoResumeNow" | "agent.useAccount" => LAUNCH_TIMEOUT,
         "accounts.unlink" | "accounts.prefer" => ACCOUNTS_CHANGE_TIMEOUT,
         "hostSync.export" | "hostSync.plan" | "hostSync.seal" | "hostSync.apply" => HOST_SYNC_TIMEOUT,
         "skills.install" | "skills.update" | "plugins.install" | "plugins.remove" | "plugins.setEnabled" | "plugins.upgrade"

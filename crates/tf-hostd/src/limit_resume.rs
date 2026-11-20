@@ -26,7 +26,9 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use tf_proto::model::Agent;
-use tf_proto::{AccountLimits, ApiError, AutoResumeKind, LimitAccount, LimitStatus, Millis, ResumeBasis, RetryResult, RetryVia};
+use tf_collab::CredentialUse;
+use tf_proto::model::ActivityKind;
+use tf_proto::{AccountLimits, AccountOffer, ApiError, AutoResumeKind, LimitAccount, LimitStatus, LimitWindow, Millis, ResumeBasis, RetryResult, RetryVia};
 
 use crate::bridge::{BridgeEvent, BridgeHandle, BridgeSession, FailedTails, TurnError};
 use crate::daemon::Daemon;
@@ -63,6 +65,9 @@ pub const MAX_RESTOPS: u32 = 8;
 /// classifier names limits (`kind`); a "rate limit" whose HTTP status is a server error was the
 /// provider failing: 529, 503 or an "overloaded" message → overloaded, another 5xx → provider error.
 pub fn kind_of(e: &TurnError) -> Option<AutoResumeKind> {
+    if refused(e) {
+        return Some(AutoResumeKind::ProviderError);
+    }
     let limit = match e.kind.as_str() {
         "usageLimit" => AutoResumeKind::UsageLimit,
         "rateLimit" => AutoResumeKind::RateLimit,
@@ -76,6 +81,13 @@ pub fn kind_of(e: &TurnError) -> Option<AutoResumeKind> {
         None if overloaded() => AutoResumeKind::Overloaded,
         _ => limit,
     })
+}
+
+/// The provider refused the stopped turn's model on the account omp used (it has no access to it:
+/// Anthropic's 404 `not_found_error` "model: …"), not a limit; a ticket of kind `providerError` that
+/// goes on on an account that serves the model (§3.22 "Model access").
+pub fn refused(e: &TurnError) -> bool {
+    e.model.as_deref().is_some_and(|m| tf_collab::refused_model(&e.message).as_deref() == Some(m))
 }
 
 /// A usage or rate limit (usage windows tell when it passes), not a provider failure.
@@ -204,6 +216,10 @@ pub fn due(usage: Usage, retry_at: Option<Millis>, step: u32, now: Millis) -> (M
 }
 
 fn reason(kind: AutoResumeKind, e: &TurnError) -> String {
+    if refused(e) {
+        let who = if e.main { String::new() } else { format!(", subagent {}", e.agent_id) };
+        return format!("No access to {} on the account omp used ({}){who}", e.model.as_deref().unwrap_or("the model"), e.provider.as_deref().unwrap_or("provider"));
+    }
     let what = match kind {
         AutoResumeKind::UsageLimit => "Usage limit",
         AutoResumeKind::RateLimit => "Rate limit",
@@ -219,11 +235,59 @@ fn reason(kind: AutoResumeKind, e: &TurnError) -> String {
     format!("{what}{on}{who}: {}", clip(e.message.trim(), 160))
 }
 
+/// `limits` as omp acts on them: an account omp blocks until a time (a usage-limit 429 on it) is out
+/// until then, though the report omp caches for minutes may still show room (`idents`: the
+/// accounts' identities, in order).
+async fn with_omp_blocks(mut limits: AccountLimits, idents: &[crate::ops::limits::Ident]) -> AccountLimits {
+    let blocks = crate::model_access::omp_account_blocks().await;
+    if blocks.is_empty() {
+        return limits;
+    }
+    for (a, ident) in limits.accounts.iter_mut().zip(idents) {
+        let Some(credential) = crate::model_access::credential_for(&a.provider, ident).await else { continue };
+        if let Some(&until) = blocks.get(&(a.provider.clone(), credential)) {
+            blocked(a, until);
+        }
+    }
+    limits
+}
+
+/// Account `a` is out until `until` (omp's block): every window that meters all its models.
+fn blocked(a: &mut LimitAccount, until: Millis) {
+    let mut shared = a.windows.iter_mut().filter(|w| w.tier.is_none()).peekable();
+    if shared.peek().is_none() {
+        a.windows.push(LimitWindow {
+            id: format!("{}:omp-block", a.provider),
+            label: "omp's block".into(),
+            window: None,
+            tier: None,
+            duration_ms: None,
+            resets_at: Some(until),
+            used: Some(1.0),
+            status: LimitStatus::Exhausted,
+            amount: None,
+            limit: None,
+            unit: "unknown".into(),
+            notes: vec![],
+            samples: vec![],
+        });
+        return;
+    }
+    for w in shared {
+        if w.status != LimitStatus::Exhausted {
+            (w.status, w.resets_at) = (LimitStatus::Exhausted, Some(until));
+        } else {
+            w.resets_at = Some(w.resets_at.map_or(until, |r| r.max(until)));
+        }
+    }
+}
+
 /// Usage of the failing session's accounts (`refresh`: ask omp again now), and the accounts known
 /// to have no access to the model.
 async fn usage_of(session_id: &str, provider: &str, model: Option<&str>, refresh: bool) -> (Usage, Vec<String>) {
     match crate::ops::limits::limits_for(vec![(session_id.to_owned(), provider.to_owned())], refresh).await {
-        Ok((limits, _)) => {
+        Ok((limits, idents)) => {
+            let limits = with_omp_blocks(limits, &idents).await;
             let now = now_ms();
             let mut usage = provider_usage(&limits, session_id, provider, model, now);
             // A stored credential the report leaves out (an API key) may still serve the model.
@@ -248,13 +312,20 @@ async fn usage_of(session_id: &str, provider: &str, model: Option<&str>, refresh
 pub async fn on_turn_error(ctx: &Ctx, root_sid: &str, e: &TurnError) {
     let (Some(kind), Some(r)) = (kind_of(e), crate::recovery::get()) else { return };
     let own_sid = e.session_id.clone().unwrap_or_else(|| root_sid.to_owned());
-    // Usage windows tell when a limit passes; an overloaded or failing provider just gets backoff.
-    let limit = is_limit(kind);
+    let refused = refused(e);
+    // The refusing account is known at once: the bridge says which credential it was (2.7.0).
+    if refused && let (Some(id), Some(provider), Some(model)) = (e.credential_id, &e.provider, &e.model) {
+        let at = e.at;
+        crate::model_access::note_local(vec![CredentialUse { credential_id: id, provider: provider.clone(), model: model.clone(), denied: true, at, account: None, file: String::new(), end: 0 }]);
+    }
+    // Usage windows tell when a limit passes, and where a refused model goes on; an overloaded or
+    // failing provider just gets backoff.
+    let limit = is_limit(kind) || refused;
     let (usage, no_access) = match &e.provider {
         Some(p) if limit => usage_of(&own_sid, p, e.model.as_deref(), false).await,
         _ => (Usage::Unknown, Vec::new()),
     };
-    let kind = if usage.out() { AutoResumeKind::UsageLimit } else { kind };
+    let kind = if usage.out() && !refused { AutoResumeKind::UsageLimit } else { kind };
     let prev = r.ticket(&ctx.herdr_session, root_sid).filter(|t| t.kind != AutoResumeKind::Restart);
     let now = now_ms();
     // Resumed and stopped again soon after: wait at least a backoff step, growing per repeat.
@@ -288,6 +359,8 @@ pub async fn on_turn_error(ctx: &Ctx, root_sid: &str, e: &TurnError) {
         resume_at: Some(resume_at),
         basis: Some(basis),
         no_access: no_access.clone(),
+        refused_model: refused,
+        refused_by: (refused && !e.main).then(|| crate::recovery::RefusedBy { agent_id: e.agent_id.clone(), session_id: own_sid.clone() }),
     };
     info!(session = %root_sid, agent = %e.agent_id, ?kind, resume_at, ?basis, streak, "auto-resume: the provider stopped the turn");
     r.open(&ctx.herdr_session, kind, root_sid, init);
@@ -295,7 +368,207 @@ pub async fn on_turn_error(ctx: &Ctx, root_sid: &str, e: &TurnError) {
         r.hold(&ctx.herdr_session, root_sid, no_access_reason(e.provider.as_deref().unwrap_or("provider"), e.model.as_deref(), &no_access));
     } else if streak >= MAX_RESTOPS {
         r.hold(&ctx.herdr_session, root_sid, format!("Stopped again right after {streak} automatic resumes"));
+    } else if refused
+        && r.enabled()
+        && let Some(t) = r.ticket(&ctx.herdr_session, root_sid)
+        && let Some(why) = steer_ticket(ctx, root_sid, &t).await
+    {
+        // The session is idle after the stop: it moved now (its strip says so) or waits for the user.
+        r.hold(&ctx.herdr_session, root_sid, why);
     }
+}
+
+/// What to do about the account of a session on a model before it goes on (§3.22 "Model access").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinDecision {
+    /// Leave it: no account of the provider is known to refuse the model, or the session's own
+    /// account serves it and has room (or the user pinned an account that only ran out).
+    Keep,
+    /// Move it to `accounts[i]`: its own account refuses the model or is out, and `i` is known to
+    /// serve it, is signed in (omp pins those only) and has the most room.
+    To(usize),
+    /// The user pinned the session (`/session pin`) to an account that refuses the model: TeleFlock
+    /// never moves it; `offer` serves the model and has room.
+    UserPin { offer: Option<usize> },
+    /// The accounts known to serve the model are out of usage: wait for them.
+    NoRoom,
+    /// No account is known to serve the model: no pin (omp's own choice; or the `NoAccess` hold).
+    NoServing,
+}
+
+/// [`PinDecision`] for omp session `session_id` on `model` of `provider` at `now`. `own_pin`: the
+/// credential TeleFlock pinned the session to (omp records that pin as explicit, like the user's);
+/// `refused`: the session's own request was refused the model. Only a session whose own account
+/// refuses the model moves, or one refused that omp holds no account for (its pin went with the
+/// refusal); one that only ran out of usage keeps omp's choice.
+pub fn pin_decision(limits: &AccountLimits, session_id: &str, provider: &str, model: &str, own_pin: Option<i64>, refused: bool, now: Millis) -> PinDecision {
+    let model = model.to_lowercase();
+    let accounts: Vec<(usize, &LimitAccount)> = limits.accounts.iter().enumerate().filter(|(_, a)| a.provider == provider && !a.disabled).collect();
+    if !accounts.iter().any(|(_, a)| refuses(a, &model, now)) {
+        return PinDecision::Keep;
+    }
+    let session = limits.sessions.iter().find(|s| s.session_id == session_id && s.provider == provider);
+    let current = match session.and_then(|s| s.account_key.as_deref()) {
+        Some(k) => accounts.iter().find(|(_, a)| a.key == k).copied(),
+        None if accounts.len() == 1 => accounts.first().copied(),
+        None => None,
+    };
+    let current_refuses = current.is_some_and(|(_, a)| refuses(a, &model, now));
+    if (current.is_some() && !current_refuses) || (current.is_none() && !refused) {
+        return PinDecision::Keep;
+    }
+    let best = accounts
+        .iter()
+        .filter(|(_, a)| access_of(&a.models, &model, now) == Access::Serves && !a.key.contains("|#") && account_usage(a, &model) == Usage::Available)
+        .max_by(|(i, a), (j, b)| room(a, &model).total_cmp(&room(b, &model)).then(j.cmp(i)))
+        .map(|(i, _)| *i);
+    if session.is_some_and(|s| s.explicit == Some(true) && s.credential_id.is_some() && s.credential_id != own_pin) {
+        return if current_refuses { PinDecision::UserPin { offer: best } } else { PinDecision::Keep };
+    }
+    match best {
+        Some(i) if current.is_some_and(|(c, _)| c == i) => PinDecision::Keep,
+        Some(i) => PinDecision::To(i),
+        // Signed-in accounts that serve it are out (an API key that serves it is omp's own to use).
+        None if accounts.iter().any(|(_, a)| access_of(&a.models, &model, now) == Access::Serves && !a.key.contains("|#")) => PinDecision::NoRoom,
+        None => PinDecision::NoServing,
+    }
+}
+
+/// How much of the windows that meter `model` account `a` has left (1: untouched).
+fn room(a: &LimitAccount, model: &str) -> f64 {
+    let used = a.windows.iter().filter(|w| w.tier.as_deref().is_none_or(|t| model.contains(&t.to_lowercase()))).filter_map(|w| w.used).fold(0.0, f64::max);
+    1.0 - used
+}
+
+/// What [`steer`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Steered {
+    Kept,
+    /// Pinned to this account (label).
+    Moved(String),
+    /// The user's pin (label) refuses the model; the account to offer instead.
+    UserPin { pinned: String, offer: Option<AccountOffer> },
+    /// Subagent `name` should move off `refusing`, and this omp (its bridge) cannot pin a subagent.
+    CantMoveSub { name: String, refusing: String },
+}
+
+/// Whose account a ticket may move: the session whose own request was refused (a subagent's own
+/// session, never its parent's), else the root session when it stopped itself; `None`: only
+/// subagents stopped, none of them refused. `(omp session id, subagent registry id)`.
+pub fn pin_target(root_sid: &str, root: bool, refused_by: Option<&crate::recovery::RefusedBy>) -> Option<(String, Option<String>)> {
+    match refused_by {
+        Some(rb) => Some((rb.session_id.clone(), Some(rb.agent_id.clone()))),
+        None if root => Some((root_sid.to_owned(), None)),
+        None => None,
+    }
+}
+
+/// Moves omp session `session_id` on `model` of `provider` to the account that serves it with the
+/// most room when its own refuses it ([`pin_decision`]; bridge 2.7.0 `pinAccount`, omp's `/session
+/// pin`), keeping that pin as TeleFlock's and recording it in the agent's Activity; never a pin the
+/// user set. An older bridge: nothing (omp's own choice, the ticket as before).
+///
+/// `session_id`: the omp session to move (a subagent's own, `agent`: its registry id); `root_sid`:
+/// the root session whose omp process (bridge) runs it; `refused`: its own request was refused.
+pub async fn steer(ctx: &Ctx, root_sid: &str, session_id: &str, agent: Option<&str>, provider: &str, model: &str, refused: bool) -> Steered {
+    let Ok((limits, idents)) = crate::ops::limits::limits_for(vec![(session_id.to_owned(), provider.to_owned())], false).await else { return Steered::Kept };
+    let limits = with_omp_blocks(limits, &idents).await;
+    let now = now_ms();
+    let label_of = |key: Option<&str>| key.and_then(|k| limits.accounts.iter().find(|a| a.key == k)).map_or_else(|| "the pinned account".to_owned(), |a| a.label.clone());
+    let offer_of = |i: usize| AccountOffer { key: limits.accounts[i].key.clone(), label: limits.accounts[i].label.clone() };
+    match pin_decision(&limits, session_id, provider, model, crate::model_access::own_pin(session_id, provider), refused, now) {
+        PinDecision::To(i) => {
+            let bridge = ctx.bridge.by_session(root_sid);
+            if let Some(name) = agent
+                && !bridge.as_ref().is_some_and(|b| b.caps.pin_account && b.caps.subagent_ctl)
+            {
+                return Steered::CantMoveSub { name: name.to_owned(), refusing: refused_accounts(&limits, provider, Some(model), now).join(", ") };
+            }
+            let Some(b) = bridge.filter(|b| b.caps.pin_account) else { return Steered::Kept };
+            let Some(credential) = crate::model_access::credential_for(provider, &idents[i]).await else { return Steered::Kept };
+            match ctx.bridge.pin_account(&b.session_id, credential, agent).await {
+                Ok(p) => {
+                    crate::model_access::set_own_pin(session_id, provider, Some(credential));
+                    let to = if p.label.is_empty() { limits.accounts[i].label.clone() } else { p.label };
+                    let refusing = refused_accounts(&limits, provider, Some(model), now).join(", ");
+                    info!(session = session_id, account = %to, model, "model access: moved the session to an account that serves its model");
+                    if let Some(a) = ctx.state.snapshot().agents.iter().find(|a| a.omp.as_ref().and_then(|o| o.session_id.as_deref()) == Some(root_sid)) {
+                        let detail = format!("{refusing} has no access to {model}");
+                        ctx.state.record_activity(&a.id, ActivityKind::ModelChanged, format!("Moved {} to {to}", agent.unwrap_or(&a.name)), Some(detail));
+                    }
+                    Steered::Moved(to)
+                }
+                Err(e) => {
+                    warn!(session = session_id, "model access: pinAccount: {e:?}");
+                    Steered::Kept
+                }
+            }
+        }
+        // A subagent's pin is its parent's or omp's: the offer pins the agent's main session.
+        PinDecision::UserPin { .. } if agent.is_some() => Steered::Kept,
+        PinDecision::UserPin { offer } => {
+            let pinned = label_of(limits.sessions.iter().find(|s| s.session_id == session_id && s.provider == provider).and_then(|s| s.account_key.as_deref()));
+            Steered::UserPin { pinned, offer: offer.map(offer_of) }
+        }
+        _ => Steered::Kept,
+    }
+}
+
+/// [`steer`] for a ticket that is about to go on (or a refused stop that just opened one): what it
+/// did goes on the ticket (`movedTo`; the user's pin and the account to offer). Returns why the
+/// ticket waits for the user (their pin refuses the model), unless they resume it by hand.
+pub async fn steer_ticket(ctx: &Ctx, session_id: &str, ticket: &Ticket) -> Option<String> {
+    let (Some(provider), Some(model), Some(r)) = (ticket.provider.as_deref(), ticket.model.as_deref(), crate::recovery::get()) else { return None };
+    if !is_limit(ticket.kind) && !ticket.refused_model {
+        return None;
+    }
+    let Some((target, agent)) = pin_target(session_id, ticket.root, ticket.refused_by.as_ref()) else { return None };
+    match steer(ctx, session_id, &target, agent.as_deref(), provider, model, ticket.refused_model).await {
+        Steered::Kept => None,
+        Steered::CantMoveSub { name, refusing } => {
+            let why = format!("{name} was refused by {refusing}; TeleFlock can't move a subagent to another account");
+            r.annotate(&ctx.herdr_session, session_id, |t| t.reason = why);
+            None
+        }
+        Steered::Moved(to) => {
+            r.annotate(&ctx.herdr_session, session_id, |t| {
+                t.moved_to = Some(to);
+                (t.user_pin, t.offer) = (None, None);
+            });
+            None
+        }
+        Steered::UserPin { pinned, offer } => {
+            let why = format!("{pinned} (your pin) has no access to {model}");
+            r.annotate(&ctx.herdr_session, session_id, |t| (t.user_pin, t.offer) = (Some(pinned), offer));
+            ticket.manual.is_none().then_some(why)
+        }
+    }
+}
+
+/// `agent.useAccount`: pins the agent's session to account `key` (the user's choice: omp's
+/// `/session pin`, never taken for TeleFlock's own) and resumes its ticket, if it has one.
+pub async fn use_account(ctx: &Ctx, agent_id: &str, key: &str) -> Result<RetryResult, ApiError> {
+    let a = ctx.state.agent(agent_id).ok_or_else(|| ApiError::new("not_found", format!("no agent `{agent_id}`")))?;
+    let sid = ctx.state.omp_session_of(agent_id).or_else(|| a.omp.as_ref().and_then(|o| o.session_id.clone())).ok_or_else(|| ApiError::new("invalid_params", format!("{} has no omp session", a.name)))?;
+    let provider = key.split('|').next().filter(|p| !p.is_empty()).ok_or_else(|| ApiError::new("invalid_params", "not an account key"))?;
+    let b = ctx.bridge.by_session(&sid).filter(|b| b.caps.pin_account).ok_or_else(|| {
+        ApiError::new("unsupported", "moving a session to another account needs TeleFlock's bridge 2.7.0 in this omp").with_hint("Restart the agent (Mark done, then Resume) so it loads the current bridge")
+    })?;
+    let (limits, idents) = crate::ops::limits::limits_for(vec![(sid.clone(), provider.to_owned())], false).await?;
+    let i = limits.accounts.iter().position(|x| x.key == key).ok_or_else(|| ApiError::new("not_found", "that account is not linked on this host"))?;
+    let credential = crate::model_access::credential_for(provider, &idents[i]).await.ok_or_else(|| ApiError::new("invalid_params", "omp pins signed-in accounts only"))?;
+    let p = ctx.bridge.pin_account(&b.session_id, credential, None).await.map_err(ApiError::from)?;
+    // The user chose it: their pin from now on, which TeleFlock does not move.
+    crate::model_access::set_own_pin(&sid, provider, None);
+    let label = if p.label.is_empty() { limits.accounts[i].label.clone() } else { p.label };
+    ctx.state.record_activity(agent_id, ActivityKind::ModelChanged, format!("Pinned {} to {label}", a.name), Some("you chose it for this session".into()));
+    if let Some(r) = crate::recovery::get()
+        && r.ticket(&ctx.herdr_session, &sid).is_some()
+    {
+        r.annotate(&ctx.herdr_session, &sid, |t| (t.user_pin, t.offer, t.moved_to) = (None, None, None));
+        return crate::recovery::resume_now(ctx, agent_id).await;
+    }
+    Ok(RetryResult { started: false, via: RetryVia::Retry })
 }
 
 /// What a due limit ticket finds when usage is read afresh ([`recheck`]).
@@ -313,7 +586,7 @@ pub enum Recheck {
 /// [`Recheck::Later`], at the earliest reset, else checking again 15, 30, then 60 min apart as the
 /// ticket keeps waiting; no account with access to the model → [`Recheck::NoAccess`].
 pub async fn recheck(session_id: &str, ticket: &Ticket) -> Recheck {
-    let Some(provider) = ticket.provider.as_deref().filter(|_| is_limit(ticket.kind)) else { return Recheck::Go };
+    let Some(provider) = ticket.provider.as_deref().filter(|_| is_limit(ticket.kind) || ticket.refused_model) else { return Recheck::Go };
     let now = now_ms();
     match usage_of(session_id, provider, ticket.model.as_deref(), true).await {
         (u @ Usage::Exhausted(_), _) => {
@@ -685,7 +958,7 @@ pub async fn f5(ctx: &Ctx, agent_id: &str, bridge: Option<&BridgeSession>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tf_proto::{LimitAccount, LimitSession, LimitWindow};
+    use tf_proto::{LimitAccount, LimitSession};
 
     fn window(id: &str, tier: Option<&str>, status: LimitStatus, resets_at: Option<Millis>) -> LimitWindow {
         LimitWindow {
@@ -739,7 +1012,7 @@ mod tests {
         let h = 3_600_000;
         let room = |key: &str| account(key, "anthropic", vec![window("7d", None, LimitStatus::Ok, Some(now + 50 * h))]);
         let out = |key: &str, reset: Millis| account(key, "anthropic", vec![window("7d", None, LimitStatus::Exhausted, Some(reset))]);
-        let pin = vec![LimitSession { session_id: "s".into(), provider: "anthropic".into(), account_key: Some("anthropic|out".into()) }];
+        let pin = vec![LimitSession { session_id: "s".into(), provider: "anthropic".into(), account_key: Some("anthropic|out".into()), explicit: None, credential_id: None }];
         let model = Some("claude-mythos-5-2");
         // Room but no access: not a reason to resume soon; the earliest reset of an account that
         // can serve it is.
@@ -773,11 +1046,127 @@ mod tests {
         assert_eq!(why, "No anthropic account has access to claude-mythos-5-2 (refused on anthropic|out, anthropic|room)");
     }
 
+    fn session(key: &str, explicit: bool, credential: i64) -> Vec<LimitSession> {
+        vec![LimitSession { session_id: "s".into(), provider: "anthropic".into(), account_key: Some(key.into()), explicit: Some(explicit), credential_id: Some(credential) }]
+    }
+
+    #[test]
+    fn a_session_moves_off_an_account_that_refuses_its_model_to_the_serving_one_with_the_most_room() {
+        let now = 1_000_000_000;
+        let h = 3_600_000;
+        let used = |key: &str, used: f64| {
+            let mut w = window("7d", None, LimitStatus::Ok, Some(now + 50 * h));
+            w.used = Some(used);
+            account(key, "anthropic", vec![w])
+        };
+        let out = |key: &str| account(key, "anthropic", vec![window("7d", None, LimitStatus::Exhausted, Some(now + 9 * h))]);
+        let m = "claude-mythos-5-2";
+        let refusing = mythos(used("anthropic|email:no", 0.1), true, now - h);
+        let busy = mythos(used("anthropic|email:busy", 0.7), false, now - h);
+        let roomy = mythos(used("anthropic|email:roomy", 0.2), false, now - h);
+        // The session's own (implicit) account refuses the model; two serve it: the most room wins.
+        let l = limits(vec![refusing.clone(), busy.clone(), roomy.clone()], session("anthropic|email:no", false, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::To(2));
+        // No pin at all (a new session): the same.
+        let none = limits(vec![refusing.clone(), roomy.clone()], vec![]);
+        assert_eq!(pin_decision(&none, "s", "anthropic", m, None, true, now), PinDecision::To(1));
+        // The serving account is out of usage: no pin; the ticket waits for its reset.
+        let l = limits(vec![refusing.clone(), mythos(out("anthropic|email:out"), false, now - h)], session("anthropic|email:no", false, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::NoRoom);
+        assert_eq!(provider_usage(&l, "s", "anthropic", Some(m), now), Usage::Exhausted(Some(now + 9 * h)));
+        // omp blocked the serving account (a usage-limit 429) though the report it caches still shows
+        // room: out until the block ends, so no pin and no resume before then.
+        let mut cached = roomy.clone();
+        blocked(&mut cached, now + h / 2);
+        let l = limits(vec![refusing.clone(), cached], session("anthropic|email:no", false, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::NoRoom);
+        assert_eq!(provider_usage(&l, "s", "anthropic", Some(m), now), Usage::Exhausted(Some(now + h / 2)));
+        // A window that is out longer than the block keeps its own reset.
+        let mut long = mythos(out("anthropic|email:long"), false, now - h);
+        blocked(&mut long, now + h);
+        assert_eq!(account_usage(&long, m), Usage::Exhausted(Some(now + 9 * h)));
+        // No account known to serve it (the others never ran it): no pin.
+        let l = limits(vec![refusing.clone(), used("anthropic|email:unknown", 0.1)], session("anthropic|email:no", false, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::NoServing);
+        // Already on an account that serves it with room: nothing to do, no churn.
+        let l = limits(vec![refusing.clone(), roomy.clone(), busy.clone()], session("anthropic|email:busy", true, 5));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, Some(5), true, now), PinDecision::Keep);
+        // An API key serves it: omp pins signed-in accounts only.
+        let key = mythos(used("anthropic|#4", 0.0), false, now - h);
+        let l = limits(vec![refusing.clone(), key], session("anthropic|email:no", false, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::NoServing);
+        // Nothing refuses the model: omp's own choice stands.
+        let l = limits(vec![busy.clone(), roomy.clone()], session("anthropic|email:busy", false, 5));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::Keep);
+    }
+
+    #[test]
+    fn a_subagents_refusal_moves_the_subagent_never_its_parent() {
+        let now = 1_000_000_000;
+        let h = 3_600_000;
+        let used = |key: &str, used: f64| {
+            let mut w = window("7d", None, LimitStatus::Ok, Some(now + 50 * h));
+            w.used = Some(used);
+            account(key, "anthropic", vec![w])
+        };
+        let m = "claude-mythos-5-2";
+        // The parent runs Sonnet and the child Mythos, both on the account that refuses Mythos.
+        let refusing = mythos(used("anthropic|email:no", 0.1), true, now - h);
+        let roomy = mythos(used("anthropic|email:roomy", 0.2), false, now - h);
+        let mut sessions = session("anthropic|email:no", false, 3);
+        sessions[0].session_id = "parent".into();
+        let mut child = session("anthropic|email:no", false, 3);
+        child[0].session_id = "child".into();
+        sessions.extend(child);
+        let l = limits(vec![refusing, roomy], sessions);
+        // The child's request 404s: the child's own session moves, the parent's pin stays.
+        let child = crate::recovery::RefusedBy { agent_id: "0-Audit".into(), session_id: "child".into() };
+        let (target, agent) = pin_target("parent", true, Some(&child)).unwrap();
+        assert_eq!((target.as_str(), agent.as_deref()), ("child", Some("0-Audit")));
+        assert_eq!(pin_decision(&l, &target, "anthropic", m, None, true, now), PinDecision::To(1));
+        // Only subagents stopped, none refused: nobody's pin moves.
+        assert_eq!(pin_target("parent", false, None), None);
+        // The parent's own refusal still moves the parent.
+        assert_eq!(pin_target("parent", true, None), Some(("parent".to_owned(), None)));
+        assert_eq!(pin_decision(&l, "parent", "anthropic", m, None, true, now), PinDecision::To(1));
+        // A session whose own requests were not refused: no account of its own (omp's choice) or one
+        // that only ran out keeps it.
+        let none = limits(vec![mythos(used("anthropic|email:no", 0.1), true, now - h), mythos(used("anthropic|email:roomy", 0.2), false, now - h)], vec![]);
+        assert_eq!(pin_decision(&none, "s", "anthropic", m, None, false, now), PinDecision::Keep);
+        let out = mythos(account("anthropic|email:out", "anthropic", vec![window("7d", None, LimitStatus::Exhausted, Some(now + 9 * h))]), false, now - h);
+        let l = limits(vec![mythos(used("anthropic|email:no", 0.1), true, now - h), out, mythos(used("anthropic|email:roomy", 0.2), false, now - h)], session("anthropic|email:out", false, 4));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, false, now), PinDecision::Keep);
+    }
+
+    #[test]
+    fn a_pin_the_user_set_is_never_moved_but_teleflocks_own_is() {
+        let now = 1_000_000_000;
+        let h = 3_600_000;
+        let room = |key: &str| account(key, "anthropic", vec![window("7d", None, LimitStatus::Ok, Some(now + 50 * h))]);
+        let m = "claude-mythos-5-2";
+        let accounts = vec![mythos(room("anthropic|email:pinned"), true, now - h), mythos(room("anthropic|email:serves"), false, now - h)];
+        // The user's own `/session pin` (explicit, not TeleFlock's) refuses the model: held, the
+        // serving account offered.
+        let l = limits(accounts.clone(), session("anthropic|email:pinned", true, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::UserPin { offer: Some(1) });
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, Some(9), true, now), PinDecision::UserPin { offer: Some(1) }, "TeleFlock pinned another credential once");
+        // omp's own sticky choice (not explicit): moved.
+        let l = limits(accounts.clone(), session("anthropic|email:pinned", false, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::To(1));
+        // TeleFlock's own earlier pin, to an account that refuses the model since: moved again.
+        let l = limits(accounts.clone(), session("anthropic|email:pinned", true, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, Some(3), true, now), PinDecision::To(1));
+        // The user's pin only ran out (it serves the model): left alone, omp falls through by itself.
+        let out = account("anthropic|email:pinned", "anthropic", vec![window("7d", None, LimitStatus::Exhausted, Some(now + h))]);
+        let l = limits(vec![mythos(out, false, now - h), accounts[1].clone(), mythos(room("anthropic|email:no"), true, now - h)], session("anthropic|email:pinned", true, 3));
+        assert_eq!(pin_decision(&l, "s", "anthropic", m, None, true, now), PinDecision::Keep);
+    }
+
     #[test]
     fn usage_follows_the_pinned_account_the_model_tier_and_the_other_accounts() {
         let a = account("anthropic|email:a", "anthropic", vec![window("5h", None, LimitStatus::Exhausted, Some(9_000)), window("opus", Some("opus"), LimitStatus::Exhausted, Some(20_000))]);
         let b = account("anthropic|email:b", "anthropic", vec![window("5h", None, LimitStatus::Ok, Some(9_000))]);
-        let pinned = vec![LimitSession { session_id: "s1".into(), provider: "anthropic".into(), account_key: Some("anthropic|email:a".into()) }];
+        let pinned = vec![LimitSession { session_id: "s1".into(), provider: "anthropic".into(), account_key: Some("anthropic|email:a".into()), explicit: None, credential_id: None }];
         // The opus window meters opus models only; the shared one meters every model.
         let only_a = limits(vec![a.clone()], pinned.clone());
         assert_eq!(provider_usage(&only_a, "s1", "anthropic", Some("claude-opus-5"), 0), Usage::Exhausted(Some(20_000)));
@@ -807,7 +1196,7 @@ mod tests {
         let b = account("anthropic|b", "anthropic", vec![five(LimitStatus::Ok, now + h), week(LimitStatus::Exhausted, now + 81 * h)]);
         let c = account("anthropic|c", "anthropic", vec![five(LimitStatus::Ok, now + h), week(LimitStatus::Exhausted, now + 91 * h)]);
         let d = account("anthropic|d", "anthropic", vec![five(LimitStatus::Ok, now + 4 * h), week(LimitStatus::Ok, now + 50 * h)]);
-        let pin = vec![LimitSession { session_id: "s".into(), provider: "anthropic".into(), account_key: Some("anthropic|c".into()) }];
+        let pin = vec![LimitSession { session_id: "s".into(), provider: "anthropic".into(), account_key: Some("anthropic|c".into()), explicit: None, credential_id: None }];
         let all = limits(vec![a.clone(), b.clone(), c.clone(), d], pin.clone());
         let u = provider_usage(&all, "s", "anthropic", Some("claude-opus-5"), 0);
         assert_eq!(u, Usage::Elsewhere { own_out: true });

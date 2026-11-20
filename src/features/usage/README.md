@@ -48,7 +48,9 @@ than 2 % it reaches back to the reading 2 % below (at most a fifth of the window
 names that basis, and a level held for t ≥ 5 min caps it at 1 % per t, so a burst that stopped fades within
 minutes. hostd has a reading about every minute while agents work (omp refreshes its windows from response
 headers; `crates/tf-hostd/src/ops/README.md`). Accounts rows and the session inspector use the same projection
-(`limitsUi.ts`: `paceAlert`, `paceStatus`).
+(`limitsUi.ts`: `paceAlert`, `paceStatus`). Each tile also lists what the agents' requests showed about models on the
+account (`LimitAccount.models`, `ModelAccessLines.tsx`: "No access to claude-mythos-5-2", "Serves …"; architecture
+§3.22 "Model access").
 
 **Flock Wrapped** (`src/features/wrapped`, `#/wrapped`) opens from here: a header button before the range control
 on desktop, a row above Today on phones (`LinkRow` from `@/features/shell/MoreView`). It is Usage's sub-page

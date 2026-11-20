@@ -1,0 +1,6 @@
+# Model access lab (setup.sh copies this into the lab's omp agent dir): omp's own Anthropic provider,
+# served by mock.ts (next to this file) on 127.0.0.1:18791. Two signed-in accounts with fake tokens
+# (setup.sh imports them); the lab runs in a network namespace with nothing but loopback.
+providers:
+  anthropic:
+    baseUrl: http://127.0.0.1:18791

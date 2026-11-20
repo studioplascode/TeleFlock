@@ -263,7 +263,12 @@ date when not today; `checks again` on backoff), "Checking usage…", "Resuming�
 "Continuing where it stopped in 0:42" / "Cut off mid-turn · <why>"; kinds it doesn't know read "Stopped · …".
 Actions: Resume now / Continue (now) (`agent.autoResumeNow`) and Don't auto-resume / Don't auto-continue / Dismiss
 (`agent.autoResumeCancel`), each with its own hint; the tooltip has the reason, provider · model and since, or for
-an ended card when it ended and what it was doing. An ended card without a ticket (herdr is down: hostd makes none)
+an ended card when it ended and what it was doing. Model access (architecture §3.22): a stop on a model the provider
+refuses on the account omp used reads "No model access · resumes ~03:00" ("No access" on the badge); the tooltip lists
+the accounts left out ("Not counted, no access to claude-mythos-5-2: …") or the move hostd made ("Moved to
+<account>: <account> has no access to claude-mythos-5-2"); when the user's own `/session pin` refuses the model the
+ticket waits ("<account> (your pin) has no access to …") and offers "Use <account> for this session"
+(`agent.useAccount`: omp's `/session pin` through bridge 2.7.0, then resume). An ended card without a ticket (herdr is down: hostd makes none)
 gets a status line instead, no buttons: "Ended at 13:58 (herdr stopped) · comes back when herdr runs again" (the
 clause while `useHerdrDown`). Minute clock (seconds only for a restart's countdown), no animation; on the phone the
 line wraps to two lines instead of truncating.

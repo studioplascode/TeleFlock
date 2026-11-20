@@ -97,6 +97,37 @@ wire_struct! {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[ts(as = "Option<Vec<String>>", optional)]
         pub no_access: Vec<String>,
+        /// The stop was the provider refusing `model` on the account omp used (no access to it,
+        /// Anthropic's 404 `not_found_error`), not a limit. Absent otherwise and from older daemons.
+        pub refused_model: Option<bool>,
+        /// The account (label) TeleFlock moved the session to because its own refuses `model`
+        /// (omp's `/session pin`).
+        pub moved_to: Option<String>,
+        /// The session is pinned by the user (`/session pin`) to this account (label), which refuses
+        /// `model`: TeleFlock never moves a pin the user set, so the ticket waits (`offer`).
+        pub user_pin: Option<String>,
+        /// An account that serves `model` and has room: `agent.useAccount` pins the session to it
+        /// and resumes.
+        pub offer: Option<AccountOffer>,
+    }
+}
+
+wire_struct! {
+    /// An account a session can be moved to (`AutoResume.offer`).
+    pub struct AccountOffer {
+        /// `LimitAccount.key`.
+        pub key: String,
+        pub label: String,
+    }
+}
+
+wire_struct! {
+    /// `agent.useAccount`: pins the agent's session to account `key` (omp's `/session pin`, bridge
+    /// 2.7.0) and resumes its ticket.
+    pub struct UseAccountParams {
+        pub agent_id: String,
+        /// `LimitAccount.key` of a signed-in account of the session's provider.
+        pub key: String,
     }
 }
 

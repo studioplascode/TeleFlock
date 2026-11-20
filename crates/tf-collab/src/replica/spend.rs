@@ -308,13 +308,24 @@ impl ArtifactLedger {
     pub fn ingest(&mut self, rel: &str, chunk: &[u8]) -> Vec<ArtifactCall> {
         let Some(kind) = ArtifactKind::of(rel) else { return Vec::new() };
         let tail = self.files.entry(rel.to_owned()).or_insert_with(|| FileTail::new(kind));
+        let start = tail.offset - tail.carry.len() as u64;
         tail.offset += chunk.len() as u64;
-        tail.carry.extend_from_slice(chunk);
-        let Some(last_nl) = tail.carry.iter().rposition(|b| *b == b'\n') else { return Vec::new() };
-        let rest = tail.carry.split_off(last_nl + 1);
-        let complete = std::mem::replace(&mut tail.carry, rest);
+        // Only the new bytes can end the line in progress: fed a long line chunk by chunk, the
+        // carry is not searched again each time.
+        let Some(last_nl) = chunk.iter().rposition(|b| *b == b'\n') else {
+            tail.carry.extend_from_slice(chunk);
+            return Vec::new();
+        };
+        let mut complete = std::mem::take(&mut tail.carry);
+        complete.extend_from_slice(&chunk[..=last_nl]);
+        tail.carry = chunk[last_nl + 1..].to_vec();
         let mut calls = Vec::new();
-        for line in complete.split(|b| *b == b'\n').filter(|l| !l.iter().all(u8::is_ascii_whitespace)) {
+        let mut end = start;
+        for line in complete.split_inclusive(|b| *b == b'\n') {
+            end += line.len() as u64;
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
             let Ok(entry) = serde_json::from_slice::<Value>(line) else { continue };
             match tail.header {
                 None => {
@@ -338,7 +349,7 @@ impl ArtifactLedger {
             {
                 self.presented.push(a);
             }
-            self.credentials.entry(&entry);
+            self.credentials.entry(&entry, rel, end);
             let (details, tool) = match s(&entry, "type") {
                 Some("custom_message") => (entry.get("details"), ""),
                 Some("message") => entry.get("message").map_or((None, ""), |m| (m.get("details"), s(m, "toolName").unwrap_or(""))),

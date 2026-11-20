@@ -1,5 +1,5 @@
 import { describePace, type WindowPace } from "@/core";
-import type { LimitWindow } from "@/core/gen";
+import type { LimitWindow, ModelAccess } from "@/core/gen";
 import type { Status } from "@/design";
 
 /**
@@ -8,6 +8,16 @@ import type { Status } from "@/design";
  * tint and the reason behind it, and the expired-login message. One vocabulary, so the same
  * account says the same thing on every page.
  */
+
+/**
+ * What omp's requests showed about models on an account (`models`, hostd's model access): a refusal
+ * first ("No access to claude-mythos-5-2"), then what it serves ("Serves claude-mythos-5-2").
+ */
+export function modelAccessLines(models: ModelAccess[] | undefined): { text: string; denied: boolean; model: string }[] {
+  return [...(models ?? [])]
+    .sort((a, b) => Number(b.denied) - Number(a.denied) || b.at - a.at)
+    .map((m) => ({ text: m.denied ? `No access to ${m.model}` : `Serves ${m.model}`, denied: m.denied, model: m.model }));
+}
 
 /** Display names of omp provider ids that report subscription limits. */
 export const PROVIDER_NAMES: Record<string, string> = {

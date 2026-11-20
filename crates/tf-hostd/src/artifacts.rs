@@ -35,14 +35,17 @@ pub fn artifacts_dir(session_file: &Path) -> PathBuf {
 }
 
 /// Feeds every transcript's new bytes under `dir` to `ledger`; returns the calls they completed.
-/// A transcript that shrank (rewritten) restarts the ledger from scratch.
+/// A transcript that shrank (rewritten) restarts the ledger from scratch. Read in chunks into one
+/// buffer: after a restart a scan reads every transcript whole, and they can be long.
 pub fn scan(dir: &Path, ledger: &mut ArtifactLedger) -> Vec<ArtifactCall> {
+    const CHUNK: usize = 256 << 10;
     let mut files = Vec::new();
     walk(dir, "", 0, &mut files);
     if files.iter().any(|(rel, _, len)| *len < ledger.offset(rel)) {
         *ledger = ArtifactLedger::default();
     }
     let mut calls = Vec::new();
+    let mut buf = Vec::new();
     for (rel, path, len) in files {
         let from = ledger.offset(&rel);
         if len <= from {
@@ -52,9 +55,20 @@ pub fn scan(dir: &Path, ledger: &mut ArtifactLedger) -> Vec<ArtifactCall> {
         if f.seek(SeekFrom::Start(from)).is_err() {
             continue;
         }
-        let mut buf = Vec::with_capacity((len - from) as usize);
-        if f.take(len - from).read_to_end(&mut buf).is_ok() {
-            calls.extend(ledger.ingest(&rel, &buf));
+        if buf.is_empty() {
+            buf = vec![0; CHUNK];
+        }
+        // Up to the length listed: bytes omp appends meanwhile wait for the next scan.
+        let mut left = len - from;
+        while left > 0 {
+            let want = left.min(CHUNK as u64) as usize;
+            match f.read(&mut buf[..want]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    calls.extend(ledger.ingest(&rel, &buf[..n]));
+                    left -= n as u64;
+                }
+            }
         }
     }
     calls
@@ -68,6 +82,14 @@ pub fn scan_live(dir: &Path, ledger: &mut ArtifactLedger) -> (Vec<ArtifactCall>,
     let presented = ledger.take_presented();
     ledger.go_live();
     (calls, presented)
+}
+
+/// The transcripts under artifacts dir `dir` (subagents, advisors) and their lengths, by path
+/// relative to it.
+pub fn transcript_lengths(dir: &Path) -> Vec<(String, u64)> {
+    let mut files = Vec::new();
+    walk(dir, "", 0, &mut files);
+    files.into_iter().map(|(rel, _, len)| (rel, len)).collect()
 }
 
 fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<(String, PathBuf, u64)>) {

@@ -614,9 +614,11 @@ fn session_accounts(db: &Path, live: &[(String, String)], accounts: &[(String, I
     let conn = open_ro(db).ok().flatten();
     live.iter()
         .map(|(sid, provider)| {
-            let identity = conn.as_ref().and_then(|c| pinned_identity(c, provider, sid));
+            let pin = conn.as_ref().and_then(|c| pinned_identity(c, provider, sid));
+            let (explicit, credential_id) = (pin.as_ref().map(|p| p.explicit), pin.as_ref().map(|p| p.credential_id));
             let prefix = format!("{provider}|");
-            let account_key = identity
+            let account_key = pin
+                .and_then(|p| p.identity_key)
                 .and_then(|ik| accounts.iter().find(|(k, id)| k.starts_with(&prefix) && identity_matches(&ik, id)).map(|(k, _)| k.clone()))
                 .or_else(|| {
                     // A provider with exactly one account needs no pin.
@@ -626,13 +628,22 @@ fn session_accounts(db: &Path, live: &[(String, String)], accounts: &[(String, I
                         _ => None,
                     }
                 });
-            LimitSession { session_id: sid.clone(), provider: provider.clone(), account_key }
+            LimitSession { session_id: sid.clone(), provider: provider.clone(), account_key, explicit, credential_id }
         })
         .collect()
 }
 
-/// The `identity_key` of the credential omp pinned `session` to (never reads credential data).
-fn pinned_identity(conn: &rusqlite::Connection, provider: &str, session: &str) -> Option<String> {
+/// omp's pin of a session (`session:sticky:<provider>:<session id>`).
+struct Pin {
+    credential_id: i64,
+    /// `/session pin` (or `pinAccount`): omp's ranking never moves it.
+    explicit: bool,
+    /// The pinned credential's `identity_key`.
+    identity_key: Option<String>,
+}
+
+/// The credential omp pinned `session` to, and its `identity_key` (never reads credential data).
+fn pinned_identity(conn: &rusqlite::Connection, provider: &str, session: &str) -> Option<Pin> {
     let raw: String = conn
         .query_row(
             "SELECT value FROM cache WHERE key = ?1 AND expires_at > CAST(strftime('%s','now') AS INTEGER)",
@@ -641,10 +652,13 @@ fn pinned_identity(conn: &rusqlite::Connection, provider: &str, session: &str) -
         )
         .ok()?;
     let pin: Value = serde_json::from_str(&raw).ok()?;
-    let id = pin.get("credentialId").and_then(Value::as_i64)?;
-    conn.query_row("SELECT identity_key FROM auth_credentials WHERE id = ?1 AND provider = ?2", rusqlite::params![id, provider], |r| r.get::<_, Option<String>>(0))
+    let credential_id = pin.get("credentialId").and_then(Value::as_i64)?;
+    let explicit = pin.get("explicit").and_then(Value::as_bool).unwrap_or(false);
+    let identity_key = conn
+        .query_row("SELECT identity_key FROM auth_credentials WHERE id = ?1 AND provider = ?2", rusqlite::params![credential_id, provider], |r| r.get::<_, Option<String>>(0))
         .ok()
-        .flatten()
+        .flatten();
+    Some(Pin { credential_id, explicit, identity_key })
 }
 
 #[cfg(test)]

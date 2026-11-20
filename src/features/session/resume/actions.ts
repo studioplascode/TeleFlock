@@ -88,6 +88,23 @@ export function resumeNow(key: string): Promise<boolean> {
   });
 }
 
+/**
+ * "Use <account> for this session": the session's own pin (the user's) refuses its model; this pins it
+ * to `account`, which serves it (omp's `/session pin`, `agent.useAccount`), and resumes the ticket.
+ */
+export function useAccount(key: string, account: { key: string; label: string }): Promise<boolean> {
+  const { hostId, agentId } = parseAgentKey(key);
+  return once(key, async () => {
+    try {
+      const r = await core.host(hostId).call("agent.useAccount", { agentId, key: account.key });
+      toast({ title: `Using ${account.label} for this session`, description: r.started ? "Resumed on it." : undefined, status: "done", duration: 3200 });
+      return true;
+    } catch (e) {
+      return failed(`Couldn't use ${account.label}`, e);
+    }
+  });
+}
+
 /** Don't auto-resume (`dismiss`: the ticket already won't resume by itself): drops the ticket; the agent stays as it is. */
 export function cancelAutoResume(key: string, dismiss: boolean): Promise<boolean> {
   const { hostId, agentId } = parseAgentKey(key);

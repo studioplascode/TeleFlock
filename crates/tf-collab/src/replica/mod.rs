@@ -59,7 +59,7 @@ use crate::frame::{AgentSnapshot, HostFrame, SessionHeader, SessionState, UiRequ
 use crate::guest::{EndReason, GuestEvent, Snapshot};
 use util::{arr, b, clip, content_images, content_text, f, first_line, is_session_internal, non_empty, s, shown_sha256, ts, u};
 
-pub use access::{refused_model, CredentialUse};
+pub use access::{refused_model, CredentialUse, TranscriptTail};
 pub use irc::{may_hold_irc, IrcFileScan, IrcRecord, IRC_USER};
 pub use live_rows::{LiveRow, MAX_LIVE_ROWS};
 pub use spend::{ArtifactCall, ArtifactKind, ArtifactLedger, ModelKey, Spend};
@@ -449,9 +449,6 @@ pub struct Replica {
     /// it took that value (`Subagent.completion_at`). Kept across snapshot reloads of the session, so
     /// a resync replaying the same estimate keeps its time.
     completion: HashMap<String, (f32, Millis)>,
-    /// Provider requests the session's messages recorded since [`Replica::take_credentials`]: the
-    /// newest per credential, model and outcome (tf-hostd learns which account serves which model).
-    credentials: access::Collector,
 }
 
 impl Replica {
@@ -513,7 +510,6 @@ impl Replica {
             expected_originals: VecDeque::new(),
             journal: Journal::default(),
             completion: HashMap::new(),
-            credentials: access::Collector::default(),
         }
     }
 
@@ -953,7 +949,6 @@ impl Replica {
         let meta_before = self.meta.clone();
         let ui_before = self.ui.current().map(|r| r.id.clone());
         self.now = now;
-        self.note_credentials(ev);
         match ev {
             GuestEvent::Snapshot(snap) => self.load_snapshot(snap, &mut out),
             GuestEvent::Frame(frame) => {
@@ -991,27 +986,6 @@ impl Replica {
         out.replies.extend(self.ui.take_replies());
         out.liveness_changed = self.live_key() != live_before;
         out
-    }
-
-    /// The provider requests `ev` shows (assistant messages naming their credential, each with the
-    /// fingerprint of its account when a `credential_pin` entry follows it).
-    fn note_credentials(&mut self, ev: &GuestEvent) {
-        match ev {
-            GuestEvent::Snapshot(snap) => snap.entries.iter().for_each(|e| self.credentials.entry(e)),
-            GuestEvent::Frame(HostFrame::Entry { entry }) => self.credentials.entry(entry),
-            GuestEvent::Frame(HostFrame::Event { event }) if s(event, "type") == Some("message_end") => {
-                if let Some(u) = event.get("message").and_then(|m| access::CredentialUse::of(m, None)) {
-                    self.credentials.message(u);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// The provider requests the applied messages recorded since the last call: per credential,
-    /// model and outcome (answered or refused), the newest.
-    pub fn take_credentials(&mut self) -> Vec<access::CredentialUse> {
-        self.credentials.take()
     }
 
     fn end(&mut self, reason: String, out: &mut Update) {
