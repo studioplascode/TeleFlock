@@ -48,6 +48,11 @@ dirs = "7"
 # The browser process: SIGTERM, its process group, and the parent-death signal (Linux).
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# The TeleFlock Browser on Windows: the organization's policy on Microsoft sign-in with the Windows
+# account (`CloudAPAuthEnabled`, read from the registry, never written).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [build-dependencies]
 sha2 = "0.10"
 zstd = "0.14"

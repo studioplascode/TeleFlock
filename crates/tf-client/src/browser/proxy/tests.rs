@@ -351,6 +351,7 @@ fn an_agents_new_tab_is_held_until_it_is_known_to_be_its() {
     let out = c.agent(cmd(20, "Target.createTarget", json!({ "url": "about:blank" }), None));
     let sent = browser_msgs(&out);
     assert_eq!(sent[0]["params"]["newWindow"], json!(true), "agents' tabs open in windows of their own");
+    assert!(sent[0]["params"].get("browserContextId").is_none(), "in the user's profile: the user's sign-ins are its");
     // Recorded order: the new tab is attached (paused) before createTarget answers; the monitor
     // has not seen its page yet.
     let tab = "C92EA0088CFB51DCF1B5C8E06477795B";

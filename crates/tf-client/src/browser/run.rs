@@ -193,14 +193,19 @@ async fn start(inner: &Arc<Inner>, headed: bool, lock: &mut Option<File>) -> Res
     }
 }
 
-/// One launch of `engine`: the profile freed from a browser an earlier run left behind and set to
-/// restore its last session, then the process. A block marked on it is lifted when it starts.
+/// One launch of `engine`: the profile freed from a browser an earlier run left behind, set to
+/// restore its last session and (Windows) to sign in to Microsoft's sites with the Windows account
+/// or not, as the user chose and the organization allows ([`super::signin`]), then the process. A
+/// block marked on it is lifted when it starts.
 async fn run_engine(inner: &Arc<Inner>, engine: &BrowserEngine, headed: bool) -> Result<Proc, SpawnError> {
     let b = &inner.browser;
     let profile = b.profile();
     launch::free_profile(&profile).await;
     if let Err(e) = launch::restore_last_session(&profile) {
         log::warn!("browser: can't set {} to restore its last session: {e}", profile.display());
+    }
+    if b.os == "windows" {
+        super::signin::before_start(inner, &profile, engine).await;
     }
     let origins = b.origins();
     let args = launch::args(&launch::Flags { profile: &profile, headed, origins: &origins, os: &b.os, root: launch::is_root() });

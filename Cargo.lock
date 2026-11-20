@@ -6113,6 +6113,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "zip",
  "zstd",
 ]

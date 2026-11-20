@@ -1,6 +1,6 @@
 import type { AppEvent, DiagReport, ForwardSaveParams, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
-import { DemoBrowser, type DemoBrowserKnob } from "./browser";
+import { DemoBrowser, type DemoBrowserKnob, type DemoSignInKnob } from "./browser";
 import { type DemoClock, realClock } from "./clock";
 import { DemoDictation } from "./dictation";
 import { DEMO_GROUP } from "./dispatchAuto";
@@ -23,6 +23,8 @@ export interface DemoEngineOptions {
   autoStart?: boolean;
   /** The browser's demo knob (`?demo&browser=blocked`); read from the page URL when absent. */
   browser?: DemoBrowserKnob;
+  /** Microsoft sign-in with the Windows account in Settings → Browser (`?demo&signin=…`); read from the page URL when absent. */
+  signIn?: DemoSignInKnob;
 }
 
 const SETTINGS_KEY = "tf.demo.settings";
@@ -135,7 +137,9 @@ export class DemoEngine {
     });
     this.recordings = new DemoRecordings({ clock: this.clock, emit: (e) => this.emit(e) });
     this.browser =
-      opts.mode === "backend" ? new DemoBrowser({ clock: this.clock, emit: (e) => this.emit(e), hosts: () => this.hosts.values(), device: () => this.settings.deviceName, knob: opts.browser }) : null;
+      opts.mode === "backend"
+        ? new DemoBrowser({ clock: this.clock, emit: (e) => this.emit(e), hosts: () => this.hosts.values(), device: () => this.settings.deviceName, knob: opts.browser, signIn: opts.signIn })
+        : null;
     this.dictation =
       opts.mode === "backend" ? new DemoDictation({ clock: this.clock, emit: (e) => this.emit(e), phone: typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent) }) : null;
     if (opts.mode === "backend" && !opts.empty) {

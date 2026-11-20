@@ -30,6 +30,7 @@ mod install;
 mod launch;
 pub(crate) mod proxy;
 mod run;
+mod signin;
 mod streams;
 #[cfg(test)]
 mod tests;
@@ -66,7 +67,8 @@ const START_WAIT: Duration = Duration::from_secs(60);
 /// Proxy changes (tab owners, activity) reach the UI at most this often.
 const CHANGES_EVERY: Duration = Duration::from_millis(250);
 
-/// `<data_dir>/browser/config.json` (`browser.configSet`; `blocked` is the app core's).
+/// `<data_dir>/browser/config.json` (`browser.configSet`; `blocked` and `microsoftSignInSet` are the
+/// app core's).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Config {
@@ -75,6 +77,11 @@ struct Config {
     cap: u32,
     /// Attached agents may use the user's tabs.
     share_tabs: bool,
+    /// Windows: the browser signs in to Microsoft's sites with the Windows account (`signin`).
+    microsoft_sign_in: bool,
+    /// The profile holds the value TeleFlock set for it, which is TeleFlock's to remove again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    microsoft_sign_in_set: bool,
     /// Engines (paths) the organization's policy refused remote control when they were started
     /// here, until one starts fine again.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -83,7 +90,7 @@ struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { engine_path: None, headed: false, cap: CAP_DEFAULT, share_tabs: true, blocked: Vec::new() }
+        Config { engine_path: None, headed: false, cap: CAP_DEFAULT, share_tabs: true, microsoft_sign_in: false, microsoft_sign_in_set: false, blocked: Vec::new() }
     }
 }
 
@@ -1205,16 +1212,28 @@ async fn config(inner: &Arc<Inner>) -> BrowserConfig {
     refresh_engines(inner).await;
     let b = &inner.browser;
     let download = b.download();
-    let st = b.st.lock().unwrap();
-    let engines = st.engines.iter().map(|e| marked(e.clone(), &st.config.blocked)).collect();
-    BrowserConfig {
-        engine_path: st.config.engine_path.clone(),
-        headed: st.config.headed,
-        cap: st.config.cap,
-        share_tabs: st.config.share_tabs,
-        engines,
-        download,
-    }
+    let (mut config, sign_in) = {
+        let st = b.st.lock().unwrap();
+        let engines = st.engines.iter().map(|e| marked(e.clone(), &st.config.blocked)).collect();
+        // Windows: the organization's policy for the engine that runs (or would) decides first.
+        let engine = match &st.run {
+            Run::Running { engine, .. } => Some(engine.clone()),
+            _ => preferred(&st),
+        };
+        let sign_in = (b.os == "windows").then(|| (engine, st.config.microsoft_sign_in, st.config.microsoft_sign_in_set));
+        let config = BrowserConfig {
+            engine_path: st.config.engine_path.clone(),
+            headed: st.config.headed,
+            cap: st.config.cap,
+            share_tabs: st.config.share_tabs,
+            microsoft_sign_in: None,
+            engines,
+            download,
+        };
+        (config, sign_in)
+    };
+    config.microsoft_sign_in = sign_in.map(|(engine, chosen, ours)| signin::state(&b.profile(), engine.as_ref(), chosen, ours));
+    config
 }
 
 async fn config_set(inner: &Arc<Inner>, p: BrowserConfigSetParams) -> Result<BrowserConfig, ApiError> {
@@ -1230,13 +1249,18 @@ async fn config_set(inner: &Arc<Inner>, p: BrowserConfigSetParams) -> Result<Bro
     }
     let headed = p.headed.unwrap_or(false);
     let share_tabs = p.share_tabs.unwrap_or(true);
+    let microsoft_sign_in = p.microsoft_sign_in.unwrap_or(false);
     {
         let b = &inner.browser;
         let _ops = b.ops.lock().await;
         let _w = b.saving.lock().await;
-        // The blocked marks are the app core's: they stay.
-        let blocked = b.st.lock().unwrap().config.blocked.clone();
-        let c = Config { engine_path, headed, cap, share_tabs, blocked };
+        // The blocked marks and the record of what TeleFlock set in the profile are the app
+        // core's: they stay (turning Microsoft sign-in off removes that value at the next start).
+        let (blocked, microsoft_sign_in_set) = {
+            let st = b.st.lock().unwrap();
+            (st.config.blocked.clone(), st.config.microsoft_sign_in_set)
+        };
+        let c = Config { engine_path, headed, cap, share_tabs, microsoft_sign_in, microsoft_sign_in_set, blocked };
         write_json(&b.dir.join("config.json"), &c).await?;
         let proxy = {
             let mut st = b.st.lock().unwrap();
@@ -1244,6 +1268,7 @@ async fn config_set(inner: &Arc<Inner>, p: BrowserConfigSetParams) -> Result<Bro
             st.config.headed = c.headed;
             st.config.cap = c.cap;
             st.config.share_tabs = c.share_tabs;
+            st.config.microsoft_sign_in = c.microsoft_sign_in;
             st.proxy.clone()
         };
         // Connected agents see the user's tabs appear, or lose them, at once; under `ops`, so

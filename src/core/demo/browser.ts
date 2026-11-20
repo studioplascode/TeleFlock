@@ -17,8 +17,29 @@
  * downloaded, so it is offered; nothing is attached and expenses still asks. "Use TeleFlock's
  * browser" downloads it, chooses it and starts it; once it is there, a start of a blocked engine
  * runs it instead.
+ *
+ * `?demo&signin=…` shows Settings → Browser as on a Windows computer, with "Sign in to Microsoft
+ * with your Windows account" (`BrowserConfig.microsoftSignIn`, off until turned on): `windows` the
+ * user's choice decides; `org-off` / `org-on` the organization's policy turns it off / on (the
+ * switch can't change it); `profile` the browser's profile has it off, set there by someone else
+ * than TeleFlock, so turning it on changes nothing; `edge` / `other` the browser it runs can't use
+ * it (Microsoft Edge with its own sign-in, a browser without Chrome's integration).
  */
-import type { AppEvent, BrowserBlocked, BrowserConfig, BrowserDownload, BrowserEngine, BrowserFallback, BrowserInstall, BrowserRequest, BrowserScope, BrowserState, BrowserStatus, BrowserTabOwner } from "@/core/gen";
+import type {
+  AppEvent,
+  BrowserBlocked,
+  BrowserConfig,
+  BrowserDownload,
+  BrowserEngine,
+  BrowserFallback,
+  BrowserInstall,
+  BrowserMicrosoftSignIn,
+  BrowserRequest,
+  BrowserScope,
+  BrowserState,
+  BrowserStatus,
+  BrowserTabOwner,
+} from "@/core/gen";
 import { apiError, type CoreError } from "../errors";
 import { formatBytes } from "../upload";
 import type { AgentSim } from "./agent";
@@ -30,6 +51,9 @@ import { hash } from "./rng";
 /** `?demo&browser=blocked`. */
 export type DemoBrowserKnob = "blocked" | null;
 
+/** `?demo&signin=…`: Microsoft sign-in with the Windows account, as on a Windows computer. */
+export type DemoSignInKnob = "windows" | "org-off" | "org-on" | "profile" | "edge" | "other" | null;
+
 export interface DemoBrowserEnv {
   clock: DemoClock;
   emit(e: AppEvent): void;
@@ -38,6 +62,8 @@ export interface DemoBrowserEnv {
   device(): string;
   /** Demo knob (`?demo&browser=…`); read from the page URL when absent. */
   knob?: DemoBrowserKnob;
+  /** Demo knob (`?demo&signin=…`); read from the page URL when absent. */
+  signIn?: DemoSignInKnob;
 }
 
 type Run = "off" | "starting" | "running" | "error";
@@ -119,12 +145,31 @@ function readKnob(): DemoBrowserKnob {
   }
 }
 
+function readSignInKnob(): DemoSignInKnob {
+  try {
+    const v = typeof location === "undefined" ? null : new URLSearchParams(location.search).get("signin");
+    return v === "windows" || v === "org-off" || v === "org-on" || v === "profile" || v === "edge" || v === "other" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the core's `signin` module says (`browser.config`): a browser that can't use it first, then the organization's policy, then a value in the profile TeleFlock didn't set, then the user's choice. */
+function signInState(on: boolean, knob: Exclude<DemoSignInKnob, null>): BrowserMicrosoftSignIn {
+  if (knob === "edge" || knob === "other") return { on, active: false, unavailable: knob === "edge" ? "edge" : "browser" };
+  if (knob === "org-off" || knob === "org-on") return { on, active: knob === "org-on", decidedBy: "organization" };
+  if (knob === "profile") return on ? { on, active: false, decidedBy: "profile" } : { on, active: false };
+  return { on, active: on };
+}
+
 export class DemoBrowser {
   private run: Run = "off";
   private headed = false;
   /** The engine it runs (`running`). */
   private engine: BrowserEngine | undefined;
-  private config: { enginePath?: string; headed: boolean; cap: number; shareTabs: boolean } = { headed: false, cap: CAP_DEFAULT, shareTabs: true };
+  private config: { enginePath?: string; headed: boolean; cap: number; shareTabs: boolean; microsoftSignIn: boolean } = { headed: false, cap: CAP_DEFAULT, shareTabs: true, microsoftSignIn: false };
+  /** `?demo&signin=…`: Settings → Browser shows Microsoft sign-in with the Windows account. */
+  private readonly signIn: Exclude<DemoSignInKnob, null> | null;
   private cftInstalled = false;
   private install: BrowserInstall | undefined;
   /** The running download's Cancel, and whether it starts the browser when done (`installEngine {start}`). */
@@ -155,6 +200,7 @@ export class DemoBrowser {
 
   constructor(private readonly env: DemoBrowserEnv) {
     this.policy = (env.knob === undefined ? readKnob() : env.knob) === "blocked";
+    this.signIn = env.signIn === undefined ? readSignInKnob() : env.signIn;
     this.stopDrive = env.clock.every(DRIVE_MS, () => this.drive());
   }
 
@@ -644,7 +690,8 @@ export class DemoBrowser {
   // ---------------------------------------------------------------- engines and config
 
   private configView(): BrowserConfig {
-    return { enginePath: this.config.enginePath, headed: this.config.headed, cap: this.config.cap, shareTabs: this.config.shareTabs, engines: this.engines(), download: this.ownDownload() };
+    const microsoftSignIn = this.signIn ? signInState(this.config.microsoftSignIn, this.signIn) : undefined;
+    return { enginePath: this.config.enginePath, headed: this.config.headed, cap: this.config.cap, shareTabs: this.config.shareTabs, microsoftSignIn, engines: this.engines(), download: this.ownDownload() };
   }
 
   /** `browser.configSet` replaces the saved config: absent fields are the defaults. */
@@ -653,7 +700,7 @@ export class DemoBrowser {
     if (enginePath && !runnable(enginePath)) throw apiError("invalid_params", `${enginePath} is not a program on this computer`);
     const cap = typeof p.cap === "number" ? p.cap : CAP_DEFAULT;
     if (!Number.isInteger(cap) || cap < 1 || cap > CAP_MAX) throw apiError("invalid_params", `cap: 1 to ${CAP_MAX} agents`);
-    this.config = { enginePath, headed: p.headed === true, cap, shareTabs: p.shareTabs !== false };
+    this.config = { enginePath, headed: p.headed === true, cap, shareTabs: p.shareTabs !== false, microsoftSignIn: p.microsoftSignIn === true };
     this.admitWaiting();
     this.emit();
     return this.configView();

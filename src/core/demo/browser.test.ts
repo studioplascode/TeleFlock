@@ -3,15 +3,15 @@ import type { AppEvent, BrowserConfig, BrowserStatus, SessionSnapshot, ToolItem 
 import { agentKey } from "../keys";
 import { reduceEvents } from "../store/reduce";
 import { type CoreEvent, type CoreState, initialCoreState } from "../store/state";
-import type { DemoBrowserKnob } from "./browser";
+import type { DemoBrowserKnob, DemoSignInKnob } from "./browser";
 import { type DemoBrowserTab, demoAgentTabs, resetDemoAgentTabs } from "./browserTabs";
 import { ManualClock } from "./clock";
 import { DemoEngine } from "./engine";
 
-/** Engine + manual clock + a store fed through the real reducer; calls get 2 s (a browser start takes 1.2). `browser` plays `?demo&browser=…`. */
-function rig(browser: DemoBrowserKnob = null) {
+/** Engine + manual clock + a store fed through the real reducer; calls get 2 s (a browser start takes 1.2). `browser` plays `?demo&browser=…`, `signIn` `?demo&signin=…`. */
+function rig(browser: DemoBrowserKnob = null, signIn: DemoSignInKnob = null) {
   const clock = new ManualClock();
-  const engine = new DemoEngine({ mode: "backend", clock, browser });
+  const engine = new DemoEngine({ mode: "backend", clock, browser, signIn });
   const events: AppEvent[] = [];
   let state: CoreState = initialCoreState("demo");
   engine.subscribe((e) => {
@@ -225,6 +225,27 @@ describe("demo browser", () => {
     config = await r.call<BrowserConfig>(null, "browser.config");
     expect(config.download.installed).toBe(true);
     expect(config.engines.map((e) => e.name)).toEqual(["Google Chrome", "Chromium", "Chrome for Testing"]);
+  });
+
+  test("signin: Microsoft sign-in with the Windows account, as on Windows: off until turned on and saved with the config; the organization's policy and the profile go first", async () => {
+    expect((await rig().call<BrowserConfig>(null, "browser.config")).microsoftSignIn).toBeUndefined();
+    const r = rig(null, "windows");
+    expect((await r.call<BrowserConfig>(null, "browser.config")).microsoftSignIn).toEqual({ on: false, active: false });
+    let config = await r.call<BrowserConfig>(null, "browser.configSet", { cap: 4, microsoftSignIn: true });
+    expect(config.microsoftSignIn).toEqual({ on: true, active: true });
+    // The config is replaced as a whole: left out, it is off again.
+    config = await r.call<BrowserConfig>(null, "browser.configSet", { cap: 4 });
+    expect(config.microsoftSignIn).toEqual({ on: false, active: false });
+    config = await rig(null, "org-off").call<BrowserConfig>(null, "browser.configSet", { microsoftSignIn: true });
+    expect(config.microsoftSignIn).toEqual({ on: true, active: false, decidedBy: "organization" });
+    expect((await rig(null, "org-on").call<BrowserConfig>(null, "browser.config")).microsoftSignIn).toEqual({ on: false, active: true, decidedBy: "organization" });
+    config = await rig(null, "profile").call<BrowserConfig>(null, "browser.configSet", { microsoftSignIn: true });
+    expect(config.microsoftSignIn).toEqual({ on: true, active: false, decidedBy: "profile" });
+    // A browser that can't use it: never active, whatever the choice.
+    config = await rig(null, "edge").call<BrowserConfig>(null, "browser.configSet", { microsoftSignIn: true });
+    expect(config.microsoftSignIn).toEqual({ on: true, active: false, unavailable: "edge" });
+    config = await rig(null, "other").call<BrowserConfig>(null, "browser.configSet", { microsoftSignIn: true });
+    expect(config.microsoftSignIn).toEqual({ on: true, active: false, unavailable: "browser" });
   });
 
   test("browser=blocked: the policy blocks its browsers; Use TeleFlock's browser downloads it (Cancel stops that), chooses it and starts it; a blocked engine chosen again makes way for it", async () => {

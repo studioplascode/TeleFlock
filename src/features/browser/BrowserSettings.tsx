@@ -1,13 +1,13 @@
 import { Globe, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { core, useBrowser } from "@/core";
-import type { BrowserClearWhat, BrowserConfig, BrowserStatus } from "@/core/gen";
+import type { BrowserClearWhat, BrowserConfig, BrowserMicrosoftSignIn, BrowserStatus } from "@/core/gen";
 import { formatBytes } from "@/core/upload";
 import { Button, cn, isAndroid, Select, Spinner, Switch } from "@/design";
 import { CommitInput, Row, Section } from "@/features/settings/parts";
 import { browserCall, cancelInstall, chooseOwnBrowser, clearBrowsingDataConfirmed, installEngine, ownBrowserLabel, revealProfile, startBrowser, stopBrowser } from "./actions";
 
-type ConfigPatch = Partial<Pick<BrowserConfig, "enginePath" | "headed" | "cap" | "shareTabs">>;
+type ConfigPatch = Partial<Pick<BrowserConfig, "enginePath" | "headed" | "cap" | "shareTabs">> & { microsoftSignIn?: boolean };
 
 const AUTO = "__auto";
 const OTHER = "__other";
@@ -51,8 +51,12 @@ function useBrowserConfig(status: BrowserStatus) {
     async (patch: ConfigPatch): Promise<boolean> => {
       const cur = latest.current;
       if (!cur) return false;
-      const next = { enginePath: cur.enginePath, headed: cur.headed, cap: cur.cap, shareTabs: cur.shareTabs, ...patch };
-      const saved = await browserCall("browser.configSet", { enginePath: next.enginePath, headed: next.headed, cap: next.cap, shareTabs: next.shareTabs }, "Couldn't save the browser settings");
+      const next = { enginePath: cur.enginePath, headed: cur.headed, cap: cur.cap, shareTabs: cur.shareTabs, microsoftSignIn: cur.microsoftSignIn?.on ?? false, ...patch };
+      const saved = await browserCall(
+        "browser.configSet",
+        { enginePath: next.enginePath, headed: next.headed, cap: next.cap, shareTabs: next.shareTabs, microsoftSignIn: next.microsoftSignIn },
+        "Couldn't save the browser settings",
+      );
       if (!saved) return false;
       seq.current++;
       apply(saved);
@@ -105,10 +109,50 @@ function BrowserRows({ status }: { status: BrowserStatus }) {
           <Row label="Agents at once" htmlFor="tf-browser-cap" description="How many agents can use the browser together. More wait until one is detached, or until you allow them anyway.">
             <Select id="tf-browser-cap" className="w-24" value={String(config.cap)} onValueChange={(v) => void save({ cap: Number(v) })} options={CAPS} />
           </Row>
+          {config.microsoftSignIn && <MicrosoftSignInRow state={config.microsoftSignIn} save={save} />}
         </>
       )}
       <ClearRow />
     </>
+  );
+}
+
+/** Why Microsoft sign-in is not the user's choice right now, said under the row. */
+function microsoftSignInNote({ active, decidedBy, unavailable }: BrowserMicrosoftSignIn): string | null {
+  if (unavailable === "edge") return "Not used with Microsoft Edge: Edge has its own sign-in with your Windows account, in Edge's settings.";
+  if (unavailable === "browser") return "Not available in this browser: Google Chrome, Chromium and TeleFlock's own browser have it.";
+  if (decidedBy === "organization") return active ? "Turned on by your organization." : "Turned off by your organization.";
+  if (decidedBy === "profile") return `Turned ${active ? "on" : "off"} in the browser's own settings, not by TeleFlock, so TeleFlock leaves it ${active ? "on" : "off"}.`;
+  return null;
+}
+
+/**
+ * Windows: the browser signs in to Microsoft's sites with the Windows account (off until turned on).
+ * The organization's policy goes first, and a browser without Chrome's integration can't use it: the
+ * switch then shows what applies and can't be changed.
+ */
+function MicrosoftSignInRow({ state, save }: { state: BrowserMicrosoftSignIn; save: (p: ConfigPatch) => Promise<boolean> }) {
+  const note = microsoftSignInNote(state);
+  const fixed = state.decidedBy === "organization" || !!state.unavailable;
+  return (
+    <Row
+      label="Sign in to Microsoft with your Windows account"
+      htmlFor="tf-browser-microsoft-sign-in"
+      description={
+        <>
+          <span className="block">Microsoft sites sign in with the account you use on Windows, and agents you let use the browser then sign in to them as you, without asking. Applies the next time the app starts it.</span>
+          {note && <span className="block">{note}</span>}
+        </>
+      }
+    >
+      <Switch
+        id="tf-browser-microsoft-sign-in"
+        label="Sign in to Microsoft with your Windows account"
+        checked={fixed ? state.active : state.on}
+        disabled={fixed}
+        onCheckedChange={(on) => void save({ microsoftSignIn: on })}
+      />
+    </Row>
   );
 }
 

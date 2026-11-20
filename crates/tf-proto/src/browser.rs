@@ -282,6 +282,46 @@ wire_struct! {
     }
 }
 
+wire_enum! {
+    /// What decides [`BrowserMicrosoftSignIn::active`] instead of the user's choice:
+    /// * `organization`: the organization's policy (`CloudAPAuthEnabled`: 0 in Google Chrome's,
+    ///   Chrome for Testing's or the engine's own policies keeps TeleFlock from turning it on, also
+    ///   for an engine that does not read them; the engine's own value, which the browser applies).
+    /// * `profile`: a value in the browser's profile that TeleFlock did not set (TeleFlock leaves it
+    ///   as it is).
+    pub enum MicrosoftSignInSource { Organization, Profile }
+}
+
+wire_enum! {
+    /// Why the browser TeleFlock runs (or would) can't use [`BrowserMicrosoftSignIn`]:
+    /// * `edge`: Microsoft Edge has its own sign-in with the Windows account (its profile's account,
+    ///   Edge's settings and policies), not Chrome's; TeleFlock neither sets nor reports it.
+    /// * `browser`: not a browser with Chrome's integration as far as TeleFlock knows (Brave, a
+    ///   program it does not know, or none found).
+    pub enum MicrosoftSignInUnavailable { Edge, Browser }
+}
+
+wire_struct! {
+    /// Windows: the browser signs in to Microsoft's sites (Microsoft Entra ID, Microsoft 365) with
+    /// the work, school or Microsoft account the user signed in to Windows with, without asking:
+    /// Chrome's own integration with Windows (`CloudAPAuthEnabled`), in Google Chrome, Chromium and
+    /// Chrome for Testing. Agents the user lets use the browser then sign in to them as the user too,
+    /// so it is off until the user turns it on, on each device. Applies when the browser starts next.
+    pub struct BrowserMicrosoftSignIn {
+        /// The user turned it on ([`BrowserConfigSetParams::microsoft_sign_in`]).
+        pub on: bool,
+        /// The browser signs in with the Windows account from its next start: TeleFlock sets (or
+        /// keeps) the preference in the profile of an engine with the integration right before that
+        /// start, a value it leaves there is on, or the engine's own policy turns it on. Never with
+        /// `unavailable`.
+        pub active: bool,
+        /// Something other than the user's choice decides `active`; absent: the choice does.
+        pub decided_by: Option<MicrosoftSignInSource>,
+        /// The browser can't use it (TeleFlock writes nothing for it).
+        pub unavailable: Option<MicrosoftSignInUnavailable>,
+    }
+}
+
 wire_struct! {
     /// `browser.config` / `browser.configSet` result.
     pub struct BrowserConfig {
@@ -297,6 +337,9 @@ wire_struct! {
         /// the tabs they open and the ones the user lends them; they never see each other's
         /// (default true). Off: only their own and lent tabs.
         pub share_tabs: bool,
+        /// Signing in to Microsoft's sites with the Windows account; absent on other systems and
+        /// from cores before 0.9.6.
+        pub microsoft_sign_in: Option<BrowserMicrosoftSignIn>,
         /// Engines found on this device, in the order they are preferred.
         pub engines: Vec<BrowserEngine>,
         pub download: BrowserDownload,
@@ -312,6 +355,9 @@ wire_struct! {
         pub cap: Option<u32>,
         /// Absent: true.
         pub share_tabs: Option<bool>,
+        /// Windows: sign in to Microsoft's sites with the Windows account
+        /// ([`BrowserMicrosoftSignIn`]). Absent: false.
+        pub microsoft_sign_in: Option<bool>,
     }
 }
 

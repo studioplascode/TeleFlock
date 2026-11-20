@@ -1,6 +1,7 @@
 //! Running the browser: its command line ([`args`]), its profile restoring the last session
-//! ([`restore_last_session`]), its DevTools port (`DevToolsActivePort`, [`parse_active_port`]), its
-//! process ([`spawn`], [`stop`]), the organization's policy refusing it remote control
+//! ([`restore_last_session`]; the preference files' helpers [`read_prefs`], [`set_pref`],
+//! [`write_prefs`]), its DevTools port (`DevToolsActivePort`, [`parse_active_port`]), its process
+//! ([`spawn`], [`stop`]), the organization's policy refusing it remote control
 //! ([`policy_refusal`]), freeing the profile from a browser an earlier app run left behind
 //! ([`free_profile`]), and the restart schedule after crashes ([`Restarts`]).
 
@@ -122,26 +123,52 @@ const RESTORE_LAST: i64 = 1;
 /// JSON is replaced (the browser would set it aside and start afresh too).
 pub(super) fn restore_last_session(profile: &Path) -> std::io::Result<()> {
     let file = profile.join("Default").join("Preferences");
-    let mut prefs: Map<String, Value> = match std::fs::read(&file) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            log::warn!("browser: {} is not JSON ({e}); writing a new one", file.display());
-            Map::new()
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
-        Err(e) => return Err(e),
-    };
-    let session = prefs.entry("session").or_insert_with(|| json!({}));
-    if session.get("restore_on_startup").and_then(Value::as_i64) == Some(RESTORE_LAST) {
-        return Ok(());
+    let mut prefs = read_prefs(&file)?.unwrap_or_else(|e| {
+        log::warn!("browser: {} is not JSON ({e}); writing a new one", file.display());
+        Map::new()
+    });
+    if set_pref(&mut prefs, &["session", "restore_on_startup"], json!(RESTORE_LAST)) {
+        write_prefs(&file, &prefs)?;
     }
-    match session.as_object_mut() {
-        Some(s) => {
-            s.insert("restore_on_startup".into(), json!(RESTORE_LAST));
+    Ok(())
+}
+
+/// A preferences file of the profile (`Default/Preferences`, `Local State`): its object, or why
+/// it is not one; an empty one before the first start (there is no file yet).
+pub(super) fn read_prefs(file: &Path) -> std::io::Result<serde_json::Result<Map<String, Value>>> {
+    match std::fs::read(file) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ok(Map::new())),
+        Err(e) => Err(e),
+    }
+}
+
+/// Sets the preference at `path` (the keys of nested objects) to `value`, keeping the rest and
+/// replacing what is in the way and not an object; `false` when it was so already.
+pub(super) fn set_pref(prefs: &mut Map<String, Value>, path: &[&str], value: Value) -> bool {
+    let Some((last, parents)) = path.split_last() else { return false };
+    let mut at = prefs;
+    for key in parents {
+        let entry = at.entry(*key).or_insert_with(|| json!({}));
+        if !entry.is_object() {
+            *entry = json!({});
         }
-        None => *session = json!({ "restore_on_startup": RESTORE_LAST }),
+        let Value::Object(next) = entry else { unreachable!("made an object above") };
+        at = next;
     }
-    std::fs::create_dir_all(profile.join("Default"))?;
-    crate::util::write_private(&file, &serde_json::to_vec(&prefs).map_err(std::io::Error::other)?)
+    if at.get(*last) == Some(&value) {
+        return false;
+    }
+    at.insert((*last).to_string(), value);
+    true
+}
+
+/// Writes a preferences file atomically, readable by this user only.
+pub(super) fn write_prefs(file: &Path, prefs: &Map<String, Value>) -> std::io::Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::util::write_private(file, &serde_json::to_vec(prefs).map_err(std::io::Error::other)?)
 }
 
 /// A running browser.
@@ -465,6 +492,16 @@ mod tests {
         let win = args(&Flags { os: "windows", ..base });
         assert!(!win.iter().any(|x| x.starts_with("--password-store") || x == "--use-mock-keychain"));
         assert!(args(&Flags { root: true, ..base }).iter().any(|x| x == "--no-sandbox"));
+        // Every system and mode runs the one persistent profile, never a throwaway one: a sign-in
+        // in any tab is every tab's, and it is there after the next start.
+        for os in ["linux", "macos", "windows"] {
+            for headed in [false, true] {
+                let a = args(&Flags { os, headed, ..base });
+                let dirs: Vec<&String> = a.iter().filter(|x| x.starts_with("--user-data-dir")).collect();
+                assert_eq!(dirs, ["--user-data-dir=/d/browser/profile"], "{os}, headed {headed}");
+                assert!(!a.iter().any(|x| x == "--incognito" || x == "--guest"), "{os}, headed {headed}: {a:?}");
+            }
+        }
     }
 
     /// The profile continues where it left off: the preference is merged into what the browser

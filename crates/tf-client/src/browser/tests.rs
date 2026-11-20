@@ -130,8 +130,8 @@ impl Cdp {
 
 /// An HTTP server that sets a persistent cookie (`tf`) and a session cookie (`tfs`, no
 /// `Expires`/`Max-Age`: how many company sign-ins keep theirs) on the first `/set` only, and
-/// records the `Cookie` header of every request.
-async fn cookie_server() -> (u16, Arc<Mutex<Vec<String>>>) {
+/// records the `Cookie` header of every request (`<path> <cookies>`).
+pub(super) async fn cookie_server() -> (u16, Arc<Mutex<Vec<String>>>) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();

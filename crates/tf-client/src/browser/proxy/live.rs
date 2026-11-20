@@ -78,6 +78,10 @@ async fn launch(bin: &Path, headed: bool) -> Chrome {
             "--disable-renderer-backgrounding",
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
+            // The secrets store the app runs it with (`launch::args`): without a desktop keyring,
+            // the cookie store waits for one and cookie commands go unanswered.
+            "--password-store=basic",
+            "--use-mock-keychain",
         ])
         .arg(format!("--user-data-dir={}", dir.path().join("profile").display()))
         .arg("about:blank")
@@ -498,6 +502,72 @@ async fn agents_use_the_users_tabs_after_their_own_while_they_are_shared() {
     assert!(ca.err("Target.attachToTarget", json!({ "targetId": mail, "flatten": true }), None).await.contains("No target"));
     let sa = ca.session_of(&pa).await;
     assert_eq!(ca.eval(&sa, "1 + 1").await, json!(2), "its own tab carries on");
+}
+
+/// A sign-in in the user's tab is the agents' too: the tabs an agent opens (its own
+/// `Target.createTarget`, `/json/new`, the first tab the proxy opens for it) are in the user's
+/// profile, the browser's default context, so they send the cookies the user's sign-in set,
+/// also the one that lasts only while the browser runs (Microsoft Entra ID's without "Stay signed
+/// in"). Only a context an agent creates for itself (incognito) starts signed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sign_in_in_the_users_tab_is_the_agents_too() {
+    let Some(bin) = find_chrome() else {
+        eprintln!("skipping a_sign_in_in_the_users_tab_is_the_agents_too: no Chromium found (set TF_TEST_CHROME)");
+        return;
+    };
+    let chrome = launch(&bin, false).await;
+    let px = CdpProxy::new(chrome.port, false, true);
+    let a = key("a");
+    px.attach(&a);
+    let (site, seen) = crate::browser::tests::cookie_server().await;
+    let sent = |path: String| {
+        let seen = seen.clone();
+        async move {
+            for _ in 0..200 {
+                if let Some(r) = seen.lock().unwrap().iter().find(|r| r.split(' ').next() == Some(path.as_str())) {
+                    return r.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("{path} never reached the site: {:?}", seen.lock().unwrap());
+        }
+    };
+    let id = |v: Value| v["targetId"].as_str().unwrap().to_string();
+
+    // The user signs in in their own tab.
+    let user = Client::user(&chrome).await;
+    let login = id(user.ok("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{site}/set") }), None).await);
+    for _ in 0..200 {
+        let jar = user.ok("Storage.getCookies", json!({}), None).await;
+        if jar["cookies"].as_array().unwrap().iter().filter(|c| c["name"] == "tf" || c["name"] == "tfs").count() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let ca = Client::agent(&px, &a).await;
+    let first = owned(&px, &a)[0].clone();
+    // The agent opens tabs both ways: each is signed in.
+    let own = id(ca.ok("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{site}/echo-own") }), None).await);
+    let (code, body) = http(&px, &a, &format!("PUT /json/new?http://127.0.0.1:{site}/echo-new"), "127.0.0.1:9222").await;
+    assert_eq!(code, 200, "{body}");
+    let new = serde_json::from_str::<Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+    for path in ["/echo-own", "/echo-new"] {
+        let r = sent(path.into()).await;
+        assert!(r.contains("tf=persisted") && r.contains("tfs=session"), "the agent's tab is signed out: {r}");
+    }
+    // One cookie jar: the user's tab and every tab of the agent's are in the default context.
+    let targets = user.ok("Target.getTargets", json!({}), None).await;
+    let context = |page: &str| {
+        let t = targets["targetInfos"].as_array().unwrap().iter().find(|t| t["targetId"] == page);
+        t.map(|t| t["browserContextId"].clone()).unwrap_or_else(|| panic!("{page} is not listed: {targets}"))
+    };
+    for page in [&first, &own, &new] {
+        assert_eq!(context(page.as_str()), context(login.as_str()), "{page} is not in the user's context");
+    }
+    // A context the agent creates for itself is its own: signed out.
+    let incognito = ca.ok("Target.createBrowserContext", json!({}), None).await["browserContextId"].clone();
+    ca.ok("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{site}/echo-incognito"), "browserContextId": incognito }), None).await;
+    assert_eq!(sent("/echo-incognito".into()).await, "/echo-incognito ", "a context of its own has no cookies");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -11,4 +11,9 @@ cap?: number,
 /**
  * Absent: true.
  */
-shareTabs?: boolean, };
+shareTabs?: boolean, 
+/**
+ * Windows: sign in to Microsoft's sites with the Windows account
+ * ([`BrowserMicrosoftSignIn`]). Absent: false.
+ */
+microsoftSignIn?: boolean, };
