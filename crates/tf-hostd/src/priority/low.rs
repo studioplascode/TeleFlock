@@ -80,9 +80,11 @@ pub(crate) const CHILD_CLASS: u32 = windows_sys::Win32::System::Threading::BELOW
 /// The calling thread below the agents' work, for good (its own thread: [`blocking`]).
 fn lower_thread() {
     #[cfg(target_os = "linux")]
-    // SAFETY: plain system calls on the calling thread (pid 0); `param` outlives the call.
+    // SAFETY: plain system calls on the calling thread (pid 0); `param` outlives the call. An
+    // all-zero `sched_param` is valid (priority 0, the only one SCHED_IDLE takes); a struct literal
+    // would not build on musl, whose `sched_param` has more fields than glibc's.
     unsafe {
-        let param = libc::sched_param { sched_priority: 0 };
+        let param: libc::sched_param = std::mem::zeroed();
         libc::sched_setscheduler(0, libc::SCHED_IDLE, &param);
         libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0 as libc::c_long, IOPRIO_IDLE);
     }
