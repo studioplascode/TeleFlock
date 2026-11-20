@@ -7,7 +7,7 @@
 //! * Sign-in (`auth.rs`): Tailscale SSH's `none` by default (Tailscale identity comes from the
 //!   tailnet; a banner carrying a URL (check mode) becomes `AuthUrl` + `authRequired`, and we keep
 //!   waiting), or the configured password / private key only.
-//! * russh's own keepalive is off (it busy-loops while auth is pending in 0.64.1); after
+//! * russh's own keepalive is off (before 0.65 it busy-looped while auth was pending); after
 //!   auth our own ping task measures latency and detects dead links.
 //! * Exec/spawn run through `sh -c 'exec "${SHELL:-/bin/sh}" -lc "$1"'` with POSIX-quoted argv.
 
@@ -309,7 +309,7 @@ impl SshTransport {
             banners: banners.clone(),
         };
         let config = Arc::new(client::Config {
-            // russh 0.64.1 busy-loops before auth with keepalive_interval set, and an
+            // russh before 0.65 busy-looped before auth with keepalive_interval set, and an
             // inactivity timeout would kill a check-mode hold. Liveness = our ping task.
             keepalive_interval: None,
             inactivity_timeout: None,

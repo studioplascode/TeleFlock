@@ -254,7 +254,8 @@ impl server::Handler for ServerHandler {
         })
     }
 
-    async fn auth_publickey(&mut self, _user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(&mut self, _user: &str, key: server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
+        let key = key.public_key;
         self.attempt(format!("publickey {}", key.fingerprint(russh::keys::HashAlg::Sha256)));
         Ok(match &self.auth {
             AuthMode::Sshd { keys, .. } if keys.iter().any(|k| k.key_data() == key.key_data()) => Auth::Accept,

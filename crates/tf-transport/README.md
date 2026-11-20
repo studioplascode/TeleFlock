@@ -103,7 +103,7 @@ Differences from the architecture sketch:
 
 `TransportError` provides `code()` (`transport.*`), `hint()` and `retryable()`, and implements `From<TransportError> for tf_proto::ApiError`.
 
-## SSH specifics (russh 0.64.1, `ring` backend)
+## SSH specifics (russh 0.65.2, `ring` backend)
 
 **Connecting**
 
@@ -139,7 +139,7 @@ Differences from the architecture sketch:
 
 **Liveness**
 
-- russh's `keepalive_interval` and `inactivity_timeout` are off: in 0.64.1, setting `keepalive_interval` busy-loops while auth is pending.
+- russh's `keepalive_interval` and `inactivity_timeout` are off: before 0.65, setting `keepalive_interval` busy-looped while auth was pending, and an inactivity timeout would end a check-mode hold.
 - After auth, our own `send_ping` task emits `Latency(ms)`.
 - The link is declared lost after `ping_max_misses` unanswered pings in a row.
 
