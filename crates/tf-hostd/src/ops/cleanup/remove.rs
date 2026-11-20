@@ -26,6 +26,14 @@
 //! repository owned by another user `trust` (`untrusted_repo`). The branch is always kept.
 //! Without `expect` (older apps), a folder already gone drops only its own registration.
 //!
+//! **Order** (`expect`): the slow checks of why it was chosen come first (omp's session index for a
+//! stale pick, gh for its pull request, up to its timeout), then the fast local facts are read last
+//! (git's registration, `git status` for HEAD, branch, changes and commits ahead, then without any
+//! await its folder and the board), then it goes at once, a last look that its checkout is still
+//! there (`.git`) right before git or herdr runs. Whatever changes while gh is slow (another branch
+//! checked out, an agent or a workspace in it, the folder unmounted) is seen, and nothing goes.
+//! Forget too reads last what decides: the path is checked right before the admin dir goes.
+//!
 //! **Forget** (`forget`, 0.9.6) only drops git's record of a worktree whose folder is gone, and
 //! never deletes a checkout: anything at the path (a disk mounted again, a restored folder, an
 //! empty mount point), or a path whose absence can't be told (an unreadable folder on the way),
@@ -42,8 +50,10 @@ use tf_proto::{Agent, ApiError, CleanupExpect, CleanupExpectPr, CleanupRemovePar
 use super::prs::Lookup;
 use super::scan;
 use crate::ops::fs::resolve_path;
-use crate::ops::worktree::{remove_failure, remove_path, same_path};
+use crate::ops::workspace::map_herdr;
+use crate::ops::worktree::{remove_failure, remove_path, remove_registered, same_path};
 use crate::ops::{Ctx, git};
+use scan::BoardNow;
 
 const QUICK: Duration = Duration::from_secs(10);
 
@@ -54,12 +64,7 @@ pub async fn remove(ctx: &Ctx, p: &CleanupRemoveParams) -> Result<Empty, ApiErro
     }
     let board = ctx.state.snapshot();
     if let Some(name) = busy_agent(&board.workspaces, &board.agents, &path) {
-        return Err(ApiError::new(
-            "busy",
-            format!("agent {name} is working in {}", path.display()),
-        )
-        .with_hint("Wait until it is done, or stop it, before removing its worktree.")
-        .retryable());
+        return Err(busy(&name, &path));
     }
     let root = repo_root(ctx, &path).await?;
     let Some(reg) = registration(&root, &path, p.trust).await? else {
@@ -74,29 +79,121 @@ pub async fn remove(ctx: &Ctx, p: &CleanupRemoveParams) -> Result<Empty, ApiErro
         return Ok(Empty {});
     };
     precheck(&reg, p.force)?;
-    // The page showed it there (it never offers Delete on a missing row): checked as it is now, gone
-    // included (a disk unplugged since). Only Forget, asked for as such, drops a registration.
-    if let Some(expect) = &p.expect {
-        let now = scan::recheck(ctx, &root, &reg.record).await;
-        verdict(&path, expect, &now)?;
-        if let Some(cut) = expect.stale_before {
-            stale_verdict(&path, cut, &now)?;
+    let Some(expect) = &p.expect else {
+        // Older apps (no `expect`): as before.
+        remove_path(ctx, &path.display().to_string(), p.force, p.trust, Some(&root)).await?;
+        return Ok(removed(ctx, &path));
+    };
+    // (a) The slow checks of why it was chosen: omp's session index for a stale pick, gh for its
+    // pull request (up to its timeout). Anything may change meanwhile: they decide nothing alone.
+    let slow = async {
+        if expect.stale_before.is_some() || expect.pr.is_some() {
+            let first = scan::recheck(ctx, &root, &reg.record).await;
+            verdict(&path, expect, &first)?;
+            if let Some(cut) = expect.stale_before {
+                stale_verdict(&path, cut, &first)?;
+            }
+            if let Some(pr) = &expect.pr {
+                pr_verdict(&path, pr, &scan::recheck_pr(ctx, &root, &first).await)?;
+            }
         }
-        if let Some(pr) = &expect.pr {
-            pr_verdict(&path, pr, &scan::recheck_pr(ctx, &root, &now).await)?;
+        Ok(())
+    };
+    // (b) The fast local facts read last, (c) the removal at once: nothing awaited in between.
+    match in_order(slow, &ctx.herdr_session, &root, &path, expect, p.force, p.trust, || BoardNow::of(ctx)).await? {
+        Go::Gone => {}
+        Go::Herdr(workspace) => {
+            still_a_checkout(&path)?;
+            ctx.herdr.worktree_remove(&workspace, p.force, p.trust).await.map_err(map_herdr)?;
         }
+        Go::Git => remove_registered(&path, &root, p.force, p.trust, || still_a_checkout(&path)).await?,
     }
-    remove_path(
-        ctx,
-        &path.display().to_string(),
-        p.force,
-        p.trust,
-        Some(&root),
-    )
-    .await?;
-    scan::forget(&ctx.herdr_session, &path);
+    Ok(removed(ctx, &path))
+}
+
+/// After a removal: the cards that ran in it leave the board, the row the report.
+fn removed(ctx: &Ctx, path: &Path) -> Empty {
+    ctx.state.drop_parked_where(|r| crate::state::parked::ran_in(r, path, |other| same_path(Path::new(other), path)));
+    tracing::info!(path = %path.display(), "cleanup removed a worktree (or found it gone)");
+    scan::forget(&ctx.herdr_session, path);
     ctx.state.refresh();
-    Ok(Empty {})
+    Empty {}
+}
+
+fn busy(name: &str, path: &Path) -> ApiError {
+    ApiError::new("busy", format!("agent {name} is working in {}", path.display()))
+        .with_hint("Wait until it is done, or stop it, before removing its worktree.")
+        .retryable()
+}
+
+/// What a removal checked by [`in_order`] does, at once.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Go {
+    /// git no longer lists it and its folder is gone (removed meanwhile): nothing left to do.
+    Gone,
+    /// Through herdr: this workspace shows it (it closes with it, as the page said).
+    Herdr(String),
+    /// `git worktree remove` from the main worktree.
+    Git,
+}
+
+/// A removal with `expect`, in its order: (a) `slow`, the slow checks of why it was chosen, awaited
+/// first; (b) the worktree's fast local facts read last: git's registration of it, `git status` in
+/// it (HEAD, branch, changes, commits ahead: the last await before the removal), then, without
+/// awaiting anything, its folder and the board (`board`). `Ok` only while all of it is what the page
+/// confirmed (and, for a stale pick, still untouched since its cutoff); the caller acts on the
+/// [`Go`] at once (c), [`still_a_checkout`] the last look right before git or herdr runs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn in_order(
+    slow: impl Future<Output = Result<(), ApiError>>,
+    session: &str,
+    root: &Path,
+    path: &Path,
+    expect: &CleanupExpect,
+    force: bool,
+    trust: bool,
+    board: impl FnOnce() -> BoardNow,
+) -> Result<Go, ApiError> {
+    slow.await?;
+    let Some(reg) = registration(root, path, trust).await? else {
+        return match still_there(path) {
+            Some(_) => Err(changed(path, "git no longer lists it as a worktree")),
+            None => Ok(Go::Gone),
+        };
+    };
+    precheck(&reg, force)?;
+    let mut now = scan::final_facts(root, &reg.record).await;
+    // Nothing is awaited from here until git or herdr removes it.
+    let b = board();
+    if let Some(name) = busy_agent(&b.workspaces, &b.agents, path) {
+        return Err(busy(&name, path));
+    }
+    b.place(&mut now);
+    let checked = verdict(path, expect, &now).and_then(|()| match expect.stale_before {
+        Some(cut) => stale_verdict(path, cut, &now),
+        None => Ok(()),
+    });
+    if let Err(e) = checked {
+        scan::show_row(session, root, now);
+        return Err(e);
+    }
+    let held = b.workspaces.iter().find(|w| w.worktree.as_ref().is_some_and(|t| same_path(Path::new(&t.path), path)));
+    Ok(held.map_or(Go::Git, |w| Go::Herdr(w.id.clone())))
+}
+
+/// The last look before git or herdr removes a worktree: its checkout is still there (a folder with
+/// its `.git`). A folder gone or unmounted in between is not removed: git would drop its record.
+fn still_a_checkout(path: &Path) -> Result<(), ApiError> {
+    if path.join(".git").is_file() {
+        Ok(())
+    } else {
+        Err(changed(path, "its folder is gone (a disk unplugged, or the folder moved away)"))
+    }
+}
+
+fn changed(path: &Path, what: &str) -> ApiError {
+    ApiError::new("worktree_changed", format!("{} changed since the report: {what}", path.display()))
+        .with_hint("Nothing was deleted. Look at it as it is now: the page shows it again.")
 }
 
 /// The agent that keeps a worktree from going: live (not parked), in it (its workspace or a folder
@@ -711,7 +808,7 @@ mod tests {
         let (used, untouched) = (add("stale-used"), add("stale-untouched"));
         let now = |wt: PathBuf| async move {
             let reg = registration(root, &wt, false).await.unwrap().unwrap();
-            scan::recheck_git(root, &reg.record).await
+            scan::final_facts(root, &reg.record).await
         };
         // The report: both last used when they were created; the cutoff the user confirmed is then.
         let (seen_used, seen_untouched) = (now(used.clone()).await, now(untouched.clone()).await);
@@ -736,6 +833,75 @@ mod tests {
         stale_verdict(&untouched, cut, &still).unwrap();
         remove_checkout(&untouched, Some(root), false, false).await.unwrap();
         assert!(!untouched.exists());
+    }
+
+    /// The removal as `remove` runs it with `expect.pr`, its gh lookup held until `release` fires,
+    /// then answering MERGED; nothing on the board.
+    fn held_removal(root: &Path, wt: &Path, expect: CleanupExpect) -> (tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<Result<(), ApiError>>) {
+        let (root, wt) = (root.to_path_buf(), wt.to_path_buf());
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let slow = async {
+                held.await.ok();
+                pr_verdict(&wt, expect.pr.as_ref().unwrap(), &Lookup::Found(Some(pr(41, "MERGED"))))
+            };
+            let empty = || BoardNow { workspaces: Vec::new(), agents: Vec::new(), autos: None };
+            match in_order(slow, "cleanup-test", &root, &wt, &expect, false, false, empty).await? {
+                Go::Git => remove_registered(&wt, &root, false, false, || still_a_checkout(&wt)).await,
+                other => panic!("{other:?}"),
+            }
+        });
+        (release, task)
+    }
+
+    /// gh first, the worktree last: what changes while the pull request lookup is slow (another
+    /// branch checked out, the folder moved away as by an unplugged disk) is seen right before git
+    /// would run, and nothing goes: the checkout and git's registration stay. Unchanged, it goes.
+    #[tokio::test]
+    async fn what_changes_while_gh_is_slow_is_seen_before_anything_goes() {
+        let td = fixture();
+        let root = td.path();
+        sh(root, &["checkout", "-q", "-f", "main"]);
+        let add = |name: &str| {
+            let wt = root.parent().unwrap().join(format!("{}-{name}", root.file_name().unwrap().to_string_lossy()));
+            sh(root, &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap(), "main"]);
+            wt
+        };
+        let merged = |w: &CleanupWorktree| CleanupExpect { pr: Some(CleanupExpectPr { number: 41, state: "MERGED".into() }), ..expect_of(w) };
+        let seen = |wt: PathBuf| async move {
+            let reg = registration(root, &wt, false).await.unwrap().unwrap();
+            scan::final_facts(root, &reg.record).await
+        };
+
+        // Another branch checked out while gh is slow.
+        let switched = add("held-switch");
+        let (release, task) = held_removal(root, &switched, merged(&seen(switched.clone()).await));
+        sh(&switched, &["checkout", "-q", "-b", "held-other"]);
+        release.send(()).unwrap();
+        let err = task.await.unwrap().unwrap_err();
+        assert_eq!(err.code, "worktree_changed");
+        assert!(err.message.contains("branch held-other"), "{}", err.message);
+        assert!(switched.join(".git").is_file() && registration(root, &switched, false).await.unwrap().is_some(), "the checkout and its registration stay");
+
+        // The folder moved away while gh is slow: git keeps its registration; back, it is whole.
+        let unplugged = add("held-unplug");
+        let (release, task) = held_removal(root, &unplugged, merged(&seen(unplugged.clone()).await));
+        let away = unplugged.with_extension("away");
+        std::fs::rename(&unplugged, &away).unwrap();
+        release.send(()).unwrap();
+        let err = task.await.unwrap().unwrap_err();
+        assert_eq!(err.code, "worktree_changed");
+        assert!(err.message.contains("folder is gone"), "{}", err.message);
+        assert!(registration(root, &unplugged, false).await.unwrap().is_some(), "git still lists it");
+        std::fs::rename(&away, &unplugged).unwrap();
+        assert!(!registration(root, &unplugged, false).await.unwrap().unwrap().record.prunable, "whole again");
+
+        // Unchanged: it goes once gh answers.
+        let kept = add("held-kept");
+        let (release, task) = held_removal(root, &kept, merged(&seen(kept.clone()).await));
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        assert!(!kept.exists() && registration(root, &kept, false).await.unwrap().is_none());
     }
 
     /// Forget never deletes a checkout. A worktree the report saw gone whose folder came back

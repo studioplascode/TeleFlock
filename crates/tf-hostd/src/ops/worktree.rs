@@ -357,6 +357,22 @@ pub(crate) async fn remove_checkout(path: &Path, repo_root: Option<&Path>, force
     if out.ok() { Ok(()) } else { Err(remove_failure(&out.message())) }
 }
 
+/// `git worktree remove [--force]` of the linked worktree at `path`, from the main worktree
+/// `main`, for a caller that read its facts right before (Cleanup's final check): no reads of its
+/// own, only `guard` (synchronous, the last look before git runs).
+pub(crate) async fn remove_registered(path: &Path, main: &Path, force: bool, trust: bool, guard: impl FnOnce() -> Result<(), ApiError>) -> Result<(), ApiError> {
+    let target = path.display().to_string();
+    let mut args = if trust { vec!["-c", "safe.directory=*"] } else { vec![] };
+    args.extend(["worktree", "remove"]);
+    if force {
+        args.push("--force");
+    }
+    args.push(target.as_str());
+    guard()?;
+    let out = git::git(main, &args, REMOVE_CHECKOUT).await?;
+    if out.ok() { Ok(()) } else { Err(remove_failure(&out.message())) }
+}
+
 /// git's `worktree list|remove` failures with the codes and hints herdr's are mapped to.
 pub(crate) fn remove_failure(msg: &str) -> ApiError {
     let lower = msg.to_lowercase();

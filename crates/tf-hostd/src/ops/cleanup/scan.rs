@@ -468,12 +468,37 @@ async fn agent_use(workspaces: &[Workspace], agents: &[Agent], w: &CleanupWorktr
     worked.iter().map(|u| u.seen.last).filter(|t| since.is_none_or(|s| *t >= s)).chain(live).max()
 }
 
-/// [`recheck`]'s facts without the board and omp's sessions (tests: last use from git alone).
-#[cfg(test)]
-pub(crate) async fn recheck_git(root: &Path, rec: &git::WorktreeRecord) -> CleanupWorktree {
+/// A linked worktree's fast local facts, read last right before it is removed (`remove.rs`):
+/// `git status` now (HEAD, branch, changes, commits ahead), its folder, the git and file parts of
+/// its last use. No board, no omp sessions, no memo: the caller places the board and acts at once.
+pub(crate) async fn final_facts(root: &Path, rec: &git::WorktreeRecord) -> CleanupWorktree {
     let (mut w, clues, _) = git_facts_of(root, rec).await;
     settle(&mut w, &clues, None);
     w
+}
+
+/// The board as it is now, to place worktrees on (agents and workspaces in them, automations).
+pub(crate) struct BoardNow {
+    pub workspaces: Vec<Workspace>,
+    pub agents: Vec<Agent>,
+    pub autos: Option<AutomationList>,
+}
+
+impl BoardNow {
+    pub(crate) fn of(ctx: &Ctx) -> Self {
+        let board = ctx.state.snapshot();
+        BoardNow { workspaces: board.workspaces, agents: board.agents, autos: crate::automations::get().map(|a| a.list(&ctx.herdr_session)) }
+    }
+
+    /// `w` on it: its workspace, agents, busy, automation.
+    pub(crate) fn place(&self, w: &mut CleanupWorktree) {
+        add_board(w, &self.workspaces, &self.agents, self.autos.as_ref());
+    }
+}
+
+/// `w` as it is now in the herdr session's last report (its row refreshed, as [`recheck`] does).
+pub(crate) fn show_row(session: &str, root: &Path, w: CleanupWorktree) {
+    refresh_row(&scanner(session), root, w);
 }
 
 /// A worktree's pull request asked of gh again right before a removal chosen for it (merged or
@@ -1296,6 +1321,8 @@ async fn git_facts_with(
 ) -> (CleanupWorktree, Clues, Option<StatusMemo>) {
     let path = PathBuf::from(&rec.path);
     let missing = rec.prunable || !path.is_dir();
+    // HEAD and branch as `git status` saw them, when it ran: newer than the listing's.
+    let mut seen = None;
     let (dirty, unpushed, files, orphan_commits, moved, memo) = match kept {
         Some(m) => {
             add(&n.statuses_kept, u32::from(!missing));
@@ -1307,7 +1334,9 @@ async fn git_facts_with(
             } else {
                 add(&n.statuses, 1);
                 add(&n.git_calls, 1);
-                status(&path).await
+                let st = status(&path).await;
+                seen = st.head;
+                (st.dirty, st.unpushed, st.files)
             };
             let orphan = match (&rec.head, rec.detached) {
                 (Some(head), true) => {
@@ -1321,9 +1350,13 @@ async fn git_facts_with(
             (dirty, unpushed, files, orphan, moved, memo)
         }
     };
+    let (head, branch) = match seen {
+        Some((oid, branch)) => (oid.or(rec.head), branch),
+        None => (rec.head, rec.branch),
+    };
     let w = CleanupWorktree {
-        head: rec.head.as_ref().map(|h| h.chars().take(7).collect()),
-        branch: rec.branch,
+        head: head.as_ref().map(|h| h.chars().take(7).collect()),
+        branch,
         missing,
         locked: rec.locked,
         dirty: dirty.filter(|_| !missing),
@@ -1351,9 +1384,19 @@ async fn git_facts_with(
     (w, clues, memo)
 }
 
-/// Changed files, commits ahead of the upstream (when it has one), and when the changes were last
-/// touched.
-async fn status(path: &Path) -> (Option<u32>, Option<u32>, Option<Millis>) {
+/// What `git status` says of a worktree now.
+struct Status {
+    /// Changed files.
+    dirty: Option<u32>,
+    /// Commits ahead of the upstream, when it has one.
+    unpushed: Option<u32>,
+    /// When the changes were last touched.
+    files: Option<Millis>,
+    /// HEAD's commit and branch (`None` detached) as status saw them; `None` when it failed.
+    head: Option<(Option<String>, Option<String>)>,
+}
+
+async fn status(path: &Path) -> Status {
     let args = [
         "status",
         "--porcelain=v2",
@@ -1365,13 +1408,14 @@ async fn status(path: &Path) -> (Option<u32>, Option<u32>, Option<Millis>) {
     match git::git(path, &args, STATUS_BUDGET).await {
         Ok(o) if o.ok() => {
             let st = git::parse_status_v2(&o.stdout);
-            (
-                Some(st.entries.len() as u32),
-                st.upstream.is_some().then_some(st.ahead),
-                changed_at(path, &st.entries),
-            )
+            Status {
+                dirty: Some(st.entries.len() as u32),
+                unpushed: st.upstream.is_some().then_some(st.ahead),
+                files: changed_at(path, &st.entries),
+                head: Some((st.oid, st.head)),
+            }
         }
-        _ => (None, None, None),
+        _ => Status { dirty: None, unpushed: None, files: None, head: None },
     }
 }
 

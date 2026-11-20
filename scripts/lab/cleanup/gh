@@ -25,6 +25,9 @@ case "$branch" in
 esac
 over="$here/../gh-prs/$branch"
 [ -f "$over" ] && state="$(head -1 "$over")"
+# A file <lab>/gh-wait/<branch> holds the answer until it is deleted (at most a minute): a slow gh.
+wait="$here/../gh-wait/$branch"
+for _ in $(seq 600); do [ -e "$wait" ] || break; sleep 0.1; done
 n=$(( $(printf '%s' "$branch" | cksum | cut -d' ' -f1) % 900 + 100 ))
 case "$state" in
   FAIL*)

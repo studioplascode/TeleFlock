@@ -21,11 +21,14 @@
  *   i  Prune stale with the cutoff the user confirmed: a worktree reset on the same HEAD since the report
  *      (its reflog moved, nothing else did) → `worktree_changed` ("used since the report"), it stays; an
  *      untouched one goes
+ *   j  (run before h) gh slow: the fake gh holds beta w2's answer on <lab>/gh-wait/<branch> while its
+ *      branch is switched; once gh answers MERGED, the facts read last refuse (`worktree_changed`) and
+ *      the checkout and its registration stay
  *
  * Usage: scripts/lab/run cleanup -- env TF_HOSTD_CLEANUP_PACE=30 bun scripts/lab/cleanup/drive.ts
  * Exit 0: every check held; 2: a check failed; 1: error.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { sleep } from "bun";
 
 type Json = Record<string, any>;
@@ -218,6 +221,26 @@ try {
 	note("info", `Forget: ${forgot}`);
 	check(seen?.missing === true && forgot.startsWith("not_missing") && readFileSync(`${w8}/.env.local`, "utf8") === "SECRET=1\n" && git(`${SRC}/beta`, "worktree", "list").includes("beta-wt/w8"), "f. Forget of beta w8 (reported gone, back again): not_missing; the checkout, its ignored .env.local and its registration stay");
 
+	// j: gh slow (the fake gh holds beta w2's answer on a wait file) while its branch is switched: once
+	// gh answers MERGED, the worktree read last is no longer what the page confirmed.
+	const lab = LOGS!.replace(/\/logs$/, "");
+	const slowWt = `${SRC}/beta-wt/w2`;
+	const slowRow = rows(await call("cleanup.worktrees", { refresh: false, waitMs: 0, latest: true })).find((x) => x.path === slowWt)!;
+	mkdirSync(`${lab}/gh-wait`, { recursive: true });
+	writeFileSync(`${lab}/gh-wait/merged-beta-2`, "");
+	const ghAt = readFileSync(`${LOGS}/gh.log`, "utf8").trim().split("\n").length;
+	const held = call("cleanup.remove", { path: slowWt, force: false, trust: false, forget: false, expect: { ...expectOf(slowRow), pr: { number: slowRow.pr.number, state: slowRow.pr.state } } }).then(
+		() => "removed",
+		(e) => e.message as string,
+	);
+	const asking = () => readFileSync(`${LOGS}/gh.log`, "utf8").trim().split("\n").slice(ghAt).some((l) => l.includes(`cwd=${slowWt} args=pr view`));
+	for (let i = 0; i < 150 && !asking(); i++) await sleep(100);
+	git(slowWt, "checkout", "-q", "-b", "raced-beta-2");
+	rmSync(`${lab}/gh-wait/merged-beta-2`);
+	const raced = await held;
+	note("info", `held gh, then a checkout: ${raced}`);
+	check(asking() && raced.startsWith("worktree_changed") && raced.includes("raced-beta-2") && existsSync(`${slowWt}/.git`) && git(`${SRC}/beta`, "worktree", "list").includes("beta-wt/w2"), "j. gh held beta w2's answer while its branch was switched: worktree_changed once gh answered MERGED; the checkout and its registration stay");
+
 	// h: bulk "Delete merged/closed": each removal carries the pull request it was chosen for.
 	const shipped = rows(await call("cleanup.worktrees", { refresh: false, waitMs: 0, latest: true })).filter((x) => !x.missing && (x.pr?.state === "MERGED" || x.pr?.state === "CLOSED"));
 	const short = (p: string) => p.split("/").slice(-2).join("/");
@@ -225,7 +248,6 @@ try {
 	const reopened = `${SRC}/alpha-wt/w3`;
 	const unverified = `${SRC}/beta-wt/w3`;
 	for (const p of [reopened, unverified]) writeFileSync(`${p}/.env.local`, "SECRET=1\n");
-	const lab = LOGS!.replace(/\/logs$/, "");
 	mkdirSync(`${lab}/gh-prs`, { recursive: true });
 	writeFileSync(`${lab}/gh-prs/closed-alpha-3`, "OPEN\n");
 	writeFileSync(`${lab}/gh-prs/closed-beta-3`, "FAIL HTTP 403: API rate limit exceeded for user ID 1.\n");
@@ -240,7 +262,7 @@ try {
 		note("info", `  ${short(w.path)}: ${said}`);
 	}
 	const asked = readFileSync(`${LOGS}/gh.log`, "utf8").trim().split("\n").slice(ghBefore).filter((l) => l.includes("args=pr view"));
-	check(shipped.length === 8 && outcome.get(reopened)?.startsWith("worktree_changed") === true && outcome.get(reopened)!.includes("was reopened"), "h. the closed PR of alpha w3, reopened since the report: worktree_changed");
+	check(shipped.length === 7 && outcome.get(reopened)?.startsWith("worktree_changed") === true && outcome.get(reopened)!.includes("was reopened"), "h. the closed PR of alpha w3, reopened since the report: worktree_changed");
 	check(outcome.get(unverified)?.startsWith("pr_unverified") === true, "h. beta w3, gh rate-limited: pr_unverified");
 	check([reopened, unverified].every((p) => readFileSync(`${p}/.env.local`, "utf8") === "SECRET=1\n" && git(p, "status", "--porcelain") === ""), "h. …both checkouts and their ignored .env.local stay");
 	const removed = shipped.filter((x) => x.path !== reopened && x.path !== unverified);
