@@ -191,7 +191,9 @@ rows (`fromTranscript`) and says so. The inspector's Agent chat card shows the n
 "Message board" in the session menu (the phone's ⋯ sheet too) and the palette's "Open agent message board", both for
 sessions with subagents or agent chat (`useHasAgentChat`) (`boardUi.tsx` `openBoard`): the split panel beside the
 session (`SplitState` kind `agentChat`, `SplitHeaderRow`, Full
-screen) on desktop, `FullscreenFrame` on phones and in focus mode (`AgentChatOverlay`, mounted once by the app). The
+screen) on desktop, `FullscreenFrame` on phones and in focus mode (`AgentChatOverlay`, mounted once by the app). It
+has three tabs (`boardUi.tsx` keeps each session's, so the panel and full screen show the same; a preview opens the
+Board tab): Board N, Members N and Graph. The
 board (`MessageBoard.tsx`, virtualised with `TranscriptLog`): one chronological channel, sender glyph and name
 (nested ones "under PoolBench › Sweep"), → recipients or everyone (a broadcast; who got it in the tooltip), time,
 the quote it answers (a click brings it into view), Markdown body (long ones clamped), progress notes lighter, the
@@ -199,11 +201,34 @@ delivery line (sending / queued / delivered / woke it / 5/6 delivered · 1 queue
 same sender to the same recipients folded; a "New" divider above what arrived since the board was last open on this
 device (it opens there when more than the last few rows are new) and Jump to latest. Filters: by agent (one: what it
 sent or got; two: only between them; also from a name's menu) and a literal, case-folded search over texts and names.
-Unread: `irc/seen.ts` (`tf.ircSeen` v1, the newest `at` read per session: host + omp session id once known, so a parked
-agent resumed under a new agent id keeps it, else the agent key, whose mark moves over; 200 sessions; the user's own
-never count).
+Unread: only the Board tab marks messages read (the other tabs show who wrote, not what): `irc/seen.ts` (`tf.ircSeen`
+v1, the newest `at` read per session: host + omp session id once known, so a parked agent resumed under a new agent id
+keeps it, else the agent key, whose mark moves over; 200 sessions; the user's own never count).
 Composer: one subagent or All running subagents (`agent.subagent` chat; one request per running subagent with
 `broadcast: true`, which the log shows as one message), Enter sends; the main agent takes the session's composer.
+Members (`BoardMembers.tsx`): everyone on the board in its order (the main agent, the subagents in tree order, You
+last) with where each sits, its status, messages sent, got and broadcast, and when it last wrote or was written to; a
+row opens the menu its name has on the board.
+Graph (`BoardGraph.tsx`, model `graph.ts`): the session's orchestration. Its agents as pills: the main agent and every
+subagent at any depth from the roster (`sessionTree`: by omp's id, under the one it runs under), silent ones too, then
+anyone else who posted or was addressed (You, an agent the roster lacks); a status dot; the hub (the main agent, else the
+one in the most posts) at the top centre, the others in rows by depth under it, an agent's own subagents below it, each
+row that fits arcing around the hub, one too wide staggered into lanes, a tall drawing scrolling. Thin straight lines:
+who runs under whom (spawned; no count). Curved arrows: who wrote to whom (@mentions; A → B and B → A bow apart; width
+and a label from 2 up: how many posts; a reply is a post to the one it answers); broadcasts as an `@all N` badge on the
+sender and, with **Expand @all**, dashed legs to each agent they listed. A dotted border: it posted with no mention (a
+broadcast cut off before any leg went out); no fill: silent (never posted nor was addressed); dimmed, struck through
+and dashed: finished at the playhead, and **Hide inactive** leaves it out (silent ones too; the rest hang under the
+nearest kept agent). The timeline: ⏮, step back, play / pause, step forward, a track with a mark per post (dragging or
+a tap snaps to the nearest; arrows, Page Up/Down, Home and End) and **Live** (follows new posts; reaching the end goes
+live again); the graph shows the posts up to the playhead and the agents spawned and running by then (the start: just
+before the first post), the newest post's arrows lit and its line under the timeline (a click opens it on the board).
+**Even pacing** plays a post a second at 1×; **Real-time pacing** keeps the gaps in proportion, the whole log taking as
+long; 0.5× to 8×. The summary says "25 posts over 31s", scrubbed back "9 of 25 posts · 12s of 31s". With subagents and
+no post yet the tree shows alone, the timeline disabled, "0 posts"; without either, "No agents yet". A click on an agent
+or an arrow highlights it and opens its card (what it posted and was addressed in, or the edge's newest posts, each
+opening the board at it, and Show … on the board: the board filtered to the agent, or to the two); Esc or a click on the
+canvas drops it. Full screen gives the graph the whole width; phones put the switches and pickers in one menu.
 Delivery (`chat.ts` `deliveryOf`, `DeliveryState.tsx`, the same on the board and in the transcript's IRC bubbles): omp's
 `injected` means queued: the recipient was busy and takes the message in when its current step ends (after a long tool
 call, maybe minutes later). It shows "queued" (tooltip "Waiting for X to finish its current step") until the log says
@@ -216,8 +241,11 @@ the first sent at or after the row's time, so identical sends pair up in order) 
 before 0.9.5) it stays "queued" and the tooltip says TeleFlock can't tell.
 Demo: in pool's task Main's answer to QueryScout (8.6 s in) stays "queued" for about 12 s (QueryScout is tracing
 `db.Open` call sites), then turns "delivered" and shows in QueryScout's transcript; other queued messages arrive about
-2 s after they settle.
-Tests: `bun test src/features/session/irc src/core/demo/agentChat.test.ts`.
+2 s after they settle. Its graph has every state: Main and four of its workers, PoolBench's own sweep and summary, the
+sweep's three benches, PoolBench's two broadcasts, StaleProbe's broadcast cut off before it reached anyone (stopped
+while it sent it), Size64 failing early and the rest finishing one by one.
+Tests: `bun test src/features/session/irc src/core/demo/agentChat.test.ts` (`graph.test.ts`: aggregation with
+broadcasts and replies, inactive agents, the timeline at a point, both pacings, snapping, the summary, the layout).
 
 Resume (`resume/`, hosts ≥ 0.7.0), omp's F5: the header (desktop, and the phone top bar) shows **Resume** while the
 agent is idle (not running, nothing asked), `caps.retry` isn't false and its last loaded turn failed or was stopped

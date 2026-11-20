@@ -1,4 +1,4 @@
-import { ArrowUp, ChevronDown, CircleX, CornerDownLeft, ExternalLink, Hourglass, ListFilter, Lock, Megaphone, MessagesSquare, RefreshCw, Reply, Search, Send, Sparkles, Users, X } from "lucide-react";
+import { ArrowUp, ChevronDown, CircleX, CornerDownLeft, Hourglass, ListFilter, Lock, Megaphone, MessagesSquare, RefreshCw, Reply, Search, Sparkles, Users, X } from "lucide-react";
 import { type ReactNode, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { core, draftKey, drafts, openSession, parseAgentKey, useAgent, useDraft, useSession } from "@/core";
 import type { Subagent } from "@/core/gen";
@@ -19,6 +19,10 @@ import {
   Select,
   Shimmer,
   Spinner,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
   Textarea,
   toast,
   toastAnchorsChanged,
@@ -34,7 +38,10 @@ import { groupSubagents, treeOrder } from "../subagents/grouping";
 import { SUB_LABEL } from "../subagents/Subagents";
 import { TranscriptLog } from "../transcript/Transcript";
 import { AgentAvatar } from "./AgentAvatar";
-import { closeBoardFull, takeReveal, useBoardUi } from "./boardUi";
+import { AgentMenuItems } from "./AgentMenu";
+import { BoardGraph } from "./BoardGraph";
+import { BoardMembers } from "./BoardMembers";
+import { type BoardTab, closeBoardFull, setBoardTab, takeReveal, useBoardUi } from "./boardUi";
 import {
   agentNamer,
   type BoardMessage,
@@ -50,8 +57,10 @@ import {
   positionText,
   previewText,
   type QueueWatch,
+  roleText,
 } from "./chat";
 import { DeliveryState } from "./DeliveryState";
+import { buildGraph, sessionTree } from "./graph";
 import { useIrcSeen } from "./seen";
 import { BOARD_POLL_MS, syncAgentChat, useAgentChat, useOldChatHost, useSeenMark } from "./store";
 
@@ -98,12 +107,13 @@ interface RowCtx {
 }
 
 /**
- * A session's message board (architecture §6.17, host side §3.34): every omp IRC message of its whole agent tree
- * in one chronological channel, who wrote to whom, replies, delivery and progress notes; a "New"
- * divider at what arrived since the board was last open on this device; filters by agent (one:
- * involving it; two: between them) and text; a composer that messages one subagent or all
- * running ones. Virtualised (logs run to 2,000 messages). The split panel and the full-screen
- * sheet (`BoardFrames`) both render it.
+ * A session's message board (architecture §6.17, host side §3.34) in three tabs. Board: every omp
+ * IRC message of its whole agent tree in one chronological channel, who wrote to whom, replies,
+ * delivery and progress notes; a "New" divider at what arrived since the board was last open on
+ * this device; filters by agent (one: involving it; two: between them) and text; a composer that
+ * messages one subagent or all running ones. Virtualised (logs run to 2,000 messages). Members:
+ * everyone on the board (`BoardMembers`). Graph: who wrote to whom, replayed on a timeline
+ * (`BoardGraph`). The split panel and the full-screen sheet (`BoardFrames`) both render it.
  */
 export function MessageBoard({ agentKey, mobile }: { agentKey: string; mobile: boolean }) {
   // Keeps the session's meta coming (and so the log moving) while the board shows beside another view.
@@ -115,6 +125,9 @@ export function MessageBoard({ agentKey, mobile }: { agentKey: string; mobile: b
   const mainName = agent?.name ?? MAIN;
   const agentOf = useMemo(() => agentNamer(subs, mainName), [subs, mainName]);
   const people = useMemo(() => participants(chat.messages, subs, agentOf), [chat.messages, subs, agentOf]);
+  const tree = useMemo(() => sessionTree(subs), [subs]);
+  const graph = useMemo(() => buildGraph(chat.messages, tree), [chat.messages, tree]);
+  const tab: BoardTab = useBoardUi((s) => s.tab[agentKey]) ?? "board";
   const [picked, setPicked] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const shown = useMemo(() => filterMessages(chat.messages, { agents: picked, query }, agentOf), [chat.messages, picked, query, agentOf]);
@@ -134,11 +147,12 @@ export function MessageBoard({ agentKey, mobile }: { agentKey: string; mobile: b
   const loaded = !chat.loading;
   const oldHost = useOldChatHost(agentKey);
 
-  // Everything shown counts as read while the board is on screen (a mark kept under the agent key moves to the session's).
+  // Everything shown counts as read while the Board tab is on screen (a mark kept under the agent key moves to the session's);
+  // the other tabs show who wrote, not what.
   const latest = chat.messages[chat.messages.length - 1]?.at ?? 0;
   useEffect(() => {
-    if (visible && latest > 0) useIrcSeen.getState().markSeen(mark.scope, latest, agentKey);
-  }, [agentKey, mark.scope, latest, visible]);
+    if (visible && tab === "board" && latest > 0) useIrcSeen.getState().markSeen(mark.scope, latest, agentKey);
+  }, [agentKey, mark.scope, latest, visible, tab]);
 
   // A message to bring into view (a preview on the card, a reply's quote): filters that hide it go first.
   const reveal = useBoardUi((s) => s.reveal[agentKey]);
@@ -198,87 +212,139 @@ export function MessageBoard({ agentKey, mobile }: { agentKey: string; mobile: b
     watch: { follows: chat.source === "log" && !oldHost, oldHost },
   };
 
+  // The Members and Graph tabs take the board to an agent's messages, two agents' or one message.
+  const showMessages = (agents: string[]) => {
+    setPicked(agents);
+    setQuery("");
+    setBoardTab(agentKey, "board");
+  };
+  const showMessage = (id: string) => {
+    ctx.reveal(id);
+    setBoardTab(agentKey, "board");
+  };
+
   const filtering = picked.length > 0 || query.trim() !== "";
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <Toolbar
-        mobile={mobile}
-        query={query}
-        onQuery={setQuery}
-        people={people}
-        picked={picked}
-        onPick={setPicked}
-        agentOf={agentOf}
-        counts={filtering ? { shown: shown.length, total: chat.messages.length } : null}
-      />
+    <Tabs value={tab} defaultValue="board" onValueChange={(v) => setBoardTab(agentKey, v as BoardTab)} className="flex min-h-0 flex-1 flex-col">
+      <TabsList aria-label="Message board" className={cn("shrink-0", mobile ? "px-3" : "px-4")}>
+        <TabsTrigger value="board" badge={<span className="text-xs font-bold text-mute-2 tabular">{chat.messages.length}</span>}>
+          Board
+        </TabsTrigger>
+        <TabsTrigger value="members" badge={<span className="text-xs font-bold text-mute-2 tabular">{people.length}</span>}>
+          Members
+        </TabsTrigger>
+        <TabsTrigger value="graph">Graph</TabsTrigger>
+      </TabsList>
       <Notices agentKey={agentKey} source={chat.source} error={chat.error} truncated={chat.truncated} mainName={mainName} onRetry={chat.refresh} />
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <TranscriptLog
-          ids={ids}
-          estimateSize={estimate}
-          loading={chat.loading}
-          ariaLabel="Agent chat"
-          focus={focus}
-          followSignal={follow}
-          view={`${picked.join(" ")}\n${query}`}
-          padX={mobile ? 8 : 14}
-          padBottom={mobile ? 10 : 16}
-          gutter={0}
-          overscan={mobile ? 4 : 8}
-          dense={mobile}
-          renderRow={(id, prevId) => {
-            const m = byId.get(id);
-            if (!m) return null;
-            const isNew = firstNew?.id === id;
-            return <BoardRow m={m} compact={!isNew && continues(prevId === undefined ? undefined : byId.get(prevId), m)} divider={isNew} ctx={ctx} />;
-          }}
-          empty={
-            filtering ? (
-              <EmptyState
-                className="mt-10"
-                compact
-                icon={<ListFilter />}
-                title="No messages match"
-                action={
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setPicked([]);
-                      setQuery("");
-                    }}
-                  >
-                    Show all messages
-                  </Button>
-                }
-              />
-            ) : (
-              <EmptyState
-                className="mt-10"
-                compact
-                icon={<MessagesSquare />}
-                title="No messages yet"
-                description="What the agents of this session send each other over omp IRC shows up here, whichever subagent sends it."
-              />
-            )
-          }
-          jumpLabel={(unseen) => (unseen > 0 ? `${unseen} new` : "Jump to latest")}
+      <TabsContent value="board" className="flex min-h-0 flex-1 flex-col">
+        <Toolbar
+          mobile={mobile}
+          query={query}
+          onQuery={setQuery}
+          people={people}
+          picked={picked}
+          onPick={setPicked}
+          agentOf={agentOf}
+          counts={filtering ? { shown: shown.length, total: chat.messages.length } : null}
         />
-      </div>
-      <BoardComposer
-        agentKey={agentKey}
-        mobile={mobile}
-        subs={subs}
-        agentOf={agentOf}
-        target={target}
-        onTarget={setTarget}
-        fallbackTarget={defaultTarget(subs, picked, chat.messages, agentOf)}
-        textareaRef={composerRef}
-        onSent={() => {
-          setFollow((n) => n + 1);
-          if (chat.source === "log") void syncAgentChat(agentKey);
-        }}
-      />
-    </div>
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <TranscriptLog
+            ids={ids}
+            estimateSize={estimate}
+            loading={chat.loading}
+            ariaLabel="Agent chat"
+            focus={focus}
+            followSignal={follow}
+            view={`${picked.join(" ")}\n${query}`}
+            padX={mobile ? 8 : 14}
+            padBottom={mobile ? 10 : 16}
+            gutter={0}
+            overscan={mobile ? 4 : 8}
+            dense={mobile}
+            renderRow={(id, prevId) => {
+              const m = byId.get(id);
+              if (!m) return null;
+              const isNew = firstNew?.id === id;
+              return <BoardRow m={m} compact={!isNew && continues(prevId === undefined ? undefined : byId.get(prevId), m)} divider={isNew} ctx={ctx} />;
+            }}
+            empty={
+              filtering ? (
+                <EmptyState
+                  className="mt-10"
+                  compact
+                  icon={<ListFilter />}
+                  title="No messages match"
+                  action={
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        setPicked([]);
+                        setQuery("");
+                      }}
+                    >
+                      Show all messages
+                    </Button>
+                  }
+                />
+              ) : (
+                <EmptyState
+                  className="mt-10"
+                  compact
+                  icon={<MessagesSquare />}
+                  title="No messages yet"
+                  description="What the agents of this session send each other over omp IRC shows up here, whichever subagent sends it."
+                />
+              )
+            }
+            jumpLabel={(unseen) => (unseen > 0 ? `${unseen} new` : "Jump to latest")}
+          />
+        </div>
+        <BoardComposer
+          agentKey={agentKey}
+          mobile={mobile}
+          subs={subs}
+          agentOf={agentOf}
+          target={target}
+          onTarget={setTarget}
+          fallbackTarget={defaultTarget(subs, picked, chat.messages, agentOf)}
+          textareaRef={composerRef}
+          onSent={() => {
+            setFollow((n) => n + 1);
+            if (chat.source === "log") void syncAgentChat(agentKey);
+          }}
+        />
+      </TabsContent>
+      <TabsContent value="members" className="flex min-h-0 flex-1 flex-col">
+        <BoardMembers
+          agentKey={agentKey}
+          mobile={mobile}
+          people={people}
+          graph={graph}
+          byId={byId}
+          onFilter={(id) => showMessages([id])}
+          onMessage={(sub) => {
+            setTarget(sub.id);
+            setBoardTab(agentKey, "board");
+            // The composer mounts with the Board tab: focus it once it has.
+            requestAnimationFrame(() => composerRef.current?.focus());
+          }}
+        />
+      </TabsContent>
+      <TabsContent value="graph" className="flex min-h-0 flex-1 flex-col">
+        <BoardGraph
+          agentKey={agentKey}
+          mobile={mobile}
+          messages={chat.messages}
+          loading={chat.loading}
+          full={graph}
+          tree={tree}
+          agentOf={agentOf}
+          byId={byId}
+          onShowMessages={showMessages}
+          onShowMessage={showMessage}
+        />
+      </TabsContent>
+    </Tabs>
   );
 }
 
@@ -410,7 +476,7 @@ function AgentFilter({ people, picked, onPick, names }: { people: readonly Parti
             <AgentAvatar who={a} size={20} />
             <span className="flex min-w-0 flex-1 flex-col leading-tight">
               <span className="truncate">{a.label}</span>
-              <span className="truncate text-2xs font-medium text-mute-2">{positionText(a) || (a.kind === "main" ? "main agent" : a.kind === "user" ? "from TeleFlock" : "subagent")}</span>
+              <span className="truncate text-2xs font-medium text-mute-2">{roleText(a)}</span>
             </span>
             <span className="shrink-0 text-2xs font-bold text-mute-2 tabular">{count}</span>
           </DropdownMenuCheckboxItem>
@@ -457,7 +523,6 @@ function Notices({ agentKey, source, error, truncated, mainName, onRetry }: { ag
 
 /** An agent's name; its menu filters the board to it, opens a subagent, or addresses the composer to it. */
 function AgentName({ who, ctx, className }: { who: ChatAgent; ctx: RowCtx; className?: string }) {
-  const sub = who.sub;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -466,19 +531,7 @@ function AgentName({ who, ctx, className }: { who: ChatAgent; ctx: RowCtx; class
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        <DropdownMenuItem icon={<ListFilter />} onSelect={() => ctx.filterBy(who.id)}>
-          Only {who.kind === "user" ? "your" : `${who.label}'s`} messages
-        </DropdownMenuItem>
-        {sub && (
-          <>
-            <DropdownMenuItem icon={<ExternalLink />} onSelect={() => useSessionUi.getState().openSubagent(ctx.agentKey, sub.id)}>
-              Open {who.label} · {SUB_LABEL[sub.status]}
-            </DropdownMenuItem>
-            <DropdownMenuItem icon={<Send />} onSelect={() => ctx.messageTo(sub)}>
-              Message {who.label}
-            </DropdownMenuItem>
-          </>
-        )}
+        <AgentMenuItems who={who} agentKey={ctx.agentKey} onFilter={ctx.filterBy} onMessage={ctx.messageTo} />
       </DropdownMenuContent>
     </DropdownMenu>
   );

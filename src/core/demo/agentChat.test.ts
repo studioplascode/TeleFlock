@@ -20,7 +20,7 @@ const between = (log: readonly AgentChatMessage[], from: string, to: string) => 
 
 describe("demo agent chat", () => {
   // pool's task runs when the demo opens: its tree talks while it does.
-  test("pool's whole tree: nested orchestrators and their workers, scouts with each other, a broadcast, replies, a refused send", async () => {
+  test("pool's whole tree: nested orchestrators and their workers, scouts with each other, broadcasts (one that reached no one), replies, a refused send", async () => {
     const r = rig();
     const meta = async () => (await r.call<SessionSnapshot>("session.open", { agentId: "pool" })).meta;
     const first = (await meta()).agentChat;
@@ -45,10 +45,14 @@ describe("demo agent chat", () => {
     const answer = between(all, "LockAudit", "QueryScout")[0];
     expect(answer?.replyTo).toBe(between(all, "QueryScout", "LockAudit")[0]?.id);
 
-    const broadcast = all.find((m) => m.broadcast);
+    const [staleAll, broadcast, allClear] = all.filter((m) => m.broadcast);
+    // StaleProbe was stopped while it announced its probe: the broadcast got out to no one.
+    expect(staleAll).toMatchObject({ from: "StaleProbe", to: [], receipts: [] });
     expect(broadcast).toMatchObject({ from: "PoolBench", to: ["Main", "QueryScout", "LockAudit", "PoolBench.Sweep", "PoolBench.Sweep.Size16", "PoolBench.Sweep.Size32"] });
     // omp queued it for the busy ones; by now every one took it in (Size16 as it ended).
     expect(broadcast?.receipts.every((x) => x.outcome === "received")).toBe(true);
+    // The all-clear reaches only who still runs: Main and the sweep.
+    expect(allClear).toMatchObject({ from: "PoolBench", to: ["Main", "PoolBench.Sweep"] });
 
     // Size64 had failed by then: omp refused the sweep's retry.
     const [, retry] = between(all, "PoolBench.Sweep", "PoolBench.Sweep.Size64");

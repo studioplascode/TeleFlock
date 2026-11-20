@@ -9,9 +9,10 @@ import { poolTurn, type SubagentSpec } from "./scripts";
  * tf-hostd's `agent_chat.rs`, architecture §3.34). pool's tree talks the way omp's IRC bus would
  * carry it while its task runs: the subagents' messages to Main and Main's answers (the
  * `IrcSpec`s of `poolTurn`, which Main's transcript shows too), PoolBench orchestrating its sweep
- * and summary, the nested sweep orchestrating one bench per size, scouts asking each other, a
- * broadcast, replies and a send refused because its recipient had ended. Other sessions' logs are
- * their transcript's IRC rows. What the user sends a subagent from the app joins as `user`.
+ * and summary, the nested sweep orchestrating one bench per size, scouts asking each other, two
+ * broadcasts, one cut off before it reached anyone, replies and a send refused because its
+ * recipient had ended. Other sessions' logs are their transcript's IRC rows. What the user sends
+ * a subagent from the app joins as `user`.
  * What omp queued for a busy recipient (`injected`) is `received` once the recipient takes it in,
  * when its current step ends (QueryScout takes Main's answer in only after a long run).
  * Messages get ids in the order they appear and a log revision on every change, like tf-hostd's.
@@ -52,15 +53,17 @@ interface Draft {
 
 /**
  * What pool's subagents say to each other (not to or from Main), ms after its task starts; agents
- * by omp id (a nested one under its parent's). `replyTo`: the key of the message it answers
- * (`irc:<subagent>:<n>`: the n-th `IrcSpec` of that subagent). `outcome`: omp's receipt (default
- * `injected`: the recipient was busy). A send to an agent that isn't running at that moment fails.
+ * by omp id (a nested one under its parent's). `to` absent: a broadcast (`agent://all`) omp cut
+ * off with its sender before any leg went out, so it names no recipient. `replyTo`: the key of the
+ * message it answers (`irc:<subagent>:<n>`: the n-th `IrcSpec` of that subagent). `outcome`: omp's
+ * receipt (default `injected`: the recipient was busy). A send to an agent that isn't running at
+ * that moment fails.
  */
 interface TreeLine {
   key: string;
   at: number;
   from: string;
-  to: string;
+  to?: string;
   text: string;
   replyTo?: string;
   progress?: boolean;
@@ -83,6 +86,8 @@ const POOL_TREE: TreeLine[] = [
     to: "PoolBench.Sweep.Size64",
     text: "Heads-up: staging allows **50 connections in total** and Size16 + Size32 already hold 48. Back off if you're refused.",
   },
+  // StaleProbe is stopped (superseded by LockAudit) while it announces its probe to everyone: the send never got out.
+  { key: "probe", at: 5_600, from: "StaleProbe", text: "Sampling `pg_stat_activity` every 2 s for idle-in-transaction sessions: hold long transactions for a minute." },
   { key: "ask", at: 7_400, from: "QueryScout", to: "LockAudit", text: "Does `/v1/search` keep any session state? It's my top handler and I'd rank it first for the pool." },
   {
     key: "stateless",
@@ -189,7 +194,8 @@ function poolDrafts(subs: readonly Subagent[], now: number, tree: Tree): { t0: n
   for (const l of POOL_TREE) {
     const at = t0 + l.at;
     if (at > now || !tree.running(l.from, at)) continue;
-    out.push({ key: l.key, from: l.from, to: [l.to], broadcast: false, text: l.text, at, replyTo: l.replyTo, wakeRelay: false, progress: l.progress ?? false, receipts: settled([l.to], at, now, tree, l.outcome) });
+    const to = l.to === undefined ? [] : [l.to];
+    out.push({ key: l.key, from: l.from, to, broadcast: l.to === undefined, text: l.text, at, replyTo: l.replyTo, wakeRelay: false, progress: l.progress ?? false, receipts: settled(to, at, now, tree, l.outcome) });
   }
   return { t0, drafts: out };
 }

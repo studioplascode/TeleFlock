@@ -377,6 +377,8 @@ export function poolTurn(): Step[] {
                 broadcast: true,
                 text: "Staging is shared: **keep your connections ≤ 16** until my sweep is done (~12 s). A 64-connection run already tripped `max_connections`.",
               },
+              // The all-clear once its sweep is in: by then only Main and the sweep itself are still running to get it.
+              { at: 27_000, broadcast: true, text: "Sweep is in and staging is free again: back to your usual connection counts." },
               { at: 31_500, relay: true, text: "Done. size=8 → p99 41 ms, **size=16 → 18 ms**, size=32 → 17 ms. 16 is the knee." },
             ],
             // Its sweep runs one subagent per pool size: staging refuses the 64 run (a failed

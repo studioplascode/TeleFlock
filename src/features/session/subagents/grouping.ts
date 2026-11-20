@@ -71,7 +71,7 @@ export interface SubagentGroups extends SubagentTally {
 }
 
 /** omp nests a subagent's own subagents under its id: `A.B.C` runs under `A.B`. */
-function idParent(id: string): string | undefined {
+export function idParent(id: string): string | undefined {
   const dot = id.lastIndexOf(".");
   return dot > 0 ? id.slice(0, dot) : undefined;
 }

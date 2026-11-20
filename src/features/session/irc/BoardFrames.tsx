@@ -37,9 +37,11 @@ export function AgentChatFull({ agentKey }: { agentKey: string }) {
   const mobile = useIsMobile();
   const agent = useAgent(agentKey);
   const open = useBoardUi((s) => s.full === agentKey);
+  // Messages read best in a column; the graph spreads over the whole width.
+  const graph = useBoardUi((s) => s.tab[agentKey] === "graph");
   return (
     <FullscreenFrame open={open} onClose={closeBoardFull} label={`Agent chat${agent ? ` · ${agent.name}` : ""}`} icon={<MessagesSquare className="size-4 shrink-0 text-mute" />} title={<BoardTitle name={agent?.name} />}>
-      <div className={cn("mx-auto flex min-h-0 w-full flex-1 flex-col", !mobile && "max-w-[1040px]")}>
+      <div className={cn("mx-auto flex min-h-0 w-full flex-1 flex-col", !mobile && !graph && "max-w-[1040px]")}>
         <MessageBoard agentKey={agentKey} mobile={mobile} />
       </div>
     </FullscreenFrame>

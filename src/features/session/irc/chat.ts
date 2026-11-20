@@ -145,6 +145,11 @@ export function positionText(a: ChatAgent): string {
   return a.under.length ? `under ${a.under.join(" › ")}` : "";
 }
 
+/** Where an agent sits, or what it is: "under PoolBench › Sweep", "main agent", "from TeleFlock", "subagent". */
+export function roleText(a: ChatAgent): string {
+  return positionText(a) || (a.kind === "main" ? "main agent" : a.kind === "user" ? "from TeleFlock" : "subagent");
+}
+
 /** Everyone who sent or got a message, with their message count. */
 export interface Participant {
   agent: ChatAgent;

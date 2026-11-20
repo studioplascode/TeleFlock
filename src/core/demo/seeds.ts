@@ -118,6 +118,21 @@ export function historyFor(def: AgentDef): Step[] {
       break;
     case "limits":
       steps.push(
+        // Workers that never message anyone: the message board's graph shows the tree without a single post.
+        {
+          t: "tool",
+          spec: {
+            tool: "task",
+            title: "3 subagents checking the rate limiter",
+            args: { tasks: 3 },
+            ms: 24_000,
+            subagents: [
+              { name: "WindowMath", description: "Check the sliding window against bursts and clock skew", ms: 22_000, model: "luna", lines: ["fuzzing window edges", "no off-by-one at bucket edges"] },
+              { name: "FallbackStore", description: "Load-test the Redis-free fallback store", ms: 24_000, model: "luna", lines: ["hey -z 20s against the fallback", "p99 0.4 ms, no lost increments"] },
+              { name: "TenantTable", description: "Draft the tenant config table and its migration", ms: 15_000, model: "luna", lines: ["writing migrations/0042_rate_limits.sql", "migration drafted"] },
+            ],
+          },
+        },
         bash("go test ./internal/ratelimit/...", [`ok  \tgateway/internal/ratelimit\t1.932s`], 4000),
         say("The sliding window and the middleware are done and tested. Next I need to apply the tenant config migration on staging."),
       );
