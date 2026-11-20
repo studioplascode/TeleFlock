@@ -289,6 +289,13 @@ class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivit
     @PermissionCallback
     fun microphonePermissionResult(invoke: Invoke) = resolveMicrophoneState(invoke)
 
+    /**
+     * `{ recordAudio }` as [requestMicrophonePermission] answers it, without asking: the page checks
+     * again when it comes back to the front, so a grant in Android's settings counts at once.
+     */
+    @Command
+    fun microphonePermission(invoke: Invoke) = resolveMicrophoneState(invoke)
+
     /** The app's page in Android's settings (permissions, notifications, battery). */
     @Command
     fun openAppSettings(invoke: Invoke) {

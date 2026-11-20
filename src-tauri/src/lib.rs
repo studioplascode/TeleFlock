@@ -22,6 +22,8 @@ mod idle;
 mod mac_notify;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mac_model;
+#[cfg(desktop)]
+mod mic;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod toastxml;
 #[cfg(target_os = "linux")]

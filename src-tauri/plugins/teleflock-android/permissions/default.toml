@@ -8,6 +8,7 @@ permissions = [
   "allow-request-notification-permission",
   "allow-battery-status",
   "allow-request-ignore-battery-optimizations",
+  "allow-microphone-permission",
   "allow-request-microphone-permission",
   "allow-open-app-settings",
   "allow-dictation-available",

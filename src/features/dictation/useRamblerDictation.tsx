@@ -2,6 +2,7 @@ import { type ReactNode, type RefObject, useEffect, useRef, useState, useSyncExt
 import { createRambler, type Rambler, type RambleResult, type RambleState, prewarmRamble, suggestRamble, useCore, usePrefs } from "@/core";
 import { type Dictation, useDictation } from "@/features/session/composer/useDictation";
 import { joiner, replaceRange, type SetText, type TextField } from "./edit";
+import { MicBlockedCard } from "./MicBlocked";
 import { RamblerCard, RamblerResult } from "./RamblerCard";
 
 export interface RamblerDictationOptions {
@@ -22,7 +23,7 @@ export interface RamblerDictationOptions {
 export interface RamblerDictation {
   /** Use in place of `useDictation`: with Rambler on, `interim` stays empty (the card shows it) and nothing is written until the user stops. */
   dictation: Dictation;
-  /** The Rambler card while dictating and tidying, the "Use raw transcript / Undo" strip after the fill, else null: render it above the box. */
+  /** The Rambler card while dictating and tidying, the notice when the microphone is blocked, the "Use raw transcript / Undo" strip after the fill, else null: render it above the box. */
   panel: ReactNode;
 }
 
@@ -105,13 +106,14 @@ export function useRamblerDictation(o: RamblerDictationOptions): RamblerDictatio
     () => end(),
   );
 
-  // The microphone could not start (permission, no engine): nothing will ever end this session.
+  // The microphone could not start (blocked, no engine): nothing will ever end this session.
+  const micBlocked = dictation.blocked !== null;
   useEffect(() => {
-    if (!dictation.error || dictation.listening || finishing || !live.current) return;
+    if (!(dictation.error || micBlocked) || dictation.listening || finishing || !live.current) return;
     live.current.cancel();
     live.current = null;
     setSession(null);
-  }, [dictation.error, dictation.listening, finishing]);
+  }, [dictation.error, micBlocked, dictation.listening, finishing]);
 
   // Leaving the screen mid-dictation: what was said still lands in the draft.
   useEffect(() => () => end(), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -155,6 +157,8 @@ export function useRamblerDictation(o: RamblerDictationOptions): RamblerDictatio
   const panel: ReactNode =
     session && (dictation.listening || finishing) ? (
       <RamblerCard state={state} interim={dictation.interim} listening={dictation.listening} mobile={o.mobile} tone={o.tone} />
+    ) : dictation.blocked ? (
+      <MicBlockedCard blocked={dictation.blocked} mobile={o.mobile} tone={o.tone} />
     ) : shownFill ? (
       <RamblerResult
         cleaned={shownFill.cleaned}

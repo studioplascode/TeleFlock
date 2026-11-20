@@ -3,7 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { core, toApiError } from "@/core";
 import { isAndroid, isTauri } from "@/design";
 import { DeviceSession } from "@/features/dictation/deviceSession";
+import { ANDROID_ASKS_AGAIN, type AndroidMicPermission, androidMicBlock, refusedBlock } from "@/features/dictation/micAccess";
 import { chosenModel, newSessionId, onDictationSession, openDictationSettings, startDictation, useDictationModels } from "@/features/dictation/store";
+import { checkMicBlock, type MicBlocked, readMicAccess, useMicBlockNotice } from "@/features/dictation/useMicAccess";
 import { errorMessage } from "@/features/shell/errors";
 
 export interface Dictation {
@@ -13,8 +15,13 @@ export interface Dictation {
   /** Words recognised so far that may still change. */
   interim: string;
   error: string | null;
-  /** Set while the error can be fixed in settings (Android blocks the microphone for good: the app's system settings; no speech model: Settings → Dictation): opens them. */
+  /** Set while the error is fixed in Settings → Dictation (no speech model): opens it there. */
   openSettings: (() => void) | null;
+  /**
+   * The system (or the window) keeps the microphone from TeleFlock: who, where it is undone, and the button that undoes
+   * it from here (`error` is null meanwhile). It goes once access is back, checked when the window comes back to the front.
+   */
+  blocked: MicBlocked | null;
   toggle(): void;
 }
 
@@ -54,6 +61,7 @@ function useWebDictation(onFinal: (text: string) => void, onEnd?: () => void): D
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const notice = useMicBlockNotice("window");
   const rec = useRef<Recognition | null>(null);
   const finalRef = useRef(onFinal);
   const endRef = useRef(onEnd);
@@ -84,7 +92,19 @@ function useWebDictation(onFinal: (text: string) => void, onEnd?: () => void): D
       }
       setInterim(live);
     };
-    r.onerror = (e) => setError(e.error === "not-allowed" ? "Microphone permission denied" : e.error);
+    r.onerror = (e) => {
+      const said = e.error === "not-allowed" ? "Microphone permission denied" : e.error;
+      // In the desktop app the window records: the system or the window's own remembered Block may refuse it (a
+      // refusal can also come as a failed capture), and only a notice that names which one helps.
+      if (!isTauri() || isAndroid || (e.error !== "not-allowed" && e.error !== "audio-capture")) {
+        setError(said);
+        return;
+      }
+      checkMicBlock("window").then(
+        (block) => (block ? notice.show(block) : setError(said)),
+        () => setError(said),
+      );
+    };
     r.onend = () => {
       setListening(false);
       setInterim("");
@@ -93,6 +113,7 @@ function useWebDictation(onFinal: (text: string) => void, onEnd?: () => void): D
     };
     rec.current = r;
     setError(null);
+    notice.clear();
     try {
       r.start();
       setListening(true);
@@ -101,26 +122,15 @@ function useWebDictation(onFinal: (text: string) => void, onEnd?: () => void): D
     }
   };
 
-  return { supported: Ctor != null, listening, interim, error, openSettings: null, toggle };
+  return { supported: Ctor != null, listening, interim, error, openSettings: null, blocked: notice.blocked, toggle };
 }
 
 // ── Android app: the system speech recognizer through the TeleFlock plugin ──────────────────
 
 const PLUGIN = "plugin:teleflock-android|";
 
-type MicPermission = "granted" | "denied" | "prompt" | "prompt-with-rationale";
-
 /** Events of one session (`Dictation.kt`); `end` always comes last. */
 type SpeechEvent = { type: "partial" | "final"; text: string } | { type: "error"; code: string; message: string } | { type: "end" };
-
-/**
- * What to tell the user after Android refused the microphone. `settings`: denied for good, only
- * the app's system settings can grant it now; otherwise the next tap asks again.
- */
-export function micPermissionNotice(state: Exclude<MicPermission, "granted">): { message: string; settings: boolean } {
-  if (state === "denied") return { message: "Microphone access is blocked.", settings: true };
-  return { message: "Dictation needs the microphone. Tap the mic to allow it.", settings: false };
-}
 
 let recognizer: boolean | undefined;
 let recognizerCheck: Promise<boolean> | undefined;
@@ -139,7 +149,7 @@ function useAndroidDictation(onFinal: (text: string) => void, onEnd?: () => void
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [blocked, setBlocked] = useState(false);
+  const notice = useMicBlockNotice("engine");
   /** The running session's channel; events of older sessions are ignored. */
   const session = useRef<Channel<SpeechEvent> | null>(null);
   const starting = useRef(false);
@@ -201,18 +211,19 @@ function useAndroidDictation(onFinal: (text: string) => void, onEnd?: () => void
   const start = async () => {
     starting.current = true;
     setError(null);
-    setBlocked(false);
+    notice.clear();
     try {
       // Resolves at once when granted, otherwise after the user answered the system prompt.
-      const { recordAudio } = await invoke<{ recordAudio: MicPermission }>(`${PLUGIN}request_microphone_permission`);
+      const { recordAudio } = await invoke<{ recordAudio: AndroidMicPermission }>(`${PLUGIN}request_microphone_permission`);
       if (!mounted.current) return;
       if (recordAudio === "granted") {
         await listen();
         return;
       }
-      const notice = micPermissionNotice(recordAudio);
-      setError(notice.message);
-      setBlocked(notice.settings);
+      // Denied for good: only the app's settings grant it now. Otherwise the next tap asks again.
+      const block = androidMicBlock(recordAudio);
+      if (block) notice.show(block);
+      else setError(ANDROID_ASKS_AGAIN);
     } catch (e) {
       if (mounted.current) setError(errorMessage(e));
     } finally {
@@ -229,13 +240,7 @@ function useAndroidDictation(onFinal: (text: string) => void, onEnd?: () => void
     if (!starting.current) void start();
   };
 
-  const openSettings = () => {
-    setError(null);
-    setBlocked(false);
-    invoke(`${PLUGIN}open_app_settings`).catch((e: unknown) => setError(errorMessage(e)));
-  };
-
-  return { supported, listening, interim, error, openSettings: blocked ? openSettings : null, toggle };
+  return { supported, listening, interim, error, openSettings: null, blocked: notice.blocked, toggle };
 }
 
 // ── The app core's on-device engine (desktop app, lab devservers; Settings → Dictation) ───────
@@ -245,6 +250,7 @@ function useDeviceDictation(onFinal: (text: string) => void, onEnd?: () => void)
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<{ message: string; settings: boolean } | null>(null);
+  const notice = useMicBlockNotice("engine");
   /** The running session; events of older ones are ignored. */
   const session = useRef<DeviceSession | null>(null);
   const finalRef = useRef(onFinal);
@@ -292,13 +298,25 @@ function useDeviceDictation(onFinal: (text: string) => void, onEnd?: () => void)
     );
     session.current = s;
     setError(null);
+    notice.clear();
     setListening(true);
     s.start().catch((e: unknown) => {
       if (session.current !== s) return;
       session.current = null;
       setListening(false);
       const err = toApiError(e);
-      setError({ message: [err.message, err.hint].filter(Boolean).join(". "), settings: err.code === "no_model" });
+      const said = { message: [err.message, err.hint].filter(Boolean).join(". "), settings: err.code === "no_model" };
+      if (err.code !== "permission") {
+        setError(said);
+        return;
+      }
+      // The system refused: say which system, with its settings page; a Linux device's refusal stays its error.
+      void readMicAccess().then((access) => {
+        if (session.current) return;
+        const block = access && refusedBlock(access);
+        if (block) notice.show(block);
+        else setError(said);
+      });
     });
   };
 
@@ -307,7 +325,7 @@ function useDeviceDictation(onFinal: (text: string) => void, onEnd?: () => void)
     openDictationSettings();
   };
 
-  return { supported: active, listening, interim, error: error?.message ?? null, openSettings: error?.settings ? openSettings : null, toggle, active };
+  return { supported: active, listening, interim, error: error?.message ?? null, openSettings: error?.settings ? openSettings : null, blocked: notice.blocked, toggle, active };
 }
 
 const usePlatformDictation: (onFinal: (text: string) => void, onEnd?: () => void) => Dictation = isTauri() && isAndroid ? useAndroidDictation : useWebDictation;

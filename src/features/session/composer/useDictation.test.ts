@@ -1,20 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { type Dictation, engineInUse, micPermissionNotice } from "./useDictation";
-
-describe("Android microphone refusal", () => {
-  test("denied for good: offers the app's settings, the only place left to grant it", () => {
-    expect(micPermissionNotice("denied")).toEqual({ message: "Microphone access is blocked.", settings: true });
-  });
-
-  test("denied once (or the prompt dismissed): explains, and the next tap asks again", () => {
-    for (const state of ["prompt-with-rationale", "prompt"] as const) {
-      expect(micPermissionNotice(state)).toEqual({ message: "Dictation needs the microphone. Tap the mic to allow it.", settings: false });
-    }
-  });
-});
+import { type Dictation, engineInUse } from "./useDictation";
 
 describe("which engine the mic uses", () => {
-  const engine = (listening: boolean): Dictation => ({ supported: true, listening, interim: "", error: null, openSettings: null, toggle: () => {} });
+  const engine = (listening: boolean): Dictation => ({ supported: true, listening, interim: "", error: null, openSettings: null, blocked: null, toggle: () => {} });
 
   test("the app core's engine once a speech model is chosen, the platform's (Web Speech, Android's recognizer) otherwise", () => {
     const device = { ...engine(false), active: true };

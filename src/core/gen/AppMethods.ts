@@ -16,6 +16,7 @@ import type { BrowserStatus } from "./BrowserStatus";
 import type { BrowserTabParams } from "./BrowserTabParams";
 import type { DiagReport } from "./DiagReport";
 import type { DictationLanguageParams } from "./DictationLanguageParams";
+import type { DictationMicrophoneAccess } from "./DictationMicrophoneAccess";
 import type { DictationMicrophoneParams } from "./DictationMicrophoneParams";
 import type { DictationMicrophones } from "./DictationMicrophones";
 import type { DictationModelRef } from "./DictationModelRef";
@@ -77,6 +78,9 @@ export interface AppMethods {
   "dictation.setLanguage": { params: DictationLanguageParams; result: DictationState };
   "dictation.microphones": { params: Empty; result: DictationMicrophones };
   "dictation.setMicrophone": { params: DictationMicrophoneParams; result: DictationState };
+  "dictation.microphoneAccess": { params: Empty; result: DictationMicrophoneAccess };
+  "dictation.openMicrophoneSettings": { params: Empty; result: Empty };
+  "dictation.allowWindowMicrophone": { params: Empty; result: Empty };
   "dictation.start": { params: DictationStartParams; result: Empty };
   "dictation.stop": { params: DictationSessionRef; result: Empty };
   "dictation.cancel": { params: DictationSessionRef; result: Empty };

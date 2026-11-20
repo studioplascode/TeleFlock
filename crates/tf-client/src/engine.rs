@@ -1381,6 +1381,11 @@ impl Engine {
                 // The Tauri shell answers these before they reach the engine (src-tauri/src/update).
                 Err(ApiError::new("unsupported", "self-update is only available in the installed app"))
             }
+            AppMethod::DictationOpenMicrophoneSettings(_) | AppMethod::DictationAllowWindowMicrophone(_) => {
+                // The Tauri shell answers these on Windows and macOS (src-tauri/src/mic.rs): they act on
+                // the system's settings and the app's window, which only it owns.
+                Err(ApiError::new("unsupported", "only the desktop app on Windows and macOS changes the system's microphone settings"))
+            }
             m @ (AppMethod::DictationModels(_)
             | AppMethod::DictationInstall(_)
             | AppMethod::DictationCancelInstall(_)
@@ -1389,6 +1394,7 @@ impl Engine {
             | AppMethod::DictationSetLanguage(_)
             | AppMethod::DictationMicrophonesReq(_)
             | AppMethod::DictationSetMicrophone(_)
+            | AppMethod::DictationMicrophoneAccessReq(_)
             | AppMethod::DictationStart(_)
             | AppMethod::DictationStop(_)
             | AppMethod::DictationCancel(_)) => i.dictation.call(m).await,

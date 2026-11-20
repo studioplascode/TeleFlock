@@ -1,4 +1,4 @@
-import type { AppEvent, DictationEvent, DictationMicrophone, DictationModel, DictationState } from "@/core/gen";
+import type { AppEvent, DictationEvent, DictationMicrophone, DictationMicrophoneAccess, DictationModel, DictationState } from "@/core/gen";
 import { apiError } from "../errors";
 import type { DemoClock } from "./clock";
 
@@ -9,14 +9,44 @@ import type { DemoClock } from "./clock";
  * that "hear" a canned ramble in the chosen language (English unless it is German): words arrive as
  * partials, each utterance ends as a final, Stop finishes the one being spoken. Nothing is kept
  * across reloads. A phone (Android user agent) answers `unsupported`, as the Android app core does.
+ *
+ * Demo knob (the page's URL): `?demo&mic=denied`: the system blocks the microphone for TeleFlock
+ * (Windows' privacy setting; macOS' on a Mac user agent). The recommended model is installed and
+ * chosen, so a composer's mic is there, and a tap on it is refused as the desktop app's is; Open
+ * Windows settings stands for turning the switch on there, so the next check finds it allowed.
+ * `?demo&mic=webview`: TeleFlock's window remembers a Block for its page's microphone (WebView2's
+ * own prompt, Windows), which Allow the microphone lifts.
  */
+
+/** `?demo&mic=denied` | `?demo&mic=webview`. */
+export type DemoMicKnob = "denied" | "webview" | null;
 
 export interface DemoDictationEnv {
   clock: DemoClock;
   emit(e: AppEvent): void;
   /** The page runs on a phone: no on-device engine there (the Android app uses its system recognizer). */
   phone: boolean;
+  /** Demo knob (`?demo&mic=…`); read from the page URL when absent. */
+  mic?: DemoMicKnob;
 }
+
+function readKnob(): DemoMicKnob {
+  try {
+    const v = typeof location === "undefined" ? null : new URLSearchParams(location.search).get("mic");
+    return v === "denied" || v === "webview" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the desktop app core answers when the system refuses the microphone (tf-client `dictation/voice.rs`). */
+const REFUSALS = {
+  windows: {
+    message: "Microphone access denied: Failed to initialize audio client: Access is denied. (os error -2147024891)",
+    hint: "Turn on Let desktop apps access your microphone, and TeleFlock where it is listed, in Settings → Privacy & security → Microphone.",
+  },
+  macos: { message: "Microphone access denied: macOS keeps the microphone from TeleFlock", hint: "Allow TeleFlock in System Settings → Privacy & Security → Microphone." },
+};
 
 type CatalogModel = Omit<DictationModel, "phase" | "downloaded" | "error" | "recommended"> & { desktop: boolean };
 
@@ -195,8 +225,26 @@ export class DemoDictation {
   private language = "auto";
   private microphone: DictationMicrophone | null = null;
   private readonly sessions = new Map<string, Live>();
+  /** Who decides about the microphone: the desktop app's system (`?demo&mic=…` shows Windows' unless on a Mac). */
+  private readonly system: "windows" | "macos" | "linux";
+  /** The system blocks the microphone for TeleFlock (`?demo&mic=denied`). */
+  private micDenied: boolean;
+  /** The window remembers a Block for its page's microphone (`?demo&mic=webview`). */
+  private windowBlocked: boolean;
 
-  constructor(private readonly env: DemoDictationEnv) {}
+  constructor(private readonly env: DemoDictationEnv) {
+    const knob = env.mic === undefined ? readKnob() : env.mic;
+    const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+    this.system = /Macintosh|Mac OS X/.test(ua) ? "macos" : knob !== null || /Windows/.test(ua) ? "windows" : "linux";
+    this.micDenied = knob === "denied";
+    this.windowBlocked = knob === "webview";
+    if (this.micDenied) {
+      // The mic is there: a speech model is chosen, so the tap reaches the refusal.
+      const recommended = CATALOG.find((m) => m.desktop);
+      if (recommended) this.installed.add(recommended.id);
+      this.selected = recommended?.id ?? null;
+    }
+  }
 
   call(method: string, p: Record<string, unknown>): unknown {
     if (this.env.phone) throw apiError("unsupported", `${method}: this TeleFlock has no on-device speech engine (the desktop app has it; Android uses its own speech recognizer)`);
@@ -237,6 +285,17 @@ export class DemoDictation {
         this.changed();
         return this.state();
       }
+      case "dictation.microphoneAccess":
+        return this.access();
+      case "dictation.openMicrophoneSettings":
+        // The demo can't open the system's settings: this stands for the user turning the switch on there.
+        if (this.system === "linux") throw apiError("unsupported", "Linux keeps no microphone permission for apps");
+        this.micDenied = false;
+        return {};
+      case "dictation.allowWindowMicrophone":
+        if (this.system !== "windows") throw apiError("unsupported", "only WebView2 (Windows) keeps a microphone permission of its own");
+        this.windowBlocked = false;
+        return {};
       case "dictation.start":
         this.start(String(p.session ?? ""));
         return {};
@@ -275,6 +334,12 @@ export class DemoDictation {
       engine: "sherpa-onnx 2.0.1 (demo)",
       ...(this.microphone ? { microphone: this.microphone } : {}),
     };
+  }
+
+  /** `dictation.microphoneAccess` as the desktop app answers it (its shell adds the settings page and the window). */
+  private access(): DictationMicrophoneAccess {
+    const access = this.system === "linux" ? "unknown" : this.micDenied ? "denied" : "granted";
+    return { access, system: this.system, settings: this.system !== "linux", windowBlocked: this.windowBlocked };
   }
 
   /** Ends every session (the page went away). */
@@ -341,6 +406,10 @@ export class DemoDictation {
     if (this.sessions.has(id)) throw apiError("invalid_params", `dictation session \`${id}\` is running`);
     if (!this.selected || !this.installed.has(this.selected)) {
       throw apiError("no_model", "No speech model is installed: download one in Settings → Dictation", { hint: "Download a speech model in Settings → Dictation." });
+    }
+    if (this.micDenied && this.system !== "linux") {
+      const refusal = REFUSALS[this.system];
+      throw apiError("permission", refusal.message, { hint: refusal.hint });
     }
     for (const other of [...this.sessions.values()]) this.stop(other.id, false);
     const lang = this.language === "de" ? "de" : "en";

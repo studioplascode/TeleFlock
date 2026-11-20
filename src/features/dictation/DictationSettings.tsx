@@ -1,4 +1,4 @@
-import { Download, Mic, RefreshCw, Trash2, X } from "lucide-react";
+import { Download, ExternalLink, Mic, RefreshCw, Trash2, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { core, toApiError } from "@/core";
 import type { AppMethods, DictationMicrophone, DictationModel, DictationState } from "@/core/gen";
@@ -11,6 +11,7 @@ import { RamblerRows } from "@/features/settings/RamblerSettings";
 import { confirmAction } from "@/features/workspace/shared/overlays";
 import { downloadPercent, isSlow, languageNote, languageOptions, onDevicePick, takeoverAfterRemoving } from "./models";
 import { applyDictationState, startDictation, useDictationModels } from "./store";
+import { useMicAccess } from "./useMicAccess";
 
 type StateMethod = "dictation.install" | "dictation.cancelInstall" | "dictation.remove" | "dictation.select" | "dictation.setLanguage" | "dictation.setMicrophone";
 
@@ -27,9 +28,10 @@ async function change<M extends StateMethod>(method: M, params: AppMethods[M]["p
 }
 
 /**
- * Settings → Dictation: which speech recognition listens when you tap a composer's mic (the system's, or a speech
- * model running on this device), the models (download with progress, cancel, resume, delete, use), the language
- * and the microphone, then Rambler's rows. An app core without speech models (Android, older) says what listens.
+ * Settings → Dictation: what keeps the microphone from TeleFlock when something does, which speech recognition
+ * listens when you tap a composer's mic (the system's, or a speech model running on this device), the models
+ * (download with progress, cancel, resume, delete, use), the language and the microphone, then Rambler's rows. An app
+ * core without speech models (Android, older) says what listens.
  */
 export function DictationSettings({ index }: { index: number }) {
   const state = useDictationModels((s) => s.state);
@@ -46,10 +48,39 @@ export function DictationSettings({ index }: { index: number }) {
   return (
     <div id="settings-dictation" ref={card} className="scroll-mt-4 max-md:scroll-mt-16">
       <Section index={index} icon={<Mic />} title="Dictation" description="Talking to the composers: what turns your speech into text, and Rambler.">
+        <MicAccessRow />
         {state?.supported ? <DeviceRows state={state} /> : <SystemRows missing={state ? { code: "unsupported", message: "" } : missing} />}
         <RamblerRows />
       </Section>
     </div>
+  );
+}
+
+/**
+ * What keeps the microphone from TeleFlock (the system's privacy setting, Android's permission, the window's own
+ * Block), with the button that undoes it; no row while nothing does. Checked when the card opens and whenever the
+ * window comes back to the front, so it goes as soon as the switch is turned on.
+ */
+function MicAccessRow() {
+  const blocked = useMicAccess();
+  if (!blocked) return null;
+  const { block } = blocked;
+  return (
+    <Row
+      label="Microphone access"
+      description={
+        <>
+          <span className="font-semibold text-warn">{block.title}</span> {block.detail}
+        </>
+      }
+      wide
+    >
+      {block.action && (
+        <Button size="sm" variant="primary" icon={block.action.run === "settings" ? <ExternalLink /> : <Mic />} loading={blocked.busy} onClick={blocked.act}>
+          {block.action.label}
+        </Button>
+      )}
+    </Row>
   );
 }
 

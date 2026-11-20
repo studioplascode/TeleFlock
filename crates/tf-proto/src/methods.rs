@@ -23,8 +23,8 @@ use crate::cleanup::{
     IdleShellsCloseParams, IdleShellsCloseResult, IdleShellsSetParams,
 };
 use crate::dictation::{
-    DictationLanguageParams, DictationMicrophoneParams, DictationMicrophones, DictationModelRef, DictationSelectParams, DictationSessionRef,
-    DictationStartParams, DictationState,
+    DictationLanguageParams, DictationMicrophoneAccess, DictationMicrophoneParams, DictationMicrophones, DictationModelRef, DictationSelectParams,
+    DictationSessionRef, DictationStartParams, DictationState,
 };
 use crate::find::{SearchPage, SearchPollParams, SearchRef, SearchStartParams, SessionFindParams, SessionFindResult, SessionReadParams, SessionRows};
 use crate::github::{GhAuthStartParams, GhAuthStatus, GitIdentity, GitIdentityParams};
@@ -1749,6 +1749,13 @@ methods!(AppMethod, "AppMethods", {
     "dictation.setLanguage" => DictationSetLanguage(DictationLanguageParams) -> DictationState;
     "dictation.microphones" => DictationMicrophonesReq(Empty) -> DictationMicrophones;
     "dictation.setMicrophone" => DictationSetMicrophone(DictationMicrophoneParams) -> DictationState;
+    // What keeps the microphone from the app, read without prompting: the system's privacy
+    // setting (the app core), and in the desktop app whether its settings page opens here and
+    // whether its window remembers a Block (the Tauri shell completes the answer). The shell
+    // answers the two that act; elsewhere they are `unsupported`.
+    "dictation.microphoneAccess" => DictationMicrophoneAccessReq(Empty) -> DictationMicrophoneAccess;
+    "dictation.openMicrophoneSettings" => DictationOpenMicrophoneSettings(Empty) -> Empty;
+    "dictation.allowWindowMicrophone" => DictationAllowWindowMicrophone(Empty) -> Empty;
     // A live session: its events are `AppEvent::DictationSession`; one runs at a time (a start
     // finishes the one running). Stop finishes the utterance being spoken, cancel drops it; both
     // answer at once and are no-ops for a session that already ended.

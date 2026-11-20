@@ -211,6 +211,7 @@ Android only (Kotlin plugin `src-tauri/plugins/teleflock-android`, capability `t
 | `invoke("plugin:teleflock-android\|request_notification_permission")` | – | same; opens system settings if permanently denied |
 | `invoke("plugin:teleflock-android\|battery_status")` | – | `{ ignoringOptimizations: boolean }` |
 | `invoke("plugin:teleflock-android\|request_ignore_battery_optimizations")` | – | `void` |
+| `invoke("plugin:teleflock-android\|microphone_permission")` | – | `{ recordAudio }` as below, without asking: the page checks again whenever it comes back to the front, so a grant in Android's settings counts at once |
 | `invoke("plugin:teleflock-android\|request_microphone_permission")` | – | `{ recordAudio: "granted" \| "denied" \| "prompt-with-rationale" }` once the user answered the system prompt (none when granted); `denied` = only the app's settings can grant it |
 | `invoke("plugin:teleflock-android\|open_app_settings")` | – | `void`; opens the app's page in Android's settings |
 | `invoke("plugin:teleflock-android\|dictation_available")` | – | `{ available: boolean }`: a speech recognizer is installed |
@@ -232,7 +233,8 @@ stops it, a destroyed activity cancels it. The plugin manifest declares `RECORD_
 `android.hardware.microphone` not required) and a `<queries>` entry for
 `android.speech.RecognitionService`, without which API 30+ hides the recognizer. The composer asks
 for the permission when the mic is tapped; after a denial it explains, and once Android blocks the
-prompt it offers **Open settings**. No recognizer installed: the mic is hidden.
+prompt a notice above the box says so with **Open Android settings** (the app's info), until a check
+on the way back to the front finds it granted. No recognizer installed: the mic is hidden.
 
 Preview window (`PreviewActivity.kt`, `PreviewLinks.kt`): on Android every frame of the app's page
 gets Tauri's IPC and calls in the name of the top page (docs/architecture.md §8, "Framed content"),

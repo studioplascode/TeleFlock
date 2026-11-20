@@ -77,6 +77,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# The window's own microphone permission in its WebView2 profile (src/mic.rs). The version wry
+# builds, so no new crate.
+webview2-com = "0.39"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Desktop notifications and idle time over the session bus (xdg_notify.rs, idle.rs). Already in the

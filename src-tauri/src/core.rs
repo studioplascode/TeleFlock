@@ -2,8 +2,9 @@
 //!
 //! Commands (camelCase args from JS):
 //! * `core_call({ hostId, method, params })` → result JSON, rejects with a tf-proto `ApiError`.
-//!   The self-update app methods (`app.update*`) are answered by the shell (`crate::update`);
-//!   everything else goes to the engine.
+//!   The self-update app methods (`app.update*`) are answered by the shell (`crate::update`), and
+//!   on desktops so are the microphone's permissions (`crate::mic`); everything else goes to the
+//!   engine.
 //! * `core_term_input({ hostId, termId, data })` → fire-and-forget terminal input.
 //! * `core_events({ channel })` → subscribes the page: first a replay of the current state
 //!   (profiles, statuses, snapshots, settings, tunnels), then live `AppEvent`s, in order, as
@@ -184,6 +185,10 @@ pub async fn core_call<R: tauri::Runtime>(
         && let Some(updater) = tauri::Manager::try_state::<crate::update::UpdaterState>(&app)
     {
         return updater.call(&method, params).await;
+    }
+    #[cfg(desktop)]
+    if crate::mic::METHODS.contains(&method.as_str()) {
+        return crate::mic::call(&app, &core, &method, params).await;
     }
     core.engine.call(host_id.as_deref(), &method, params).await
 }

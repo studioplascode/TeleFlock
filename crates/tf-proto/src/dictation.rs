@@ -1,9 +1,9 @@
-//! On-device dictation: the speech models of this device, its choices, and live sessions
-//! (docs/architecture.md §6.16). Answered by the app core (`tf-client` `dictation/` on
-//! `tf-dictation`, feature `voice`: the desktop app and lab devservers); other cores (Android,
-//! builds without the engine) answer `unsupported`, older ones `unknown_method`. A session's events
-//! reach every UI subscriber as `AppEvent::DictationSession`, named by the id the page chose in
-//! `dictation.start`.
+//! On-device dictation: the speech models of this device, its choices, live sessions, and what
+//! keeps the microphone from the app (docs/architecture.md §6.16). Answered by the app core
+//! (`tf-client` `dictation/` on `tf-dictation`, feature `voice`: the desktop app and lab
+//! devservers); other cores (Android, builds without the engine) answer `unsupported`, older ones
+//! `unknown_method`. A session's events reach every UI subscriber as `AppEvent::DictationSession`,
+//! named by the id the page chose in `dictation.start`.
 
 wire_enum! {
     /// Where a catalog model stands on this device.
@@ -126,6 +126,40 @@ wire_struct! {
     pub struct DictationMicrophoneParams {
         /// A `DictationMicrophone.id`; absent: the system's default input.
         pub id: Option<String>,
+    }
+}
+
+wire_enum! {
+    /// Whether the system lets this app use the microphone.
+    pub enum MicrophoneAccess {
+        Granted,
+        /// Not decided yet: the system asks when the microphone first opens (macOS; Windows where
+        /// desktop apps have permissions of their own).
+        Prompt,
+        /// Refused for this app, at the system's prompt, in its privacy settings or by a policy:
+        /// only the system's settings give it back.
+        Denied,
+        /// The system keeps no such setting (Linux), or it couldn't be read.
+        Unknown,
+    }
+}
+
+wire_struct! {
+    /// What keeps the microphone from this app (`dictation.microphoneAccess`), read without
+    /// prompting. A start refused by the system fails with `permission`.
+    pub struct DictationMicrophoneAccess {
+        /// The system's privacy setting for the app core's process (the desktop app; a devserver's
+        /// own).
+        pub access: MicrophoneAccess,
+        /// The system that decides: `windows`, `macos` or `linux`.
+        pub system: String,
+        /// `dictation.openMicrophoneSettings` opens that system's microphone settings here (the
+        /// desktop app on Windows and macOS).
+        pub settings: bool,
+        /// The app's window remembers a Block for its page's microphone: WebView2's own prompt
+        /// (Windows), which the window's speech recognition raises. `dictation.allowWindowMicrophone`
+        /// lifts it.
+        pub window_blocked: bool,
     }
 }
 

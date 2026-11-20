@@ -16,11 +16,27 @@ On-device engine:
 - `models.ts`: what Settings shows and decides: the model **On this device** picks, the one that takes over after a
   delete (as the app core decides it), download percent, the languages the chosen model can be told and what it
   hears with the current choice (`heardLanguage`, tf-dictation's `Model::language_for` in TypeScript).
-- `DictationSettings.tsx`: Settings → Dictation: System / On this device, the models (size, languages, memory, speed
-  and accuracy, Recommended, "Slow for live dictation"; download with progress, cancel, resume, Retry with the
-  error; Use; delete with a confirm that names the takeover), the language, the microphone (listed when the card
-  opens; a chosen one that isn't connected stays by name), then `<RamblerRows/>`. A core without speech models gets
-  one row that says what listens instead.
+- `DictationSettings.tsx`: Settings → Dictation: what blocks the microphone when something does (`MicAccessRow`,
+  below), System / On this device, the models (size, languages, memory, speed and accuracy, Recommended, "Slow for
+  live dictation"; download with progress, cancel, resume, Retry with the error; Use; delete with a confirm that names
+  the takeover), the language, the microphone (listed when the card opens; a chosen one that isn't connected stays by
+  name), then `<RamblerRows/>`. A core without speech models gets one row that says what listens instead.
+
+Microphone blocked (§6.16 "Microphone access"): Windows' and macOS' privacy settings and Android's permission never ask
+again once refused, and WebView2 (the Windows window's speech recognition) remembers its own Block for good.
+- `micAccess.ts`: what to say and which button undoes it (`micBlock`, `refusedBlock` after a start refused with
+  `permission`, `androidMicBlock`): "Windows blocks the microphone for TeleFlock." with **Open Windows settings**
+  (`ms-settings:privacy-microphone`), macOS with **Open System Settings** (its Microphone pane), Android with **Open
+  Android settings** (the app's info), the window's Block with **Allow the microphone**. The app core's engine only
+  minds the system's setting (`scope` `engine`); the window's speech recognition minds both (`window`). Linux keeps no
+  such setting: a device's refusal stays its error.
+- `useMicAccess.ts`: reads it (`dictation.microphoneAccess`; the Android app asks the plugin's `microphone_permission`,
+  which never prompts), runs the button (`dictation.openMicrophoneSettings`, `dictation.allowWindowMicrophone`, the
+  plugin's `open_app_settings`) and checks again right after it and whenever the window comes back to the front
+  (`focus`, `visibilitychange`), so the notice goes once the switch is on and the next tap listens, without a restart.
+  `useMicBlockNotice` is a text box's notice after a refused tap; `useMicAccess` is Settings' row.
+- `MicBlocked.tsx`: the notice above a text box (`useRamblerDictation`'s `panel`, so the session composer, Dispatch,
+  the ask card and Quick answer all show it), with the button and Hide.
 
 Rambler (the logic in `@/core/rambler`, `rambler.test.ts`, and `@/core/ai`: `suggestRamble`, `ramblePrompt`,
 `parseRamble`):
@@ -40,6 +56,9 @@ Surfaces: session `Composer`, `DispatchComposer` (Rambler's context: the thread'
 would, and what was said lands in the field's draft).
 
 Demo: `src/core/demo/dictation.ts` (`?demo`): the real catalog, downloads of a few seconds (progress, cancel, resume),
-sessions that hear a canned English or German ramble, `unsupported` on an Android user agent.
+sessions that hear a canned English or German ramble, `unsupported` on an Android user agent. `?demo&mic=denied`:
+Windows blocks the microphone (macOS on a Mac user agent), with Parakeet chosen so a composer's mic is there: a tap
+shows the notice, Settings shows the row, and Open Windows settings stands for turning the switch on there.
+`?demo&mic=webview`: the window's own Block, lifted by Allow the microphone.
 
 Tests: `bun test src/features/dictation src/core/demo/dictation.test.ts src/features/session/composer/useDictation.test.ts src/core/rambler.test.ts`.

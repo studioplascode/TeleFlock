@@ -19,8 +19,8 @@ use tf_dictation::{
     store::{ChosenMic, Downloader, Store},
 };
 use tf_proto::{
-    ApiError, AppEvent, AppMethod, DictationEvent, DictationLanguage, DictationMicrophone, DictationMicrophones, DictationModel, DictationModelPhase,
-    DictationStartParams, DictationState, Empty,
+    ApiError, AppEvent, AppMethod, DictationEvent, DictationLanguage, DictationMicrophone, DictationMicrophoneAccess, DictationMicrophones, DictationModel,
+    DictationModelPhase, DictationStartParams, DictationState, Empty, MicrophoneAccess,
 };
 
 use crate::util::{invalid, to_value};
@@ -119,11 +119,34 @@ fn api_error(e: VoiceError) -> ApiError {
     ApiError::new(e.code(), e.to_string())
 }
 
+/// The system that decides about the microphone here (`DictationMicrophoneAccess.system`).
+const SYSTEM: &str = if cfg!(windows) {
+    "windows"
+} else if cfg!(target_os = "macos") {
+    "macos"
+} else {
+    "linux"
+};
+
+/// What the system says about this process' microphone. The settings page and the window are the
+/// desktop shell's to add (src-tauri/src/mic.rs).
+fn microphone_access() -> DictationMicrophoneAccess {
+    let access = match mic::access() {
+        mic::Access::Granted => MicrophoneAccess::Granted,
+        mic::Access::Prompt => MicrophoneAccess::Prompt,
+        mic::Access::Denied => MicrophoneAccess::Denied,
+        mic::Access::Unknown => MicrophoneAccess::Unknown,
+    };
+    DictationMicrophoneAccess { access, system: SYSTEM.into(), settings: false, window_blocked: false }
+}
+
 /// Why a session didn't start, with where to grant the microphone when the system refused it.
 fn start_error(e: VoiceError) -> ApiError {
     let hint = match &e {
         VoiceError::Permission(_) if cfg!(target_os = "macos") => Some("Allow TeleFlock in System Settings → Privacy & Security → Microphone."),
-        VoiceError::Permission(_) if cfg!(windows) => Some("Turn on Settings → Privacy & security → Microphone → Let desktop apps access your microphone."),
+        VoiceError::Permission(_) if cfg!(windows) => {
+            Some("Turn on Let desktop apps access your microphone, and TeleFlock where it is listed, in Settings → Privacy & security → Microphone.")
+        }
         VoiceError::NoModel => Some("Download a speech model in Settings → Dictation."),
         _ => None,
     };
@@ -255,6 +278,7 @@ impl Dictation {
                 let microphones = mic::devices().map_err(api_error)?.into_iter().map(|m| DictationMicrophone { id: m.id, name: m.name, default: m.default }).collect();
                 return to_value(&DictationMicrophones { microphones });
             }
+            AppMethod::DictationMicrophoneAccessReq(_) => return to_value(&microphone_access()),
             AppMethod::DictationSetMicrophone(p) => {
                 let chosen = match p.id {
                     None => None,

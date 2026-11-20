@@ -4,7 +4,8 @@
 //!
 //! - [`catalog`]: the models on offer, pinned by commit and sha256; [`store`]: the ones on this
 //!   device under `<data_dir>/dictation/`, downloads (resumable, verified) and the user's choice.
-//! - [`mic`]: one microphone capture per process at 16 kHz mono, shared by every consumer.
+//! - [`mic`]: one microphone capture per process at 16 kHz mono, shared by every consumer, and
+//!   whether the system lets the app use the microphone (a refusal is its own error).
 //! - [`Session`]: live dictation; utterances cut by a voice activity detector, each decoded once
 //!   it ends (final text), with interim decodes while it is spoken.
 //! - [`MicRecorder`] and [`transcribe`]: record the microphone to a WAV, then transcribe it into

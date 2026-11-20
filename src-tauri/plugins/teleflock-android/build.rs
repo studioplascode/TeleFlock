@@ -6,6 +6,7 @@ const COMMANDS: &[&str] = &[
     "request_notification_permission",
     "battery_status",
     "request_ignore_battery_optimizations",
+    "microphone_permission",
     "request_microphone_permission",
     "open_app_settings",
     "dictation_available",

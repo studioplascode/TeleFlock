@@ -8,6 +8,12 @@
 //! play WAV files in real time instead, silence after their end, for labs and tests without a
 //! sound card: `TF_DICTATION_FAKE_MIC` (one path, or several joined like `PATH`: each capture
 //! plays the next one) or [`set_fake`].
+//!
+//! A capture the system refuses fails with [`VoiceError::Permission`], told apart from a missing
+//! or failing device ([`NoDevice`](VoiceError::NoDevice)); [`access`] reads the system's answer
+//! without opening anything (`access.rs`).
+
+mod access;
 
 use std::{
     sync::{
@@ -18,6 +24,8 @@ use std::{
 };
 
 use crate::{SAMPLE_RATE, VoiceError, audio::Resampler};
+
+pub use access::{Access, access};
 
 #[derive(Debug, Clone)]
 pub enum Chunk {
@@ -212,10 +220,7 @@ mod device {
 
     fn classify(e: &cpal::Error) -> VoiceError {
         let message = e.to_string();
-        match e.kind() {
-            cpal::ErrorKind::PermissionDenied => VoiceError::Permission(message),
-            _ => VoiceError::NoDevice(message),
-        }
+        if super::access::refused(e.kind(), &message) { VoiceError::Permission(message) } else { VoiceError::NoDevice(message) }
     }
 
     /// Stream errors that don't stop the capture: overruns, no realtime priority, the default
@@ -261,6 +266,7 @@ mod device {
     }
 
     pub(super) fn start(hub: &'static Hub) -> Result<Box<dyn Capture>, VoiceError> {
+        let wait = super::access::ask()?;
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), VoiceError>>(1);
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         std::thread::Builder::new()
@@ -323,7 +329,7 @@ mod device {
                 }
             })
             .map_err(|e| VoiceError::Other(format!("can't start the microphone thread: {e}")))?;
-        match ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        match ready_rx.recv_timeout(wait) {
             Ok(Ok(())) => Ok(Box::new(ThreadCapture(stop_tx))),
             Ok(Err(e)) => Err(e),
             Err(_) => {

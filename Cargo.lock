@@ -6048,6 +6048,7 @@ dependencies = [
  "tokio",
  "webkit2gtk",
  "webpki-roots",
+ "webview2-com",
  "windows",
  "windows-registry",
  "zbus",
@@ -6159,10 +6160,13 @@ dependencies = [
 name = "tf-dictation"
 version = "0.9.6"
 dependencies = [
+ "block2",
  "bzip2",
  "cpal",
  "hound",
  "log",
+ "objc2",
+ "objc2-foundation",
  "reqwest",
  "rustls",
  "serde",
@@ -6173,6 +6177,7 @@ dependencies = [
  "tf-proto",
  "tokio",
  "webpki-roots",
+ "windows",
 ]
 
 [[package]]

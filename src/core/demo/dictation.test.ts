@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { AppEvent, DictationEvent, DictationModel, DictationState } from "@/core/gen";
 import { ManualClock } from "./clock";
-import { DEMO_SPEECH, DemoDictation } from "./dictation";
+import { DEMO_SPEECH, DemoDictation, type DemoMicKnob } from "./dictation";
 
-function demo(phone = false) {
+function demo(phone = false, mic: DemoMicKnob = null) {
   const clock = new ManualClock();
   const events: AppEvent[] = [];
-  const dictation = new DemoDictation({ clock, emit: (e) => events.push(e), phone });
+  const dictation = new DemoDictation({ clock, emit: (e) => events.push(e), phone, mic });
   const state = () => dictation.call("dictation.models", {}) as DictationState;
   const model = (id: string): DictationModel | undefined => state().models.find((m) => m.id === id);
   /** What session `id` reported, in order. */
@@ -183,5 +183,29 @@ describe("demo on-device dictation: sessions", () => {
     expect(heard("b").at(-1)).toEqual({ type: "end" });
     clock.advance(5000);
     expect(heard("b").filter((e) => e.type !== "partial")).toEqual([{ type: "listening" }, { type: "end" }]);
+  });
+});
+
+describe("demo on-device dictation: the microphone blocked", () => {
+  test("mic=denied: a tap is refused as Windows refuses the desktop app, until the switch is turned on (Open Windows settings stands for it)", () => {
+    const { dictation, heard } = demo(false, "denied");
+    expect(dictation.call("dictation.microphoneAccess", {})).toEqual({ access: "denied", system: "windows", settings: true, windowBlocked: false });
+    // The recommended model is chosen, so the refusal is the microphone's, not a missing model's.
+    expect(refusal(() => dictation.call("dictation.start", { session: "s" }))).toMatchObject({ code: "permission", hint: expect.stringContaining("Privacy & security → Microphone") });
+    expect(heard("s")).toEqual([]);
+
+    dictation.call("dictation.openMicrophoneSettings", {});
+    expect(dictation.call("dictation.microphoneAccess", {})).toMatchObject({ access: "granted" });
+    dictation.call("dictation.start", { session: "s" });
+    expect(heard("s")).toEqual([{ type: "listening" }]);
+  });
+
+  test("mic=webview: the window's own Block is reported until Allow the microphone lifts it; without a knob nothing blocks", () => {
+    const { dictation } = demo(false, "webview");
+    expect(dictation.call("dictation.microphoneAccess", {})).toMatchObject({ access: "granted", windowBlocked: true });
+    dictation.call("dictation.allowWindowMicrophone", {});
+    expect(dictation.call("dictation.microphoneAccess", {})).toMatchObject({ windowBlocked: false });
+    // Bun's user agent is no desktop's: a Linux app core, which keeps no microphone permission.
+    expect(demo().dictation.call("dictation.microphoneAccess", {})).toEqual({ access: "unknown", system: "linux", settings: false, windowBlocked: false });
   });
 });

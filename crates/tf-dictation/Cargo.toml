@@ -34,6 +34,16 @@ webpki-roots = "1"
 # speech recognizer and doesn't build this crate.
 cpal = "0.18"
 
+# Whether the system lets the app use the microphone (src/mic/access.rs): Windows' AppCapability,
+# macOS' AVCaptureDevice. The versions cpal and tauri already build, so no new crate.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Security_Authorization_AppCapabilityAccess"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+
 [build-dependencies]
 sha2 = "0.10"
 tar = "0.4"
