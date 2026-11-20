@@ -3,21 +3,27 @@
 //!
 //! * omp's session index (`sessions.rs`): which folders each session file worked in, and how far
 //!   each file was read. Reading a big sessions folder from the start takes several scans.
-//! * worktree sizes, with when they were measured and the fingerprint of their folders that tells
-//!   whether they still hold (`scan.rs` `size_due`): one walk of the whole tree per worktree.
+//! * worktree sizes, with when they were measured, the fingerprint of their folders and (0.9.6)
+//!   the folders themselves with their stamps (`tree.rs`), which tell whether they still hold
+//!   (`scan.rs` `size_due`): one walk of the whole tree per worktree.
 //! * pull requests as gh gave them, with when (`prs::ttl` holds them by state): one `gh pr view`
 //!   per worktree.
+//! * (0.9.6) each worktree's last `git status` with what it was taken on, and each repository's
+//!   linked worktrees with what they were listed on (`signals.rs`): the first scan after a start
+//!   runs git only where something moved meanwhile.
+//! * (0.9.6) the last report: the page is answered from it at once after a start, until the first
+//!   scan. Removals never act on it: they check the worktree itself right before (`remove.rs`).
 //!
-//! The report itself is not kept: the first scan after a start builds it again from git and the
-//! board in seconds, with these filled in, and removal never relies on a report from before the
-//! start. Neither are "gh is signed out" and "no GitHub remote": one lookup finds them again, and
-//! the user may have just fixed them.
+//! Not kept: "gh is signed out" and "no GitHub remote": one lookup finds them again, and the user
+//! may have just fixed them.
 //!
-//! **Loaded** once, by the first scan after the daemon starts. A file of another version, or one
-//! that can't be read or parsed, is ignored: it is a cache, the scans learn it again. **Saved** in
-//! one atomic step (owner-only, `paths::write_atomic`) when a scan ended, at most every
-//! [`SAVE_EVERY`]: the first time at once, later by a timer. Sizes and pull requests nothing
-//! confirmed or looked up for [`KEEP_FOR_MS`] are left out (their worktree is likely gone).
+//! **Loaded** once, by the first scan or request after the daemon starts. A file of another
+//! version, or one that can't be read or parsed, is ignored: it is a cache, the scans learn it
+//! again (fields a version adds are optional, so an older file still loads). **Saved** in one
+//! atomic step (owner-only, `paths::write_atomic`) when a scan ended, at most every
+//! [`SAVE_EVERY`]: the first time at once, later by a timer. Sizes, pull requests, statuses and
+//! listings nothing confirmed or looked up for [`KEEP_FOR_MS`] are left out (their worktree is
+//! likely gone).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -25,11 +31,13 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tf_proto::{CleanupPr, Millis};
+use tf_proto::{CleanupPr, CleanupReport, Millis};
 use tokio::sync::OnceCell;
 
 use super::sessions;
+use super::signals::{RepoMemo, StatusMemo};
 use super::size::Fingerprint;
+use super::tree::Blob;
 use crate::util::now_ms;
 
 /// The file's format; a file of another one is ignored.
@@ -45,7 +53,7 @@ pub(crate) fn file(home: &Path) -> PathBuf {
 }
 
 /// A worktree's size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SizeMemo {
     pub bytes: u64,
@@ -54,10 +62,15 @@ pub(crate) struct SizeMemo {
     #[serde(default)]
     pub partial: bool,
     pub fingerprint: Fingerprint,
-    /// When the walk ran. Wall clock, as every time here: the memo outlives the daemon.
+    /// When the tree was last walked whole. Wall clock, as every time here: the memo outlives the
+    /// daemon.
     pub measured_at: Millis,
-    /// When it was measured or last found unchanged.
+    /// When it was measured or last checked.
     pub at: Millis,
+    /// Its folders with their stamps (`tree.rs`, 0.9.6); absent for a partial walk, a tree too big
+    /// to keep, or one measured by an older daemon (walked again once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<Blob>,
 }
 
 /// A worktree branch's pull request, as gh gave it.
@@ -77,6 +90,12 @@ pub(crate) struct Facts {
     pub sizes: HashMap<String, SizeMemo>,
     /// `path \0 branch \0 head` → its pull request.
     pub prs: HashMap<String, PrMemo>,
+    /// Worktree path → its last status (0.9.6).
+    pub statuses: HashMap<String, StatusMemo>,
+    /// Repository root → its linked worktrees (0.9.6).
+    pub repos: HashMap<String, RepoMemo>,
+    /// The last report (0.9.6).
+    pub report: Option<CleanupReport>,
 }
 
 impl Facts {
@@ -84,6 +103,8 @@ impl Facts {
     fn pruned(mut self, now: Millis) -> Facts {
         self.sizes.retain(|_, m| now - m.at < KEEP_FOR_MS);
         self.prs.retain(|_, m| now - m.checked_at < KEEP_FOR_MS);
+        self.statuses.retain(|_, m| now - m.at < KEEP_FOR_MS);
+        self.repos.retain(|_, m| now - m.at < KEEP_FOR_MS);
         self
     }
 }
@@ -265,7 +286,14 @@ mod tests {
         assert!(worked.iter().all(|w| w.len() == 1), "{worked:?}");
 
         let fp = Fingerprint { dirs: 3, hash: u64::MAX - 1 };
-        let size = SizeMemo { bytes: 1 << 40, files: 9, partial: false, fingerprint: fp, measured_at: 1_000, at: 2_000 };
+        let wt = td.path().join("wt");
+        std::fs::create_dir_all(wt.join("node_modules/a")).unwrap();
+        let (_, tree) = super::super::tree::walk(&wt, super::super::size::Budget::new(u64::MAX, Duration::from_secs(10)), &mut Default::default());
+        let tree = Blob(tree.unwrap().encode());
+        let size = SizeMemo { bytes: 1 << 40, files: 9, partial: false, fingerprint: fp, measured_at: 1_000, at: 2_000, tree: Some(tree) };
+        let record = crate::ops::git::WorktreeRecord { path: "/wt/b".into(), head: Some("f".repeat(40)), branch: Some("feat".into()), ..Default::default() };
+        let signals = super::super::signals::Signals { head: record.head.clone(), branch: record.branch.clone(), ..Default::default() };
+        let report = CleanupReport { scanned_at: Some(4_000), scanning: false, repos: Vec::new(), gh_error: None, owners: Some(Vec::new()), sessions_pending: None, background: None, stats: None };
         let facts = Facts {
             sizes: [("/wt/b".to_string(), size)].into(),
             prs: [
@@ -274,6 +302,9 @@ mod tests {
                 ("/wt/c\0x\0".to_string(), PrMemo { checked_at: 3_000, found: Err("gh timed out".into()) }),
             ]
             .into(),
+            statuses: [("/wt/b".to_string(), StatusMemo { signals, at: 3_000, dirty: Some(2), unpushed: Some(1), files_at: Some(2_500), orphan: false, moved_at: Some(2_000) })].into(),
+            repos: [("/r".to_string(), RepoMemo { stamp: Default::default(), records: vec![record], at: 3_000, common: Some("/r/.git".into()) })].into(),
+            report: Some(report),
         };
         let file = file(&td.path().join("home"));
         let disk = Disk { v: VERSION, sessions: Some(index.to_saved()), scans: [("default".to_string(), facts.clone())].into() };
@@ -305,8 +336,8 @@ mod tests {
         index.refresh(&dir, None, &HashSet::new(), Duration::from_secs(10));
         let now = now_ms();
         let facts = |p: &str, bytes: u64| Facts {
-            sizes: [(p.to_string(), SizeMemo { bytes, files: 1, partial: false, fingerprint: Fingerprint::default(), measured_at: now, at: now })].into(),
-            prs: HashMap::new(),
+            sizes: [(p.to_string(), SizeMemo { bytes, files: 1, partial: false, fingerprint: Fingerprint::default(), measured_at: now, at: now, tree: None })].into(),
+            ..Default::default()
         };
         let scans = [("default".to_string(), facts("/wt/a", 1)), ("other".to_string(), facts("/wt/o", 2))].into();
         write(&path, &Disk { v: VERSION, sessions: Some(index.to_saved()), scans }).unwrap();
@@ -349,18 +380,35 @@ mod tests {
         assert!(load(&file).is_some());
     }
 
+    /// A file 0.9.5 wrote (no trees, statuses, listings or report) still loads: its session index
+    /// and sizes are kept, and those sizes are walked once to learn their folders.
+    #[test]
+    fn an_older_file_still_loads() {
+        let td = tempfile::tempdir().unwrap();
+        let file = file(td.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let old = r#"{"v":1,"sessions":null,"scans":{"default":{"sizes":{"/wt/a":{"bytes":7,"files":1,"partial":false,"fingerprint":{"dirs":1,"hash":5},"measuredAt":1,"at":2}},"prs":{}}}}"#;
+        std::fs::write(&file, old).unwrap();
+        let back = load(&file).expect("loads");
+        let f = &back.scans["default"];
+        assert_eq!((f.sizes["/wt/a"].bytes, f.sizes["/wt/a"].tree.as_ref()), (7, None));
+        assert!(f.statuses.is_empty() && f.repos.is_empty() && f.report.is_none());
+    }
+
     #[test]
     fn what_nothing_used_for_two_weeks_is_dropped() {
         let fp = Fingerprint::default();
-        let memo = |at: Millis| SizeMemo { bytes: 1, files: 1, partial: false, fingerprint: fp, measured_at: at, at };
+        let memo = |at: Millis| SizeMemo { bytes: 1, files: 1, partial: false, fingerprint: fp, measured_at: at, at, tree: None };
         let now = 100 * 86_400_000;
         let facts = Facts {
             sizes: [("/wt/gone".to_string(), memo(now - 15 * 86_400_000)), ("/wt/here".to_string(), memo(now - 86_400_000))].into(),
             prs: [("/wt/gone\0b\0h".to_string(), PrMemo { checked_at: now - 20 * 86_400_000, found: Ok(None) })].into(),
+            statuses: [("/wt/gone".to_string(), StatusMemo { signals: Default::default(), at: now - 15 * 86_400_000, dirty: Some(0), unpushed: None, files_at: None, orphan: false, moved_at: None })].into(),
+            ..Default::default()
         }
         .pruned(now);
         assert_eq!(facts.sizes.keys().collect::<Vec<_>>(), ["/wt/here"]);
-        assert!(facts.prs.is_empty());
+        assert!(facts.prs.is_empty() && facts.statuses.is_empty());
     }
 
     /// Bench: what keeping a real session index across a restart costs (its saved form, the JSON

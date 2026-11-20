@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { navigate, useCore, useHostIds, useHostState, useHosts } from "@/core";
 import type { CleanupOwner, CleanupRepo, CleanupWorktree } from "@/core/gen";
 import { formatBytes } from "@/core/upload";
-import { Button, EmptyState, IconButton, PageHeader, SegmentedControl, Select, Skeleton, Spinner, Tile, cn, formatAge, useIsMobile, useNow } from "@/design";
+import { Button, EmptyState, IconButton, PageHeader, SegmentedControl, Select, Skeleton, Spinner, Tile, Tooltip, cn, formatAge, useIsMobile, useNow } from "@/design";
 import { OutdatedHost } from "@/features/automations/parts";
 import { ChatCleanup } from "@/features/chats/ChatCleanup";
 import { HostPicker } from "@/features/dispatch/RepoBar";
@@ -11,6 +11,7 @@ import { MobileHeader } from "@/features/shell/MobileHeader";
 import { tildify } from "@/features/workspace/shared/paths";
 import { removeMany, removeOne } from "./actions";
 import { AgentSection } from "./AgentSection";
+import { backgroundNote, followsScan } from "./background";
 import { type BulkKind, STALE_DAYS, bulkSet, classify, sortForPage, totals } from "./classify";
 import { type AgentGroup, groupByOwner, ownerLabel } from "./groups";
 import { diskLevel } from "./disk";
@@ -85,6 +86,7 @@ function RepoSection({
   removing,
   onDelete,
   wait,
+  forgetOff,
 }: {
   hostId: string;
   repo: CleanupRepo;
@@ -97,6 +99,8 @@ function RepoSection({
   onDelete(w: CleanupWorktree): void;
   /** Why its rows' Delete waits. */
   wait?: string;
+  /** Why its rows' Forget is off: the host's tf-hostd predates `forget`. */
+  forgetOff?: string;
 }) {
   const agentIds = useCore((s) => (s.hosts[hostId]?.state.agents ?? []).map((a) => a.id).join("\n"));
   const live = new Set(agentIds.split("\n"));
@@ -135,6 +139,7 @@ function RepoSection({
                   owner={owner}
                   onDelete={() => onDelete(w)}
                   wait={wait}
+                  forgetOff={forgetOff}
                 />
               );
             })}
@@ -188,9 +193,18 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   const shipped = bulkSet(report, "shipped", now, staleDays);
   const stale = bulkSet(report, "stale", now, staleDays);
   // This device's copy of the report (from before this visit, or of a host that is offline) is shown
-  // but nothing is deleted on it: the host's current one decides, as a scan in progress does.
+  // but nothing is deleted on it: the host's current one decides. Hosts ≥ 0.9.6 answer at once from the
+  // report they keep fresh by themselves, so this lasts a moment there.
   const wait = q.waiting ? `${hostName} is offline: deleting waits until it is back` : !q.fresh ? "Waits for the host's current report" : undefined;
   const scanning = !!report?.scanning && !wait;
+  // A scan the page follows: one it asked for (Rescan, a report older than the host's interval), or any
+  // scan of an older host; never the host's own background scan.
+  const following = scanning && followsScan(report);
+  // Hosts ≥ 0.9.6 check each worktree again right before removing it (`expect`), so their bulk actions act
+  // at once; older hosts' wait for a running scan, as they always did.
+  const bulkDisabled = (!q.revalidates && scanning) || !!bulkRun || !!wait;
+  // An older tf-hostd knows no `forget`: it would delete a folder that came back instead of forgetting it.
+  const forgetOff = q.revalidates ? undefined : `Update TeleFlock on ${hostName} to forget worktrees here: its tf-hostd could delete a folder that came back instead of forgetting it.`;
   // Hosts ≥ 0.9.0 say who each worktree belongs to; older ones are listed by repository only.
   const byAgent = groupBy === "agent" && report?.owners !== undefined;
   const groups = byAgent ? groupByOwner(report, now, staleDays) : [];
@@ -199,7 +213,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   const deleteOne = async (w: CleanupWorktree) => {
     if (!hostId) return;
     setRemoving((r) => ({ hostId, paths: new Set([...(r.hostId === hostId ? r.paths : []), w.path]), bulk: r.bulk }));
-    const gone = await removeOne(hostId, w, home);
+    const gone = await removeOne(hostId, w, home, { revalidates: q.revalidates, reloadRow: q.reloadRow, hostName });
     setRemoving((r) => ({ ...r, paths: new Set([...r.paths].filter((p) => p !== w.path)) }));
     if (gone) q.reload();
   };
@@ -208,7 +222,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     if (!hostId) return;
     const set = which === "shipped" ? shipped : stale;
     const paths = new Set(set.items.map((w) => w.path));
-    const out = await removeMany(hostId, which, set, home, (done) => setRemoving({ hostId, paths, bulk: { which, done, of: set.items.length } }));
+    const out = await removeMany(hostId, which, set, home, (done) => setRemoving({ hostId, paths, bulk: { which, done, of: set.items.length } }), { revalidates: q.revalidates });
     setRemoving({ hostId, paths: new Set() });
     if (out) q.reload();
   };
@@ -220,7 +234,10 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     const paths = new Set(set.items.map((w) => w.path));
     const n = set.items.length;
     const title = g.key === null ? `Delete ${n} worktree${n === 1 ? "" : "s"} no agent worked in?` : `Delete ${n} worktree${n === 1 ? "" : "s"} of ${ownerLabel(g.owner)}?`;
-    const out = await removeMany(hostId, "cleanable", set, home, (done) => setRemoving({ hostId, paths, bulk: { which: "cleanable", group: g.key, done, of: n } }), title);
+    const out = await removeMany(hostId, "cleanable", set, home, (done) => setRemoving({ hostId, paths, bulk: { which: "cleanable", group: g.key, done, of: n } }), {
+      revalidates: q.revalidates,
+      title,
+    });
     setRemoving({ hostId, paths: new Set() });
     if (out) q.reload();
   };
@@ -284,6 +301,8 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     const repos = report.repos;
     // When the report shown was made: its scan's end, else when this device got it.
     const shownAt = report.scannedAt ?? q.receivedAt;
+    // Hosts ≥ 0.9.6 keep the report fresh by themselves: the line says so, and when their own scan runs.
+    const note = q.revalidates ? backgroundNote(report, now, hostName) : undefined;
     body = (
       <>
         <div className="grid gap-3 sm:grid-cols-3">
@@ -295,7 +314,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
             held={shipped.held.length}
             bytes={shipped.bytes}
             label="Delete merged/closed…"
-            disabled={scanning || !!bulkRun || !!wait}
+            disabled={bulkDisabled}
             progress={progress("shipped")}
             onRun={() => void runBulk("shipped")}
           />
@@ -306,7 +325,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
             held={stale.held.length}
             bytes={stale.bytes}
             label="Prune stale…"
-            disabled={scanning || !!bulkRun || !!wait}
+            disabled={bulkDisabled}
             progress={progress("stale")}
             onRun={() => void runBulk("stale")}
           >
@@ -340,6 +359,12 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
                 <Spinner /> Updating…
               </span>
             </>
+          ) : note ? (
+            <Tooltip content={note.about}>
+              <span className="inline-flex items-center gap-1.5">
+                {note.running && <Spinner />} {note.text}
+              </span>
+            </Tooltip>
           ) : scanning ? (
             <span className="inline-flex items-center gap-1.5">
               <Spinner /> sizes and pull requests are filling in…
@@ -403,14 +428,27 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
                 onDelete={(w) => void deleteOne(w)}
                 onClean={() => void cleanGroup(g)}
                 progress={groupProgress(g.key)}
-                disabled={scanning || !!bulkRun || !!wait}
+                disabled={bulkDisabled}
                 wait={wait}
+                forgetOff={forgetOff}
               />
             );
           })
         ) : (
           repos.map((r) => (
-            <RepoSection key={r.root} hostId={hostId} repo={r} owners={owners} home={home} now={now} staleDays={staleDays} removing={busyPaths} onDelete={(w) => void deleteOne(w)} wait={wait} />
+            <RepoSection
+              key={r.root}
+              hostId={hostId}
+              repo={r}
+              owners={owners}
+              home={home}
+              now={now}
+              staleDays={staleDays}
+              removing={busyPaths}
+              onDelete={(w) => void deleteOne(w)}
+              wait={wait}
+              forgetOff={forgetOff}
+            />
           ))
         )}
         <ChatCleanup hostId={hostId} hostName={hostName} home={home} />
@@ -421,8 +459,8 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   }
 
   const rescan = hostId && report && !q.outdated && (
-    <Button variant="secondary" icon={scanning ? <Spinner /> : <RotateCw />} disabled={scanning || q.waiting} onClick={q.rescan}>
-      {scanning ? "Scanning…" : "Rescan"}
+    <Button variant="secondary" icon={following ? <Spinner /> : <RotateCw />} disabled={following || q.waiting} onClick={q.rescan}>
+      {following ? "Scanning…" : "Rescan"}
     </Button>
   );
 
@@ -435,8 +473,8 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
           back
           actions={
             hostId && report && !q.outdated ? (
-              <IconButton label="Rescan" size="lg" disabled={scanning || q.waiting} onClick={q.rescan}>
-                {scanning ? <Spinner /> : <RotateCw />}
+              <IconButton label="Rescan" size="lg" disabled={following || q.waiting} onClick={q.rescan}>
+                {following ? <Spinner /> : <RotateCw />}
               </IconButton>
             ) : undefined
           }

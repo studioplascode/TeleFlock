@@ -382,11 +382,24 @@ pub(super) mod linux {
     }
 
     pub(in crate::priority) fn place(manager: Manager, unit: &str, description: &str, pid: u32) -> Result<(), Fail> {
+        place_with(manager, unit, description, pid, &[])
+    }
+
+    /// [`place`] into a scope with `CPUWeight` and `IOWeight` 1: background work below the agents'
+    /// (`crate::priority::low`).
+    pub(in crate::priority) fn place_low(manager: Manager, unit: &str, description: &str, pid: u32) -> Result<(), Fail> {
+        place_with(manager, unit, description, pid, &["CPUWeight", "t", "1", "IOWeight", "t", "1"])
+    }
+
+    /// `StartTransientUnit` of a scope holding `pid`, with `extra` properties (`name, signature,
+    /// value` triples), and waits until the process is there.
+    fn place_with(manager: Manager, unit: &str, description: &str, pid: u32, extra: &[&str]) -> Result<(), Fail> {
         let busctl = tf_herdr::durable::systemd_tool("busctl").ok_or_else(|| Fail::Other("busctl is not installed".into()))?;
         let mut cmd = Command::new(busctl);
         user_manager(&mut cmd, manager);
         let pid_arg = pid.to_string();
         let mut props = vec!["PIDs", "au", "1", pid_arg.as_str(), "Description", "s", description, "CollectMode", "s", "inactive-or-failed"];
+        props.extend_from_slice(extra);
         if manager == Manager::System {
             // As `systemd-run --scope` from `tf_herdr::durable`: system units default to
             // DefaultTasksMax, login sessions have no task limit.

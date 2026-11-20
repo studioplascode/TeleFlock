@@ -142,6 +142,8 @@ impl Ctx {
         moves::start(&ctx);
         // Idle shells: listed in `HostInfo.idleShells`, closed by themselves unless switched off.
         cleanup::shells::start(&ctx);
+        // The Cleanup report, kept fresh in the background (first scan a few minutes from now).
+        cleanup::schedule::start(&ctx);
         Ok(ctx)
     }
 

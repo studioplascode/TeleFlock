@@ -52,6 +52,7 @@ export function WorktreeRow({
   inGroup,
   owner,
   wait,
+  forgetOff,
 }: {
   hostId: string;
   worktree: CleanupWorktree;
@@ -71,6 +72,11 @@ export function WorktreeRow({
   owner?: CleanupOwner;
   /** Why its Delete waits: the report shown is this device's copy from before the visit, or the host is offline. */
   wait?: string;
+  /**
+   * Why Forget is off for a folder that is gone: the host's tf-hostd predates `forget`, so it could delete a
+   * folder that came back instead of forgetting it. `wait` comes first.
+   */
+  forgetOff?: string;
 }) {
   const kind = KIND[verdict.kind];
   const pr = prLine(w, now);
@@ -79,8 +85,9 @@ export function WorktreeRow({
     w.dirty === undefined ? (w.missing ? null : "changes unknown") : w.dirty > 0 ? `${w.dirty} uncommitted change${w.dirty === 1 ? "" : "s"}` : "clean";
   const subagents = w.owner?.subagents ?? [];
   const agent = owner || inGroup ? undefined : w.lastAgent;
-  const canDelete = !w.busy && w.locked === undefined && wait === undefined;
-  const why = w.busy ? HOLD_WORDS.busy : w.locked !== undefined ? `Locked${w.locked ? `: ${w.locked}` : ""}. Unlock it first (git worktree unlock).` : wait;
+  const off = wait ?? (w.missing ? forgetOff : undefined);
+  const canDelete = !w.busy && w.locked === undefined && off === undefined;
+  const why = w.busy ? HOLD_WORDS.busy : w.locked !== undefined ? `Locked${w.locked ? `: ${w.locked}` : ""}. Unlock it first (git worktree unlock).` : off;
   return (
     <li className={cn("flex flex-wrap items-start gap-x-4 gap-y-2 px-4 py-3 max-md:px-3.5", removing && "opacity-50")}>
       <Tooltip content={kind.about}>

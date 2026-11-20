@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { expectOf } from "@/features/cleanup/background";
 import { bulkSet, classify } from "@/features/cleanup/classify";
 import { DemoCleanup } from "./cleanup";
 import { ManualClock } from "./clock";
 import type { CleanupReport, CleanupStorage, CleanupWorktree } from "../gen";
 import { WORKTREES } from "./data";
 import { DemoEngine } from "./engine";
+
+const MIN = 60_000;
 
 function rig() {
   const clock = new ManualClock();
@@ -17,6 +20,7 @@ function rig() {
     clock.advance(ms);
     return (await p) as T;
   };
+  // Without `latest` (apps before 0.9.6) the seeded report, 12 minutes old, starts a scan.
   const scanned = () => call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 5000 }, 2500);
   return { clock, call, scanned };
 }
@@ -25,7 +29,7 @@ const all = (r: CleanupReport): CleanupWorktree[] => r.repos.flatMap((x) => x.wo
 const at = (r: CleanupReport, path: string) => all(r).find((w) => w.path === path);
 
 describe("demo cleanup", () => {
-  test("a scan fills sizes and pull requests in, then answers at once", async () => {
+  test("without `latest` a report over a minute old starts a scan that fills sizes and pull requests in, then answers at once", async () => {
     const r = rig();
     const first = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 0 });
     expect(first.scanning).toBe(true);
@@ -38,6 +42,79 @@ describe("demo cleanup", () => {
     const gobump = all(done).find((w) => w.lastAgent?.name === "gobump");
     expect(gobump?.pr?.state).toBe("MERGED");
     expect(gobump?.lastAgent?.parked).toBe(true);
+  });
+
+  test("a 0.9.6 host answers `latest` at once from the report of its background pass 12 minutes ago: no scan starts", async () => {
+    const r = rig();
+    const t0 = r.clock.now();
+    const report = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 5000, latest: true });
+    expect(report.scanning).toBe(false);
+    expect(report.scannedAt).toBe(t0 - 12 * MIN);
+    expect(report.background).toEqual({ everyMs: 30 * MIN, running: false, nextAt: t0 + 18 * MIN - 1200 });
+    expect(report.stats).toMatchObject({ kind: "background", at: t0 - 12 * MIN, low: true, cancelled: false, statuses: 0, sizeWalks: 0, dirReads: 0, prLookups: 0, sessionBytes: 0 });
+    expect(report.stats?.statusesKept).toBe(all(report).length);
+    // Sizes and pull requests are filled in already.
+    expect(all(report).filter((w) => !w.missing).every((w) => w.size !== undefined)).toBe(true);
+    expect(all(report).find((w) => w.lastAgent?.name === "gobump")?.pr?.state).toBe("MERGED");
+    const again = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 0, latest: true });
+    expect(again).toMatchObject({ scanning: false, scannedAt: t0 - 12 * MIN });
+    // Rescan runs a scan the page follows (`background.running` false).
+    const rescan = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: true, waitMs: 0, latest: true });
+    expect(rescan).toMatchObject({ scanning: true, background: { running: false } });
+    const done = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 5000, latest: true }, 2500);
+    expect(done.scanning).toBe(false);
+    expect(done.stats).toMatchObject({ kind: "refresh", low: false });
+    expect(done.scannedAt).toBeGreaterThan(t0);
+  });
+
+  test("a background pass every 30 minutes: not followed, sizes kept while it runs, then the report's time", () => {
+    const clock = new ManualClock();
+    const host = new DemoCleanup({ supported: true, clock, state: () => ({ agents: [], workspaces: [] }) as never, call: (m: string) => (m === "worktree.list" ? { worktrees: [] } : {}) });
+    const ask = () => host.call("cleanup.worktrees", { refresh: false, waitMs: 5000, latest: true }) as CleanupReport;
+    const t0 = clock.now();
+    expect(ask().background?.nextAt).toBe(t0 + 18 * MIN - 1200);
+    clock.advance(18 * MIN - 600);
+    const during = ask();
+    expect(during).toMatchObject({ scanning: true, scannedAt: t0 - 12 * MIN, background: { everyMs: 30 * MIN, running: true } });
+    expect(during.background?.nextAt).toBeUndefined();
+    expect(all(during).filter((w) => !w.missing).every((w) => w.size !== undefined)).toBe(true);
+    clock.advance(1000);
+    const after = ask();
+    expect(after).toMatchObject({ scanning: false, scannedAt: t0 + 18 * MIN, background: { running: false, nextAt: t0 + 48 * MIN - 1200 } });
+    expect(after.stats).toMatchObject({ kind: "background", low: true, ms: 1200 });
+  });
+
+  test("forget drops only git's record of a folder that is gone; one that is there is refused (not_missing)", async () => {
+    const r = rig();
+    const report = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 0, latest: true });
+    const present = `${WORKTREES}/teleflock/ws-reconnect-v1`;
+    const gone = `${WORKTREES}/teleflock/try-yjs`;
+    expect(at(report, gone)?.missing).toBe(true);
+    await expect(r.call("forge", "cleanup.remove", { path: present, force: false, trust: false, forget: true })).rejects.toMatchObject({ code: "not_missing" });
+    await r.call("forge", "cleanup.remove", { path: gone, force: false, trust: false, forget: true, expect: expectOf(at(report, gone) as CleanupWorktree) });
+    const after = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 0, latest: true });
+    expect(at(after, gone)).toBeUndefined();
+    expect(at(after, present)).toBeDefined();
+  });
+
+  test("a removal confirmed on facts that changed since is refused (worktree_changed); the current ones pass", async () => {
+    const r = rig();
+    const report = await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 0, latest: true });
+    const w = at(report, `${WORKTREES}/teleflock/ws-reconnect-v1`) as CleanupWorktree;
+    const shown = expectOf(w);
+    await expect(r.call("forge", "cleanup.remove", { path: w.path, force: false, trust: false, forget: false, expect: { ...shown, head: "0000000" } })).rejects.toMatchObject({
+      code: "worktree_changed",
+      message: expect.stringContaining("HEAD moved"),
+    });
+    await expect(r.call("forge", "cleanup.remove", { path: w.path, force: false, trust: false, forget: false, expect: { ...shown, branch: "feat/other" } })).rejects.toMatchObject({ code: "worktree_changed" });
+    // A herdr workspace shows this one now: the page saw none.
+    const open = all(report).find((x) => x.workspaceId !== undefined) as CleanupWorktree;
+    await expect(r.call("forge", "cleanup.remove", { path: open.path, force: false, trust: false, forget: false, expect: { ...expectOf(open), workspaceId: undefined } })).rejects.toMatchObject({
+      code: "worktree_changed",
+    });
+    expect(at(await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 0, latest: true }), w.path)).toBeDefined();
+    await r.call("forge", "cleanup.remove", { path: w.path, force: false, trust: false, forget: false, expect: shown });
+    expect(at(await r.call<CleanupReport>("forge", "cleanup.worktrees", { refresh: false, waitMs: 0, latest: true }), w.path)).toBeUndefined();
   });
 
   test("every kind and safety hold shows up", async () => {

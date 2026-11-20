@@ -2,10 +2,13 @@ import { apiError } from "../errors";
 import type {
   Agent,
   CleanupAgent,
+  CleanupExpect,
   CleanupOwner,
   CleanupOwnerRef,
   CleanupReport,
   CleanupRepo,
+  CleanupScanKind,
+  CleanupScanStats,
   CleanupStorage,
   CleanupWorktree,
   GcCategory,
@@ -34,6 +37,17 @@ const SCAN_MS = 1800;
 const CHECK_MS = 2500;
 const APPLY_MS = 1500;
 const WAIT_MAX_MS = 20_000;
+const MIN = 60_000;
+/** How often the host scans by itself (`CleanupBackground.everyMs`), as hostd. */
+const EVERY_MS = 30 * MIN;
+/** A background pass: short, since nothing changed since the last scan. */
+const BACKGROUND_MS = 1200;
+/** The host starts with the report of a background pass that ended this long ago. */
+const SEEDED_AGO = 12 * MIN;
+/** A removal brings the next background pass this close (hostd: a minute or two after a change). */
+const CHANGE_MS = 90_000;
+/** Without `latest` (apps before 0.9.6) a report over this old starts a scan, as before. */
+const OLD_RULE_MS = MIN;
 
 /** A pull request of a seeded worktree. */
 interface SeedPr {
@@ -144,32 +158,65 @@ interface Run {
   waiters: Set<() => void>;
 }
 
+/** A Cleanup scan: who started it (a page that waits takes a background pass over), and when. */
+interface Scan {
+  kind: CleanupScanKind;
+  startedAt: number;
+  /** Cancels its end (a Rescan stops any other scan). */
+  cancel(): void;
+}
+
+/** `CleanupRemoveParams.expect` as the app sent it. */
+function expectFrom(raw: unknown): CleanupExpect | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const e = raw as Record<string, unknown>;
+  return {
+    head: typeof e.head === "string" ? e.head : undefined,
+    branch: typeof e.branch === "string" ? e.branch : undefined,
+    unpushed: typeof e.unpushed === "number" ? e.unpushed : undefined,
+    agents: typeof e.agents === "number" ? e.agents : 0,
+    workspaceId: typeof e.workspaceId === "string" ? e.workspaceId : undefined,
+  };
+}
+
 /**
- * tf-hostd's Cleanup page for the demo: forge's worktrees (its workspaces' linked worktrees, the parked
- * agents' merged ones, and a few that only git still knows: stale, gone, locked, closed with changes, a
- * detached HEAD with unsaved commits, an automation's merged one), a scan that fills sizes and pull
- * requests in ~2 s, `cleanup.remove` with hostd's checks (busy, locked, unsaved commits, dirty), and an
- * `omp gc` check / apply of blobs and WAL (compression unsupported, as on Linux). studio-pc plays a host
- * whose tf-hostd predates the page.
+ * tf-hostd's Cleanup page for the demo, as a 0.9.6 host: forge's worktrees (its workspaces' linked
+ * worktrees, the parked agents' merged ones, and a few that only git still knows: stale, gone, locked,
+ * closed with changes, a detached HEAD with unsaved commits, an automation's merged one). It starts with the
+ * report of a background pass 12 minutes ago and keeps it fresh by itself (a short pass every 30 min, and
+ * 90 s after a removal), so a page asking with `latest` is answered at once; Rescan, a report older than
+ * that, or an app without `latest` and a report over a minute old run a scan that fills sizes and pull
+ * requests in ~2 s. `cleanup.remove` keeps hostd's checks (busy, locked, unsaved commits, dirty, `expect`,
+ * `forget`), and an `omp gc` check / apply covers blobs and WAL (compression unsupported, as on Linux).
+ * studio-pc plays a host whose tf-hostd predates the page.
  */
 export class DemoCleanup {
   private extras = seedExtras();
-  private scanEndsAt = 0;
-  private scanned = false;
+  /** The scan running now. */
+  private scan?: Scan;
+  /** The last scan that ended: the report's `scannedAt` and `stats`. */
+  private last: { kind: CleanupScanKind; startedAt: number; at: number };
+  /** When the next background pass is due. */
+  private nextAt = 0;
+  private cancelNext: () => void = () => {};
   private scanWaiters = new Set<() => void>();
   private blobs = { count: 23, bytes: 184 * MB };
   private wal = { history: 6 * MB, models: Math.round(0.3 * MB) };
   private gc: { running?: Run; check?: GcRun; applied?: GcRun } = {};
 
-  constructor(private readonly env: CleanupHostEnv) {}
+  constructor(private readonly env: CleanupHostEnv) {
+    const at = this.now - SEEDED_AGO;
+    this.last = { kind: "background", startedAt: at - BACKGROUND_MS, at };
+    if (env.supported) this.plan(at + EVERY_MS - BACKGROUND_MS);
+  }
 
   call(method: string, p: Record<string, unknown>): unknown {
     if (!this.env.supported) throw apiError("unknown_method", `unknown method \`${method}\``);
     switch (method) {
       case "cleanup.worktrees":
-        return this.worktrees(Boolean(p.refresh), typeof p.waitMs === "number" ? p.waitMs : 0);
+        return this.worktrees(Boolean(p.refresh), typeof p.waitMs === "number" ? p.waitMs : 0, Boolean(p.latest));
       case "cleanup.remove":
-        return this.remove(String(p.path ?? ""), Boolean(p.force), Boolean(p.trust));
+        return this.remove(String(p.path ?? ""), Boolean(p.force), Boolean(p.trust), Boolean(p.forget), expectFrom(p.expect));
       case "cleanup.storage":
         return this.storage(typeof p.waitMs === "number" ? p.waitMs : 0);
       case "cleanup.storageRun":
@@ -200,21 +247,62 @@ export class DemoCleanup {
 
   // ---------------------------------------------------------------- worktrees
 
-  private worktrees(refresh: boolean, waitMs: number): CleanupReport | Promise<CleanupReport> {
-    if (this.now >= this.scanEndsAt && (refresh || !this.scanned)) {
-      this.scanEndsAt = this.now + SCAN_MS;
-      this.env.clock.after(SCAN_MS, () => {
-        this.scanned = true;
-        for (const w of [...this.scanWaiters]) w();
-      });
+  /** Schedules the next background pass (hostd: every `everyMs`, and soon after a change). */
+  private plan(at: number): void {
+    this.cancelNext();
+    this.nextAt = at;
+    // While a scan the page asked for runs, its end plans the next pass.
+    this.cancelNext = this.env.clock.after(at - this.now, () => {
+      if (!this.scan) this.start("background");
+    });
+  }
+
+  /** Starts a scan; a Rescan stops the one that runs. */
+  private start(kind: CleanupScanKind): void {
+    this.scan?.cancel();
+    const ms = kind === "background" ? BACKGROUND_MS : SCAN_MS;
+    const scan: Scan = { kind, startedAt: this.now, cancel: () => {} };
+    scan.cancel = this.env.clock.after(ms, () => this.end(scan));
+    this.scan = scan;
+  }
+
+  private end(scan: Scan): void {
+    this.scan = undefined;
+    this.last = { kind: scan.kind, startedAt: scan.startedAt, at: this.now };
+    // The next pass ends as this report turns `everyMs` old: a page asking with `latest` never waits for one.
+    this.plan(this.now + EVERY_MS - BACKGROUND_MS);
+    for (const w of [...this.scanWaiters]) w();
+  }
+
+  /** hostd scans again a minute or two after a worktree, workspace or agent changed. */
+  private changed(): void {
+    if (this.nextAt > this.now + CHANGE_MS) this.plan(this.now + CHANGE_MS);
+  }
+
+  private worktrees(refresh: boolean, waitMs: number, latest: boolean): CleanupReport | Promise<CleanupReport> {
+    const running = this.scan;
+    // `latest` (apps ≥ 0.9.6): the report is good while younger than the background interval; else a minute.
+    const young = this.now - this.last.at < (latest ? EVERY_MS : OLD_RULE_MS);
+    if (refresh) {
+      // A Rescan stops any other scan that runs (a background pass, a page's) and runs now.
+      if (running?.kind !== "refresh") this.start("refresh");
+    } else if (!young) {
+      if (!running) this.start("page");
+      // A page that waits takes a background pass over: it goes on at normal priority.
+      else if (running.kind === "background") running.kind = "page";
     }
+    const scan = this.scan;
     const wait = Math.min(Math.max(0, waitMs), WAIT_MAX_MS);
-    if (this.now >= this.scanEndsAt || wait === 0) return this.report();
+    // Nobody waits for a background pass (apps ≥ 0.9.6 don't follow it); a scan the page asked for is waited
+    // for, and older apps wait for any scan.
+    if (!scan || wait === 0 || (latest && scan.kind === "background")) return this.report();
     return this.waitFor(this.scanWaiters, wait, () => this.report());
   }
 
   private report(): CleanupReport {
-    const scanning = this.now < this.scanEndsAt;
+    const scan = this.scan;
+    // A page's or a Rescan's scan fills sizes and pull requests in as it ends; a background pass keeps them.
+    const filled = !scan || scan.kind === "background";
     const state = this.env.state();
     const byRepo = new Map<string, CleanupWorktree[]>();
     const seen = new Set<string>();
@@ -247,17 +335,57 @@ export class DemoCleanup {
       } catch {
         continue;
       }
-      for (const e of listed.worktrees.filter((x) => !x.primary)) add(this.fromBoard(e.path, e.branch, e.head, e.workspaceId, e.dirty ?? 0, state, !scanning, own));
+      for (const e of listed.worktrees.filter((x) => !x.primary)) add(this.fromBoard(e.path, e.branch, e.head, e.workspaceId, e.dirty ?? 0, state, filled, own));
     }
     for (const a of state.agents) {
       const wt = a.parked?.worktree;
-      if (wt) add(this.fromBoard(wt.path, a.branch, undefined, undefined, 0, state, !scanning, own));
+      if (wt) add(this.fromBoard(wt.path, a.branch, undefined, undefined, 0, state, filled, own));
     }
-    for (const x of this.extras) add({ ...this.fromExtra(x, !scanning), owner: own(x.owner, x.subagents) });
+    for (const x of this.extras) add({ ...this.fromExtra(x, filled), owner: own(x.owner, x.subagents) });
     const repos: CleanupRepo[] = [...byRepo.entries()]
       .map(([name, worktrees]) => ({ root: REPOS.find((r) => r.name === name)?.root ?? `${HOME}/code/${name}`, name, worktrees: worktrees.sort((a, b) => a.path.localeCompare(b.path)) }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    return { scannedAt: this.scanned ? this.scanEndsAt : undefined, scanning, repos, owners: [...owners.values()] };
+    return {
+      scannedAt: this.last.at,
+      scanning: scan !== undefined,
+      repos,
+      owners: [...owners.values()],
+      background: { everyMs: EVERY_MS, running: scan?.kind === "background", nextAt: scan ? undefined : this.nextAt },
+      stats: this.stats(repos),
+    };
+  }
+
+  /**
+   * What the last scan looked at (`CleanupScanStats`): a background pass found nothing changed, so it only
+   * looked at file times; a page's scan ran git and checked the trees' folders; a Rescan walked them and asked
+   * gh again.
+   */
+  private stats(repos: CleanupRepo[]): CleanupScanStats {
+    const { kind, startedAt, at } = this.last;
+    const list = repos.flatMap((r) => r.worktrees);
+    const n = list.length;
+    const present = list.filter((w) => !w.missing).length;
+    const branches = list.filter((w) => w.branch !== undefined).length;
+    const common = { kind, at, ms: at - startedAt, low: kind === "background", cancelled: false, repos: repos.length, worktrees: n, sizesDeferred: 0, dirStats: 4 * n + repos.length };
+    if (kind === "background")
+      return { ...common, reposListed: 0, statuses: 0, statusesKept: n, gitCalls: 0, sizeWalks: 0, sizeChecks: 0, sizesKept: present, dirReads: 0, dirEntries: 0, prLookups: 0, prsKept: branches, sessionFiles: 0, sessionBytes: 0 };
+    const refresh = kind === "refresh";
+    return {
+      ...common,
+      reposListed: repos.length,
+      statuses: present,
+      statusesKept: n - present,
+      gitCalls: repos.length + 2 * present,
+      sizeWalks: refresh ? present : 0,
+      sizeChecks: refresh ? 0 : present,
+      sizesKept: refresh ? 0 : present,
+      dirReads: (refresh ? 3100 : 40) * present,
+      dirEntries: (refresh ? 52_000 : 640) * present,
+      prLookups: refresh ? branches : 0,
+      prsKept: refresh ? 0 : branches,
+      sessionFiles: refresh ? 12 : 1,
+      sessionBytes: refresh ? 2_400_000 : 36_000,
+    };
   }
 
   private fromBoard(
@@ -339,8 +467,30 @@ export class DemoCleanup {
     };
   }
 
-  private remove(path: string, force: boolean, trust: boolean): unknown {
+  /**
+   * hostd's `expect` check right before a removal: the worktree is still what the page showed (its row as
+   * this host reports it now). One that is not listed is left to the removal's own checks.
+   */
+  private recheck(path: string, expect: CleanupExpect): void {
+    const w = this.report().repos.flatMap((r) => r.worktrees).find((x) => x.path === path);
+    if (!w) return;
+    const changed: string[] = [];
+    if ((w.branch ?? null) !== (expect.branch ?? null)) changed.push(`it is on ${w.branch ?? "a detached HEAD"} now, not ${expect.branch ?? "a detached HEAD"}`);
+    else if ((w.head ?? null) !== (expect.head ?? null)) changed.push(`its HEAD moved from ${expect.head ?? "none"} to ${w.head ?? "none"}`);
+    if ((w.unpushed ?? 0) > (expect.unpushed ?? 0)) changed.push(`it has ${w.unpushed} unpushed commits now (${expect.unpushed ?? 0} before)`);
+    if (w.agents > expect.agents) changed.push("an agent has a pane in it now");
+    if (w.workspaceId !== undefined && w.workspaceId !== expect.workspaceId) changed.push("a herdr workspace shows it now");
+    if (changed.length > 0) throw apiError("worktree_changed", changed.join("; "), { hint: "Look at it again before removing it." });
+  }
+
+  private remove(path: string, force: boolean, trust: boolean, forget: boolean, expect: CleanupExpect | undefined): unknown {
+    if (expect) this.recheck(path, expect);
     const extra = this.extras.find((x) => x.path === path);
+    // Forget only drops git's record of a folder that is gone, never a checkout.
+    if (forget && !extra?.missing)
+      throw apiError("not_missing", `${path} is there: Forget only drops git's record of a worktree whose folder is gone`, {
+        hint: "Something is at that path again (a disk mounted again, a restored folder, an empty mount point): delete it as a worktree instead.",
+      });
     if (extra) {
       if (extra.locked !== undefined)
         throw apiError("worktree_locked", `${path} is locked (${extra.locked})`, { hint: `TeleFlock never removes a locked worktree. Unlock it first if it should go: git worktree unlock ${path}` });
@@ -349,13 +499,16 @@ export class DemoCleanup {
       if ((extra.dirty ?? 0) > 0 && !force)
         throw apiError("dirty_worktree", `'${path}' contains modified or untracked files, use --force to delete it`, { hint: "Remove it with “force” to discard them (the branch is kept)." });
       this.extras = this.extras.filter((x) => x !== extra);
+      this.changed();
       return {};
     }
     const state = this.env.state();
     const ws = state.workspaces.find((w) => w.worktree?.path === path);
     const agent = state.agents.find((a) => !a.parked && ws && a.workspaceId === ws.id && busy(a));
     if (agent) throw apiError("busy", `agent ${agent.name} is working in ${path}`, { hint: "Wait until it is done, or stop it, before removing its worktree.", retryable: true });
-    return ws ? this.env.call("worktree.remove", { workspaceId: ws.id, force, trust }) : this.env.call("worktree.remove", { workspaceId: "", path, force, trust });
+    const out = ws ? this.env.call("worktree.remove", { workspaceId: ws.id, force, trust }) : this.env.call("worktree.remove", { workspaceId: "", path, force, trust });
+    this.changed();
+    return out;
   }
 
   // ---------------------------------------------------------------- omp storage

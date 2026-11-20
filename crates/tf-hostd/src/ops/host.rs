@@ -100,6 +100,11 @@ pub fn health() -> HostHealth {
     platform::health()
 }
 
+/// The host's 1-minute load average (`HostHealth::load1`), on its own: no CPU sample is taken.
+pub fn load1() -> f32 {
+    platform::load1()
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
@@ -164,8 +169,12 @@ mod platform {
         (st.f_bavail as u64 * frag, st.f_blocks as u64 * frag)
     }
 
+    pub fn load1() -> f32 {
+        std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| s.split_whitespace().next()?.parse().ok()).unwrap_or(0.0)
+    }
+
     pub fn health() -> HostHealth {
-        let load1 = std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| s.split_whitespace().next()?.parse().ok()).unwrap_or(0.0);
+        let load1 = load1();
         let (mem_used, mem_total) = std::fs::read_to_string("/proc/meminfo").map(|s| meminfo(&s)).unwrap_or((0, 0));
         let uptime_s = std::fs::read_to_string("/proc/uptime").ok().and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok()).unwrap_or(0.0) as u64;
         let (disk_free, disk_total) = disk(&home_dir());
@@ -196,6 +205,10 @@ mod platform {
             false,
         ))
     });
+
+    pub fn load1() -> f32 {
+        System::load_average().one as f32
+    }
 
     pub fn health() -> HostHealth {
         let mut guard = SYS.lock().unwrap_or_else(|p| p.into_inner());

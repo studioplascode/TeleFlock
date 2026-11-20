@@ -1,20 +1,33 @@
-//! `cleanup.remove`: one linked worktree from the Cleanup page, checked again right before it goes
-//! (the page's report may be minutes old):
+//! `cleanup.remove`: one linked worktree from the Cleanup page, checked on the worktree itself
+//! right before it goes, never on the report (which a background scan may have made half an hour
+//! ago):
 //!
 //! * no agent on the board works or waits for the user in it (`busy`, retryable);
 //! * it is not locked (`worktree_locked`, even with `force`: unlock it first);
 //! * a detached HEAD holds no commit only it knows (`orphan_commits`, unless `force`);
+//! * (0.9.6, `expect`) it is still what the page showed: its HEAD and branch, no more unpushed
+//!   commits, no live agent or herdr workspace in it that the page did not show
+//!   (`worktree_changed`; its row in the report is refreshed, so the page asks again with the
+//!   worktree as it is now);
 //!
 //! then it goes exactly like `worktree.remove {path}`: through herdr when a workspace shows it
 //! (which closes that workspace), else `git worktree remove [--force]` from the main worktree;
-//! uncommitted changes need `force` (`dirty_worktree`), a repository owned by another user `trust`
-//! (`untrusted_repo`). The branch is always kept. A folder already gone drops only its own
-//! registration.
+//! uncommitted changes need `force` (`dirty_worktree`: git checks them itself, at that moment), a
+//! repository owned by another user `trust` (`untrusted_repo`). The branch is always kept. A
+//! folder already gone drops only its own registration.
+//!
+//! **Forget** (`forget`, 0.9.6) only drops git's record of a worktree whose folder is gone, and
+//! never deletes a checkout: anything at the path (a disk mounted again, a restored folder, an
+//! empty mount point), or a path whose absence can't be told (an unreadable folder on the way),
+//! refuses with `not_missing` and refreshes the row. Otherwise only the worktree's admin dir goes
+//! (`<git dir>/worktrees/<id>`, what `git worktree prune` deletes for it), the path checked once
+//! more right before; never `git worktree remove`, which would delete a folder that came back in
+//! between.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tf_proto::{Agent, ApiError, CleanupRemoveParams, Empty, Workspace};
+use tf_proto::{Agent, ApiError, CleanupExpect, CleanupRemoveParams, CleanupWorktree, Empty, Workspace};
 
 use super::scan;
 use crate::ops::fs::resolve_path;
@@ -25,6 +38,9 @@ const QUICK: Duration = Duration::from_secs(10);
 
 pub async fn remove(ctx: &Ctx, p: &CleanupRemoveParams) -> Result<Empty, ApiError> {
     let path = resolve_path(&p.path)?;
+    if p.forget {
+        return forget(ctx, &path, p.trust).await;
+    }
     let board = ctx.state.snapshot();
     if let Some(name) = busy_agent(&board.workspaces, &board.agents, &path) {
         return Err(ApiError::new(
@@ -47,6 +63,13 @@ pub async fn remove(ctx: &Ctx, p: &CleanupRemoveParams) -> Result<Empty, ApiErro
         return Ok(Empty {});
     };
     precheck(&reg, p.force)?;
+    if let Some(expect) = &p.expect
+        && !reg.record.prunable
+        && path.is_dir()
+    {
+        let now = scan::recheck(ctx, &root, &reg.record).await;
+        verdict(&path, expect, &now)?;
+    }
     remove_path(
         ctx,
         &path.display().to_string(),
@@ -72,6 +95,114 @@ pub(crate) fn busy_agent(
         .into_iter()
         .find(|a| a.parked.is_none() && scan::is_busy(a))
         .map(|a| a.name.clone())
+}
+
+/// What changed in a worktree since the page showed it (`expect`) that its removal was not
+/// confirmed on; empty when it is what the page showed. Uncommitted changes are not among them:
+/// git refuses those without `force` itself, which asks for the force confirm as it always did.
+pub(crate) fn changes(expect: &CleanupExpect, now: &CleanupWorktree) -> Vec<String> {
+    let mut out = Vec::new();
+    if expect.branch != now.branch {
+        out.push(match &now.branch {
+            Some(b) => format!("it is on branch {b} now"),
+            None => "its HEAD is detached now".to_string(),
+        });
+    } else if expect.head != now.head {
+        out.push(format!("its HEAD moved to {} (new commits, or another checkout)", now.head.as_deref().unwrap_or("?")));
+    } else if now.unpushed.unwrap_or(0) > expect.unpushed.unwrap_or(0) {
+        let n = now.unpushed.unwrap_or(0);
+        out.push(format!("{n} commit{} not pushed now", if n == 1 { " is" } else { "s are" }));
+    }
+    if now.agents > expect.agents {
+        out.push(format!("{} agent{} in it now", now.agents, if now.agents == 1 { " is" } else { "s are" }));
+    }
+    if now.workspace_id.is_some() && expect.workspace_id.is_none() {
+        out.push("a herdr workspace shows it now (deleting it closes that workspace)".to_string());
+    }
+    out
+}
+
+/// `worktree_changed` when [`changes`] finds any.
+pub(crate) fn verdict(path: &Path, expect: &CleanupExpect, now: &CleanupWorktree) -> Result<(), ApiError> {
+    let what = changes(expect, now);
+    if what.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::new("worktree_changed", format!("{} changed since the report: {}", path.display(), what.join("; ")))
+        .with_hint("Look at it as it is now before deleting it: the page shows it again."))
+}
+
+/// Forget: drops git's record of a worktree whose folder is gone, never a checkout (module doc).
+async fn forget(ctx: &Ctx, path: &Path, trust: bool) -> Result<Empty, ApiError> {
+    let root = repo_root(ctx, path).await?;
+    match forget_at(&root, path, trust).await {
+        Ok(()) => {
+            ctx.state.drop_parked_where(|r| crate::state::parked::ran_in(r, path, |other| same_path(Path::new(other), path)));
+            scan::forget(&ctx.herdr_session, path);
+            ctx.state.refresh();
+            Ok(Empty {})
+        }
+        Err(e) => {
+            if e.code == "not_missing"
+                && let Ok(Some(reg)) = registration(&root, path, trust).await
+            {
+                // The page shows the worktree as it is now.
+                scan::recheck(ctx, &root, &reg.record).await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// [`forget`] in the repository at `root`: refused when anything is at `path` (or it can't be told),
+/// or the worktree is locked; else its admin dir only.
+pub(crate) async fn forget_at(root: &Path, path: &Path, trust: bool) -> Result<(), ApiError> {
+    if let Some(why) = still_there(path) {
+        return Err(not_missing(path, &why));
+    }
+    let Some(reg) = registration(root, path, trust).await? else {
+        return Ok(());
+    };
+    precheck(&reg, true)?;
+    drop_registration(root, path).await
+}
+
+/// What is at `path`, when it is not definitely gone: `None` only when the path does not exist
+/// (a missing folder on the way counts, a file on the way too: nothing can be there).
+pub(crate) fn still_there(path: &Path) -> Option<String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => Some(match std::fs::read_dir(path).map(|mut d| d.next().is_none()) {
+            Ok(true) => "an empty folder is there (a disk not mounted on it?)".to_string(),
+            Ok(false) => "the folder is there again (a disk mounted again, or the folder restored)".to_string(),
+            Err(e) => format!("a folder is there that can't be read ({e})"),
+        }),
+        Ok(_) => Some("something that is no folder is there".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => None,
+        Err(e) => Some(format!("whether it is gone can't be told ({e})")),
+    }
+}
+
+fn not_missing(path: &Path, why: &str) -> ApiError {
+    ApiError::new("not_missing", format!("{}: {why}. Nothing was forgotten.", path.display()))
+        .with_hint("Its files stay as they are. Delete it on its own if it should go (the checkout goes, the branch stays).")
+}
+
+/// Deletes the admin dir of the linked worktree at `path` (`<git dir>/worktrees/<id>`), nothing
+/// else, after checking once more that nothing is at `path`.
+async fn drop_registration(root: &Path, path: &Path) -> Result<(), ApiError> {
+    let common = scan::common_dir(root).await.ok_or_else(|| ApiError::new("not_git_repo", format!("{} has no git dir", root.display())))?;
+    let admins = common.join("worktrees");
+    let Some(admin) = scan::admin_dir(path, &common).filter(|a| a.parent().is_some_and(|p| same_path(p, &admins))) else {
+        return Ok(());
+    };
+    if let Some(why) = still_there(path) {
+        return Err(not_missing(path, &why));
+    }
+    std::fs::remove_dir_all(&admin).map_err(|e| ApiError::new("io_error", format!("removing {}: {e}", admin.display())))?;
+    tracing::info!(path = %path.display(), admin = %admin.display(), "forgot a worktree whose folder is gone");
+    Ok(())
 }
 
 /// The main worktree of the repository `path` belongs to: from the checkout, else (the folder is
@@ -351,5 +482,106 @@ mod tests {
             busy_agent(&ws, &[agent("working", "running")], Path::new("/wt/other")),
             None
         );
+    }
+
+    fn expect_of(w: &CleanupWorktree) -> CleanupExpect {
+        CleanupExpect { head: w.head.clone(), branch: w.branch.clone(), unpushed: w.unpushed, agents: w.agents, workspace_id: w.workspace_id.clone() }
+    }
+
+    /// A removal confirmed on facts that still hold goes at once; one whose worktree changed since
+    /// (a commit, another branch, more unpushed commits, an agent or a workspace in it) gets its
+    /// confirm again. Uncommitted changes are git's to refuse (the force confirm), not a change here.
+    #[tokio::test]
+    async fn a_removal_acts_on_the_worktree_as_it_is_now() {
+        let td = fixture();
+        let root = td.path();
+        sh(root, &["checkout", "-q", "-f", "main"]);
+        let wt = root.parent().unwrap().join(format!("{}-rv", root.file_name().unwrap().to_string_lossy()));
+        sh(root, &["worktree", "add", "-q", "-b", "rv", wt.to_str().unwrap(), "main"]);
+        let common = root.join(".git");
+        let now = || {
+            let (root, wt, common) = (root.to_path_buf(), wt.clone(), common.clone());
+            async move {
+                let reg = registration(&root, &wt, false).await.unwrap().unwrap();
+                scan::git_facts_now(&root, &common, reg.record).await
+            }
+        };
+        let seen = now().await;
+        let expect = expect_of(&seen);
+        assert!(verdict(&wt, &expect, &now().await).is_ok(), "unchanged: acts at once");
+
+        std::fs::write(wt.join("wip.txt"), "x").unwrap();
+        let dirty = now().await;
+        assert_eq!(dirty.dirty, Some(1));
+        assert!(verdict(&wt, &expect, &dirty).is_ok(), "uncommitted changes: git refuses without force, as always");
+
+        sh(&wt, &["add", "wip.txt"]);
+        sh(&wt, &["commit", "-q", "-m", "wip"]);
+        let committed = now().await;
+        let err = verdict(&wt, &expect, &committed).unwrap_err();
+        assert_eq!(err.code, "worktree_changed");
+        assert!(err.message.contains("HEAD moved"), "{}", err.message);
+        assert!(verdict(&wt, &expect_of(&committed), &committed).is_ok(), "confirmed again on what it is now: acts");
+
+        sh(&wt, &["checkout", "-q", "-b", "other"]);
+        assert!(changes(&expect_of(&committed), &now().await)[0].contains("branch other"));
+
+        let mut board = committed.clone();
+        (board.agents, board.workspace_id) = (1, Some("w9".into()));
+        let what = changes(&expect_of(&committed), &board);
+        assert_eq!(what.len(), 2, "{what:?}");
+        let pushed_less = CleanupWorktree { unpushed: Some(3), ..committed.clone() };
+        assert_eq!(changes(&CleanupExpect { unpushed: Some(1), ..expect_of(&committed) }, &pushed_less).len(), 1, "more commits not pushed");
+        assert!(changes(&CleanupExpect { unpushed: Some(5), ..expect_of(&committed) }, &pushed_less).is_empty(), "fewer is no reason to ask again");
+    }
+
+    /// Forget never deletes a checkout. A worktree the report saw gone whose folder came back
+    /// (holding a file git ignores) is refused with `not_missing`, and the checkout and its ignored
+    /// file stay; an empty folder at the path (a mount point without its disk) too. A folder truly
+    /// gone: only its registration goes. Locked: refused.
+    #[tokio::test]
+    async fn forget_drops_a_record_and_never_a_checkout() {
+        let td = fixture();
+        let root = td.path();
+        sh(root, &["checkout", "-q", "-f", "main"]);
+        std::fs::write(root.join(".gitignore"), ".env.local\n").unwrap();
+        sh(root, &["add", ".gitignore"]);
+        sh(root, &["commit", "-q", "-m", "ignore env"]);
+        let wt = root.parent().unwrap().join(format!("{}-fg", root.file_name().unwrap().to_string_lossy()));
+        let away = wt.with_extension("away");
+        sh(root, &["worktree", "add", "-q", "-b", "fg", wt.to_str().unwrap(), "main"]);
+        std::fs::write(wt.join(".env.local"), "SECRET=1\n").unwrap();
+
+        // The disk is unplugged (the folder moved away): the report lists it as gone.
+        std::fs::rename(&wt, &away).unwrap();
+        assert!(registration(root, &wt, false).await.unwrap().unwrap().record.prunable, "git calls it prunable");
+        // …and plugged in again before someone presses Forget.
+        std::fs::rename(&away, &wt).unwrap();
+        let err = forget_at(root, &wt, false).await.unwrap_err();
+        assert_eq!(err.code, "not_missing");
+        assert!(err.message.contains("there again"), "{}", err.message);
+        assert_eq!(std::fs::read_to_string(wt.join(".env.local")).unwrap(), "SECRET=1\n", "the ignored file survives");
+        assert!(wt.join("a.txt").exists() && listed(root).contains("-fg"), "the checkout and its registration stay");
+
+        // An empty mount point at the path is not "gone" either.
+        std::fs::rename(&wt, &away).unwrap();
+        std::fs::create_dir(&wt).unwrap();
+        let err = forget_at(root, &wt, false).await.unwrap_err();
+        assert!(err.code == "not_missing" && err.message.contains("empty folder"), "{}", err.message);
+        std::fs::remove_dir(&wt).unwrap();
+
+        // Locked and gone: refused.
+        sh(root, &["worktree", "lock", wt.to_str().unwrap()]);
+        assert_eq!(forget_at(root, &wt, false).await.unwrap_err().code, "worktree_locked");
+        sh(root, &["worktree", "unlock", wt.to_str().unwrap()]);
+
+        // Truly gone: only the registration goes; the moved-away copy is untouched.
+        forget_at(root, &wt, false).await.unwrap();
+        assert_eq!(registration(root, &wt, false).await.unwrap(), None);
+        assert!(!listed(root).contains("-fg"));
+        assert_eq!(std::fs::read_to_string(away.join(".env.local")).unwrap(), "SECRET=1\n");
+        sh(root, &["rev-parse", "--verify", "-q", "refs/heads/fg"]);
+        forget_at(root, &wt, false).await.unwrap();
+        assert!(still_there(&root.join("a.txt/below")).is_none(), "a file on the way: nothing can be there");
     }
 }

@@ -530,11 +530,19 @@ pub(crate) struct Index {
 /// The host's index (one omp agent dir per daemon).
 static INDEX: LazyLock<Mutex<Index>> = LazyLock::new(Default::default);
 
-/// Refreshes the host's index and answers from it. Blocking: run it on the blocking pool.
-pub(crate) fn with_index<R>(dir: &Path, home: Option<&Path>, first: &HashSet<PathBuf>, budget: Duration, f: impl FnOnce(&Index) -> R) -> R {
+/// Refreshes the host's index and answers from it, with what the refresh read. Blocking: run it on
+/// the blocking pool (or a background thread).
+pub(crate) fn with_index<R>(dir: &Path, home: Option<&Path>, first: &HashSet<PathBuf>, budget: Duration, f: impl FnOnce(&Index) -> R) -> (R, Refreshed) {
     let mut index = INDEX.lock().unwrap_or_else(|e| e.into_inner());
-    index.refresh(dir, home, first, budget);
-    f(&index)
+    let read = index.refresh(dir, home, first, budget);
+    (f(&index), read)
+}
+
+/// What one refresh read: session files (new or grown) and their bytes from where it went on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Refreshed {
+    pub files: u32,
+    pub bytes: u64,
 }
 
 /// Session files: top-level ones in each bucket, and the subagent transcripts in their artifacts
@@ -619,8 +627,9 @@ pub(crate) struct MainFacts {
 
 impl Index {
     /// Reads what changed in `dir` since the last refresh: new and grown files, `first` (top-level
-    /// session files) and their subagents first, then the newest, until `budget` is spent.
-    pub(crate) fn refresh(&mut self, dir: &Path, home: Option<&Path>, first: &HashSet<PathBuf>, budget: Duration) {
+    /// session files) and their subagents first, then the newest, until `budget` is spent. A file
+    /// whose length and identity are as they were is not opened.
+    pub(crate) fn refresh(&mut self, dir: &Path, home: Option<&Path>, first: &HashSet<PathBuf>, budget: Duration) -> Refreshed {
         if self.dir != dir {
             *self = Index { dir: dir.to_path_buf(), ..Default::default() };
         }
@@ -630,6 +639,7 @@ impl Index {
         let due = read_order(dir, first, listed.iter().filter(|(p, m)| self.files.get(p).is_none_or(|t| t.changed(m))).collect());
         let deadline = Instant::now() + budget;
         self.pending = 0;
+        let mut read = Refreshed::default();
         for (path, m) in due {
             if Instant::now() >= deadline {
                 self.pending += 1;
@@ -639,10 +649,14 @@ impl Index {
             if !t.continues(path, m) {
                 *t = Transcript::default();
             }
+            let from = t.offset;
             if let Err(e) = t.read(path, m, home) {
                 tracing::debug!("cleanup: session {}: {e}", path.display());
             }
+            read.files += 1;
+            read.bytes += t.len.saturating_sub(from);
         }
+        read
     }
 
     /// For each of `roots` (worktree checkouts), the main agents that worked in it, the busiest first.
@@ -983,13 +997,17 @@ mod tests {
         append(&f, &tool_call(3_000, "bash", json!({ "cwd": "/wt/c" })).trim_end().to_string().as_str());
         let mut index = Index::default();
         let refresh = |index: &mut Index| index.refresh(&dir, None, &HashSet::new(), Duration::from_secs(10));
-        refresh(&mut index);
+        let first = refresh(&mut index);
+        let len = std::fs::metadata(&f).unwrap().len();
+        assert_eq!(first, Refreshed { files: 1, bytes: len }, "a new file is read whole");
         let t = &index.files[&f];
         assert_eq!((t.last_at, t.dirs.len()), (Some(2_000), 1), "a partial line waits");
         let read_to = t.offset;
+        assert_eq!(refresh(&mut index), Refreshed::default(), "nothing appended: the file is not opened");
         append(&f, "\n");
         append(&f, &text(4_000, "user", "go on"));
-        refresh(&mut index);
+        let grown = std::fs::metadata(&f).unwrap().len();
+        assert_eq!(refresh(&mut index), Refreshed { files: 1, bytes: grown - read_to }, "only from where it went on");
         let t = &index.files[&f];
         assert!(t.offset > read_to);
         assert_eq!((t.last_at, t.dirs.len()), (Some(4_000), 2));

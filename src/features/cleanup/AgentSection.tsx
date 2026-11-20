@@ -44,6 +44,7 @@ export function AgentSection({
   progress,
   disabled,
   wait,
+  forgetOff,
 }: {
   hostId: string;
   group: AgentGroup;
@@ -59,10 +60,15 @@ export function AgentSection({
   onClean(): void;
   /** Its bulk removal's progress ("Removing 2/5…"). */
   progress: string | null;
-  /** A scan or another bulk removal runs. */
+  /**
+   * Another bulk removal runs, the report is not the host's current one yet, or a scan runs on a host that
+   * doesn't check each worktree again right before removing it (tf-hostd before 0.9.6).
+   */
   disabled: boolean;
   /** Why its rows' Delete waits (the report is from before this visit, or the host is offline). */
   wait?: string;
+  /** Why its rows' Forget is off: the host's tf-hostd predates `forget`. */
+  forgetOff?: string;
 }) {
   const [shown, setShown] = useState(GROUP_PAGE);
   const owner = group.owner;
@@ -178,6 +184,7 @@ export function AgentSection({
                   repo={multiRepo ? repo : undefined}
                   onDelete={() => onDelete(w)}
                   wait={wait}
+                  forgetOff={forgetOff}
                 />
               ))}
             </ol>

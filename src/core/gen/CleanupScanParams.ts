@@ -5,10 +5,19 @@
  */
 export type CleanupScanParams = { 
 /**
- * Read sizes and pull requests again (otherwise they are cached for a while).
+ * Check everything again now: every worktree's `git status`, every tree's folders, every
+ * pull request (hosts ≥ 0.9.6 still reuse what did not change: an unchanged folder is not
+ * listed again; older hosts walk and ask again for everything).
  */
 refresh: boolean, 
 /**
  * Wait up to this long (ms, ≤ 20 000) for a running scan to finish before answering.
  */
-waitMs?: number, };
+waitMs?: number, 
+/**
+ * The latest report is good while it is younger than the host's background interval
+ * (`CleanupBackground.everyMs`): it is answered at once and no scan starts (apps ≥ 0.9.6,
+ * whose removals send `expect`). Without it, a report over a minute old starts a scan, as
+ * before. Older hosts ignore it.
+ */
+latest: boolean, };

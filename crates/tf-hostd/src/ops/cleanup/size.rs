@@ -11,7 +11,9 @@
 //! time). Creating, deleting or renaming anything changes the time of the folder it is in, so a
 //! later [`fingerprint`] that comes out equal says no entry came or went anywhere in the tree.
 //! It lists folders only and asks the file system about folders only (a file's type comes with
-//! the listing): a fraction of a full walk's cost. A file rewritten in place (a log growing) does
+//! the listing): a fraction of a full walk's cost, but still one listing per folder. The scans
+//! keep each tree's folders instead (`tree.rs`), which checks a tree with one `stat` per folder;
+//! this is what is left for trees too big to keep. A file rewritten in place (a log growing) does
 //! not change it, so a size confirmed this way is still measured again now and then.
 
 use std::collections::HashSet;
@@ -39,10 +41,25 @@ pub(crate) struct Fingerprint {
     pub hash: u64,
 }
 
+/// What a walk or check asked the file system: folders looked at without listing them (`stat`),
+/// folders listed (`read_dir`), and the entries those listings held.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Touched {
+    pub stats: u64,
+    pub reads: u64,
+    pub entries: u64,
+}
+
 impl Fingerprint {
     fn add(&mut self, dir: &std::fs::Metadata) {
+        let (ino, time) = stamp(dir);
+        self.add_stamp(ino, time);
+    }
+
+    /// Adds a folder by its [`stamp`].
+    pub(crate) fn add_stamp(&mut self, ino: u64, time: u64) {
         self.dirs += 1;
-        self.hash = self.hash.wrapping_add(mix(dir_stamp(dir)));
+        self.hash = self.hash.wrapping_add(mix(stamp_hash(ino, time)));
     }
 }
 
@@ -53,19 +70,22 @@ fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
+/// A folder's identity and modification time (`ino`, nanoseconds; Windows has no inode: 0): an entry
+/// created, deleted or renamed in it moves the time.
 #[cfg(unix)]
-fn dir_stamp(meta: &std::fs::Metadata) -> u64 {
+pub(crate) fn stamp(meta: &std::fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
-    let time = (meta.mtime() as u64).wrapping_mul(1_000_000_000).wrapping_add(meta.mtime_nsec() as u64);
-    mix(meta.ino()) ^ time
+    (meta.ino(), (meta.mtime() as u64).wrapping_mul(1_000_000_000).wrapping_add(meta.mtime_nsec() as u64))
 }
 
 #[cfg(not(unix))]
-fn dir_stamp(meta: &std::fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos() as u64)
+pub(crate) fn stamp(meta: &std::fs::Metadata) -> (u64, u64) {
+    let time = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
+    (0, time)
+}
+
+fn stamp_hash(ino: u64, time: u64) -> u64 {
+    if cfg!(unix) { mix(ino) ^ time } else { time }
 }
 
 /// When a walk stops counting.
@@ -84,43 +104,43 @@ impl Budget {
     }
 
     /// The walk has met `entries` entries: whether it stops here.
-    fn spent(&self, entries: u64) -> bool {
+    pub(crate) fn spent(&self, entries: u64) -> bool {
         entries > self.max_entries
             || (entries.is_multiple_of(1024) && self.deadline.is_some_and(|d| Instant::now() >= d))
     }
 }
 
 #[cfg(unix)]
-fn disk_bytes(meta: &std::fs::Metadata) -> u64 {
+pub(crate) fn disk_bytes(meta: &std::fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     meta.blocks() * 512
 }
 
 #[cfg(not(unix))]
-fn disk_bytes(meta: &std::fs::Metadata) -> u64 {
+pub(crate) fn disk_bytes(meta: &std::fs::Metadata) -> u64 {
     meta.len()
 }
 
 /// `(device, inode)` of an entry other names may share; `None` when it has a single name.
 #[cfg(unix)]
-fn shared_inode(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+pub(crate) fn shared_inode(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     (!meta.is_dir() && meta.nlink() > 1).then(|| (meta.dev(), meta.ino()))
 }
 
 #[cfg(not(unix))]
-fn shared_inode(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+pub(crate) fn shared_inode(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
 #[cfg(unix)]
-fn device(meta: &std::fs::Metadata) -> Option<u64> {
+pub(crate) fn device(meta: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     Some(meta.dev())
 }
 
 #[cfg(not(unix))]
-fn device(_meta: &std::fs::Metadata) -> Option<u64> {
+pub(crate) fn device(_meta: &std::fs::Metadata) -> Option<u64> {
     None
 }
 
@@ -175,19 +195,22 @@ pub(crate) fn measure(root: &Path, budget: Budget) -> DirSize {
 
 /// The [`Fingerprint`] [`measure`] would record for `root` now (blocking), from a walk that asks
 /// the file system about folders only. `None` when `root` is no folder or the budget ran out.
-pub(crate) fn fingerprint(root: &Path, budget: Budget) -> Option<Fingerprint> {
+pub(crate) fn fingerprint(root: &Path, budget: Budget, touched: &mut Touched) -> Option<Fingerprint> {
     let meta = std::fs::symlink_metadata(root).ok().filter(std::fs::Metadata::is_dir)?;
+    touched.stats += 1;
     let root_dev = device(&meta);
     let mut fp = Fingerprint::default();
     fp.add(&meta);
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     let mut entries = 0u64;
     while let Some(dir) = stack.pop() {
+        touched.reads += 1;
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in rd.flatten() {
             entries += 1;
+            touched.entries += 1;
             if budget.spent(entries) {
                 return None;
             }
@@ -300,7 +323,7 @@ mod tests {
         }
         let walked = measure(&root, roomy());
         assert_eq!(walked.fingerprint.dirs, 5);
-        let fp = |root: &Path| fingerprint(root, roomy()).unwrap();
+        let fp = |root: &Path| fingerprint(root, roomy(), &mut Touched::default()).unwrap();
         assert_eq!(fp(&root), walked.fingerprint, "the folders-only walk sees what the full walk saw");
 
         let mut log = std::fs::OpenOptions::new().append(true).open(root.join("src/main.rs")).unwrap();
@@ -316,8 +339,8 @@ mod tests {
         age(&deep);
         std::fs::remove_file(deep.join("moved.js")).unwrap();
         assert_ne!(fp(&root), walked.fingerprint, "deleted");
-        assert_eq!(fingerprint(&root, Budget { max_entries: 2, deadline: None }), None, "out of budget: unknown");
-        assert_eq!(fingerprint(&root.join("gone"), roomy()), None);
+        assert_eq!(fingerprint(&root, Budget { max_entries: 2, deadline: None }, &mut Touched::default()), None, "out of budget: unknown");
+        assert_eq!(fingerprint(&root.join("gone"), roomy(), &mut Touched::default()), None);
     }
 
     /// Bench: a full size walk against the folders-only fingerprint walk, on copies of worktrees
@@ -342,7 +365,7 @@ mod tests {
                 size = measure(&tree, roomy());
                 walk = walk.min(ms(t));
                 let t = Instant::now();
-                assert_eq!(fingerprint(&tree, roomy()), Some(size.fingerprint));
+                assert_eq!(fingerprint(&tree, roomy(), &mut Touched::default()), Some(size.fingerprint));
                 check = check.min(ms(t));
             }
             println!(

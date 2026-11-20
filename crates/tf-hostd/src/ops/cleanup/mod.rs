@@ -1,18 +1,22 @@
 //! `cleanup.*` (architecture §3.17): the Cleanup page. Linked worktrees with what deciding whether
-//! to delete them takes (`scan`), their removal checked again right before (`remove`), omp's
-//! storage maintenance limited to what is not a session (`storage`), and shells nobody uses
-//! (`shells`: listed, and closed by themselves unless switched off). Sessions are never archived
-//! or deleted here.
+//! to delete them takes (`scan`), kept fresh by the host in the background (`schedule`) and worked
+//! out again only where something changed (`signals`, `tree`), their removal checked on the
+//! worktree itself right before (`remove`), omp's storage maintenance limited to what is not a
+//! session (`storage`), and shells nobody uses (`shells`: listed, and closed by themselves unless
+//! switched off). Sessions are never archived or deleted here.
 
 pub mod remove;
 pub mod scan;
+pub mod schedule;
 pub mod shells;
 pub mod storage;
 
 mod cache;
 mod prs;
 mod sessions;
+mod signals;
 mod size;
+mod tree;
 
 use serde_json::Value;
 use tf_proto::{ApiError, HostMethod};

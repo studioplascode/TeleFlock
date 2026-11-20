@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Cleanup lab stand-in for gh (setup.sh puts it first on the lab tf-hostd's PATH): answers
+# `gh pr view [<branch>] --json …` from the checkout, the way gh answers it: branches named
+# `merged-*` have a merged pull request at their HEAD, others none. Every call is logged to
+# <lab>/logs/gh.log with its nice value, session id and cgroup, so the lab can see that a background
+# scan's children run below the agents' work.
+set -uo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+log="$here/../logs/gh.log"
+printf '%s pid=%s nice=%s sid=%s cgroup=%s cwd=%s args=%s\n' "$(date -u +%FT%T.%3NZ)" "$$" "$(ps -o ni= -p $$ | tr -d ' ')" \
+  "$(ps -o sid= -p $$ | tr -d ' ')" "$(cut -d: -f3 /proc/self/cgroup 2>/dev/null | head -1)" "$PWD" "$*" >>"$log"
+[ "${1:-} ${2:-}" = "pr view" ] || { echo "lab gh: only \`gh pr view\` is played here" >&2; exit 1; }
+shift 2
+branch=""
+if [ $# -gt 0 ] && [ "$1" != "--json" ]; then branch="$1"; fi
+[ -n "$branch" ] || branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+head="$(git rev-parse "refs/heads/$branch" 2>/dev/null || git rev-parse HEAD 2>/dev/null)"
+case "$branch" in
+  merged-*)
+    n=$(( $(printf '%s' "$branch" | cksum | cut -d' ' -f1) % 900 + 100 ))
+    printf '{"number":%d,"url":"https://github.com/lab/repo/pull/%d","title":"Lab %s","state":"MERGED","isDraft":false,"mergedAt":"2026-11-01T00:00:00Z","closedAt":"2026-11-01T00:00:00Z","headRefOid":"%s"}\n' \
+      "$n" "$n" "$branch" "$head"
+    ;;
+  *)
+    echo "no pull requests found for branch \"$branch\"" >&2
+    exit 1
+    ;;
+esac

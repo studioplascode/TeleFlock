@@ -44,6 +44,7 @@
 //! service may start later); the log notes changes only. Nothing is lowered again when tf-hostd
 //! stops: its own scope goes with it, and the services' runtime settings with the next boot.
 
+pub mod low;
 pub mod system;
 #[cfg(unix)]
 pub mod work;
@@ -579,6 +580,17 @@ fn gate_for(manager: Option<Manager>, sys: Arc<dyn System>) -> Option<work::Gate
             None
         }
     }
+}
+
+/// For a background child (`low`) while tf-hostd's own unit carries raised weights: a
+/// [`work::Gate`] that moves it into a transient scope with `CPUWeight` and `IOWeight` 1 before it
+/// runs, so it competes below the agents rather than with tf-hostd's weight; `None` otherwise (a
+/// nice value is enough then).
+#[cfg(target_os = "linux")]
+pub(crate) fn background_gate() -> Option<work::Gate> {
+    let manager = (*RAISED_UNIT.lock().unwrap_or_else(|p| p.into_inner()))?;
+    let place: work::Place = Arc::new(move |pid| system::linux::place_low(manager, &work::unit_name("teleflock-background"), "TeleFlock background work (Cleanup scan)", pid));
+    work::Gate::new(place).ok()
 }
 
 /// A move of agents' work into its scope failed: check again (and probe) now.

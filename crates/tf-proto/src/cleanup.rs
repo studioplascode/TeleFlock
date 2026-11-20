@@ -3,10 +3,13 @@
 //! * `cleanup.worktrees`: every linked git worktree of the repositories TeleFlock knows on the host
 //!   (its herdr workspaces, agents on the board, parked agents, automations), with what deciding
 //!   whether to delete it takes: pull request, age, uncommitted changes, size, last real use, and
-//!   the main agent it belongs to (a subagent's worktree belongs to its top-level session).
+//!   the main agent it belongs to (a subagent's worktree belongs to its top-level session). From
+//!   0.9.6 the host keeps the report fresh by itself (`CleanupReport.background`): the page is
+//!   answered from it at once.
 //! * `cleanup.remove`: removes one of them, after checking again that no agent works in it, it is
 //!   not locked and a detached HEAD holds no commit only it knows (`force` for those and for
-//!   uncommitted changes). The branch is always kept.
+//!   uncommitted changes), and (0.9.6) that it is still what the page showed (`expect`). The
+//!   branch is always kept. `forget` only drops git's record of a folder that is gone.
 //! * `cleanup.storage` / `cleanup.storageRun`: omp's own storage maintenance (`omp gc`), limited to
 //!   what is not a session: unreferenced blobs, database WAL files, filesystem compression of idle
 //!   session files. Sessions are never archived or deleted here.
@@ -22,11 +25,19 @@ use crate::ApiError;
 wire_struct! {
     /// `cleanup.worktrees`.
     pub struct CleanupScanParams {
-        /// Read sizes and pull requests again (otherwise they are cached for a while).
+        /// Check everything again now: every worktree's `git status`, every tree's folders, every
+        /// pull request (hosts ≥ 0.9.6 still reuse what did not change: an unchanged folder is not
+        /// listed again; older hosts walk and ask again for everything).
         #[serde(default)]
         pub refresh: bool,
         /// Wait up to this long (ms, ≤ 20 000) for a running scan to finish before answering.
         pub wait_ms: Option<u32>,
+        /// The latest report is good while it is younger than the host's background interval
+        /// (`CleanupBackground.everyMs`): it is answered at once and no scan starts (apps ≥ 0.9.6,
+        /// whose removals send `expect`). Without it, a report over a minute old starts a scan, as
+        /// before. Older hosts ignore it.
+        #[serde(default)]
+        pub latest: bool,
     }
 }
 
@@ -46,6 +57,81 @@ wire_struct! {
         /// omp session files not read yet (a big sessions folder is read over several scans):
         /// some worktrees may still lack their agent.
         pub sessions_pending: Option<u32>,
+        /// How the host keeps this report fresh by itself (hosts ≥ 0.9.6; absent from older ones,
+        /// whose `cleanup.remove` knows neither `expect` nor `forget`).
+        pub background: Option<CleanupBackground>,
+        /// What the last finished scan looked at and what it had to work out again (hosts ≥ 0.9.6).
+        pub stats: Option<CleanupScanStats>,
+    }
+}
+
+wire_struct! {
+    /// How the host keeps the Cleanup report fresh by itself (`CleanupReport.background`): it scans
+    /// every `everyMs` and a minute or two after a worktree, workspace or agent changed, below the
+    /// agents' work, reusing what did not change since.
+    pub struct CleanupBackground {
+        /// Its interval (ms).
+        pub every_ms: u64,
+        /// The scan running now is one of these (`scanning` is set too): nobody waits for it, the
+        /// report fills in as it goes.
+        pub running: bool,
+        /// When the next one is due, roughly (absent while a scan runs).
+        pub next_at: Option<Millis>,
+    }
+}
+
+wire_enum! {
+    /// Who started a Cleanup scan.
+    pub enum CleanupScanKind {
+        /// The host, by itself (its interval, or a change on the board).
+        Background,
+        /// The page: the report was older than the interval (or the app predates 0.9.6).
+        Page,
+        /// Rescan: every check again now.
+        Refresh,
+    }
+}
+
+wire_struct! {
+    /// What one scan looked at and what it worked out again (`CleanupReport.stats`). A scan with
+    /// nothing changed since the last one runs no `git status`, lists no folder, asks gh nothing
+    /// and reads no session bytes: it only looks at file times.
+    pub struct CleanupScanStats {
+        pub kind: CleanupScanKind,
+        /// When it ended.
+        pub at: Millis,
+        pub ms: u64,
+        /// It ran below the agents' work (lower CPU and I/O priority): a background scan nobody
+        /// asked to see.
+        pub low: bool,
+        /// A Rescan took over before it ended.
+        pub cancelled: bool,
+        pub repos: u32,
+        /// `git worktree list` runs; the other repositories' admin dirs had not changed.
+        pub repos_listed: u32,
+        pub worktrees: u32,
+        /// `git status` runs, and the statuses kept because nothing that changes them moved.
+        pub statuses: u32,
+        pub statuses_kept: u32,
+        /// Every git process the scan started.
+        pub git_calls: u32,
+        /// Sizes: whole-tree walks, checks of a tree's folders, sizes held as they were, and
+        /// checks left for a later scan (its budget was spent).
+        pub size_walks: u32,
+        pub size_checks: u32,
+        pub sizes_kept: u32,
+        pub sizes_deferred: u32,
+        /// Folders looked at without listing them (`stat`), folders listed (`read_dir`), and the
+        /// entries those listings held.
+        pub dir_stats: u64,
+        pub dir_reads: u64,
+        pub dir_entries: u64,
+        /// `gh pr view` runs, and pull requests kept.
+        pub pr_lookups: u32,
+        pub prs_kept: u32,
+        /// omp session files read (new or grown), and the bytes read from them.
+        pub session_files: u32,
+        pub session_bytes: u64,
     }
 }
 
@@ -211,7 +297,9 @@ wire_struct! {
 wire_struct! {
     /// `cleanup.remove`: one linked worktree, by path. Refused with `busy` while an agent works in
     /// it, `worktree_locked` when locked, `orphan_commits` (detached HEAD, unless `force`),
-    /// `dirty_worktree` (unless `force`), `untrusted_repo` (unless `trust`).
+    /// `dirty_worktree` (unless `force`), `untrusted_repo` (unless `trust`); from 0.9.6
+    /// `worktree_changed` (`expect`) and `not_missing` (`forget`). The host checks all of it on the
+    /// worktree itself right before, never on the report.
     pub struct CleanupRemoveParams {
         pub path: String,
         /// Also discard uncommitted changes and a detached HEAD's unsaved commits.
@@ -220,6 +308,35 @@ wire_struct! {
         /// `-c safe.directory=*` for a repository owned by another user.
         #[serde(default)]
         pub trust: bool,
+        /// Forget (hosts ≥ 0.9.6): only drop git's record of a worktree whose folder is gone, never
+        /// a checkout. Refused with `not_missing` when anything is at the path (a disk mounted again,
+        /// a restored folder, an empty mount point) or its absence can't be told (an unreadable
+        /// folder on the way). Older hosts ignore it: send it only to hosts whose report has
+        /// `background`.
+        #[serde(default)]
+        pub forget: bool,
+        /// What the page showed when the removal was confirmed (hosts ≥ 0.9.6): checked against the
+        /// worktree right before, refused with `worktree_changed` when its HEAD or branch moved, it
+        /// has more unpushed commits, or a live agent or a herdr workspace is in it now (its row in
+        /// the report is refreshed then). Uncommitted changes need `force` either way.
+        pub expect: Option<CleanupExpect>,
+    }
+}
+
+wire_struct! {
+    /// A worktree's facts as the page showed them (`CleanupRemoveParams.expect`), from its
+    /// `CleanupWorktree`.
+    pub struct CleanupExpect {
+        /// Short HEAD commit.
+        pub head: Option<String>,
+        pub branch: Option<String>,
+        /// Commits ahead of its upstream.
+        pub unpushed: Option<u32>,
+        /// Live agents with a pane in it.
+        #[serde(default)]
+        pub agents: u32,
+        /// The herdr workspace showing it.
+        pub workspace_id: Option<String>,
     }
 }
 
@@ -477,5 +594,26 @@ mod tests {
         let r: CleanupOwnerRef = serde_json::from_value(serde_json::json!({ "key": "k" })).unwrap();
         assert!(r.subagents.is_empty(), "subagents default to none");
         assert_eq!(serde_json::to_value(WorktreeUse::Files).unwrap(), "files");
+    }
+
+    /// What older apps send still parses, as what they meant: no `latest` (a report over a minute
+    /// old starts a scan), no `forget` (Delete), no `expect`; a 0.9.6 removal carries both.
+    #[test]
+    fn older_apps_requests_parse_and_new_ones_round_trip() {
+        let scan: CleanupScanParams = serde_json::from_value(serde_json::json!({ "refresh": false, "waitMs": 1500 })).unwrap();
+        assert!(!scan.latest && !scan.refresh && scan.wait_ms == Some(1500));
+        let old: CleanupRemoveParams = serde_json::from_value(serde_json::json!({ "path": "/w", "force": false, "trust": false })).unwrap();
+        assert!(!old.forget && old.expect.is_none());
+        let new = CleanupRemoveParams {
+            path: "/w".into(),
+            force: false,
+            trust: false,
+            forget: true,
+            expect: Some(CleanupExpect { head: Some("abc1234".into()), branch: None, unpushed: Some(2), agents: 0, workspace_id: None }),
+        };
+        let v = serde_json::to_value(&new).unwrap();
+        assert_eq!((v["forget"].as_bool(), v["expect"]["head"].as_str(), v["expect"]["unpushed"].as_u64()), (Some(true), Some("abc1234"), Some(2)));
+        assert_eq!(serde_json::from_value::<CleanupRemoveParams>(v).unwrap(), new);
+        assert_eq!(serde_json::to_value(CleanupScanKind::Background).unwrap(), "background");
     }
 }

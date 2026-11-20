@@ -82,17 +82,23 @@ impl Gate {
         moved
     }
 
-    /// [`Gate::go`] on the runtime's blocking threads. A failed move is logged (once at warning
-    /// level) and makes tf-hostd check again; a program that ended meanwhile is no failure.
+    /// [`Gate::go`] on the runtime's blocking threads, for a forwarded command.
     pub(crate) fn release(self, pid: Option<u32>) {
+        self.release_for(pid, "a forwarded command");
+    }
+
+    /// [`Gate::go`] on the runtime's blocking threads for `what` (logs name it). A failed move is
+    /// logged (once at warning level) and makes tf-hostd check again; a program that ended
+    /// meanwhile is no failure.
+    pub(crate) fn release_for(self, pid: Option<u32>, what: &'static str) {
         tokio::task::spawn_blocking(move || match self.go(pid) {
             Ok(()) | Err(Fail::Gone) => {}
             Err(e) => {
                 static WARNED: AtomicBool = AtomicBool::new(false);
                 if WARNED.swap(true, Ordering::Relaxed) {
-                    debug!("a forwarded command runs in tf-hostd's own unit: {e:?}");
+                    debug!("{what} runs in tf-hostd's own unit: {e:?}");
                 } else {
-                    warn!("a forwarded command runs in tf-hostd's own unit, above the agents: {e:?} (logged once)");
+                    warn!("{what} runs in tf-hostd's own unit, above the agents: {e:?} (logged once)");
                 }
                 super::move_failed();
             }

@@ -114,7 +114,9 @@ impl CmdOut {
 }
 
 /// Runs `program args…` without a shell. `io::ErrorKind::NotFound` = binary missing,
-/// `io::ErrorKind::TimedOut` = killed after `timeout`.
+/// `io::ErrorKind::TimedOut` = killed after `timeout`. In a background task
+/// (`crate::priority::low`: a Cleanup scan nobody asked to see) the child starts below the
+/// agents' work.
 pub(crate) async fn run_cmd<S: AsRef<OsStr>>(
     program: &Path,
     args: &[S],
@@ -123,24 +125,54 @@ pub(crate) async fn run_cmd<S: AsRef<OsStr>>(
     stdin: Option<&[u8]>,
     timeout: Duration,
 ) -> io::Result<CmdOut> {
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+    let low = crate::priority::low::active();
+    let mut std_cmd = std::process::Command::new(program);
+    std_cmd.args(args);
+    if let Some(cwd) = cwd {
+        std_cmd.current_dir(cwd);
+    }
+    for (k, v) in env {
+        std_cmd.env(k, v);
+    }
+    // Out of tf-hostd's raised unit first, where it has one.
+    #[cfg(target_os = "linux")]
+    let gate = if low { crate::priority::background_gate() } else { None };
+    #[cfg(target_os = "linux")]
+    let std_cmd = match &gate {
+        Some(g) => g.wrap(&std_cmd),
+        None => std_cmd,
+    };
+    let mut cmd = tokio::process::Command::from(std_cmd);
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(cwd) = cwd {
-        cmd.current_dir(cwd);
-    }
-    for (k, v) in env {
-        cmd.env(k, v);
+    #[cfg(unix)]
+    if low {
+        #[cfg(target_os = "linux")]
+        let held = gate.as_ref().map(|g| g.child_fd());
+        // SAFETY: lower_child and keep make only async-signal-safe calls.
+        unsafe {
+            cmd.pre_exec(move || {
+                crate::priority::low::lower_child()?;
+                #[cfg(target_os = "linux")]
+                if let Some(fd) = held {
+                    crate::priority::work::keep(fd)?;
+                }
+                Ok(())
+            });
+        }
     }
     #[cfg(windows)]
     {
         // CREATE_NO_WINDOW: never flash a console window from the background daemon.
-        cmd.creation_flags(0x0800_0000);
+        cmd.creation_flags(0x0800_0000 | if low { crate::priority::low::CHILD_CLASS } else { 0 });
     }
     let mut child = cmd.spawn()?;
+    #[cfg(target_os = "linux")]
+    if let Some(g) = gate {
+        g.release_for(child.id(), "a background git or gh command");
+    }
     if let Some(input) = stdin
         && let Some(mut pipe) = child.stdin.take() {
             let input = input.to_vec();
@@ -522,8 +554,10 @@ pub(crate) fn parse_name_status_z(raw: &[u8]) -> Vec<(FileStatus, String, Option
     out
 }
 
-/// One record of `git worktree list --porcelain`.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// One record of `git worktree list --porcelain` (the Cleanup scans keep them across restarts:
+/// `ops/cleanup/signals.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub(crate) struct WorktreeRecord {
     pub path: String,
     pub head: Option<String>,
