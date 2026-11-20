@@ -185,11 +185,19 @@ class PreviewActivity : ComponentActivity() {
         return intent
     }
 
-    /** The files picked: all of a multiple pick (the picker lists them in `clipData`, which `FileChooserParams.parseResult` never reads). */
+    /**
+     * The files picked: all of a multiple pick (the picker lists them in `clipData`, which
+     * `FileChooserParams.parseResult` never reads), and only another app's content. The picker is a
+     * third-party app: a `file://` URI or one of this app's own providers would hand the previewed
+     * page a file this app can read but the user never picked ([Share.isForeignContentUri]). None
+     * left: nothing is picked.
+     */
     private fun pickedFiles(resultCode: Int, data: Intent?): Array<Uri>? {
         if (resultCode != Activity.RESULT_OK) return null
         val picked = data?.clipData?.let { clip -> (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri } }.orEmpty()
-        return if (picked.isNotEmpty()) picked.toTypedArray() else WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+        val all = picked.ifEmpty { WebChromeClient.FileChooserParams.parseResult(resultCode, data)?.toList().orEmpty() }
+        val safe = all.filter { Share.isForeignContentUri(it, packageName) }
+        return if (safe.isNotEmpty()) safe.toTypedArray() else null
     }
 
     /** Title, subtitle and the window's buttons. */

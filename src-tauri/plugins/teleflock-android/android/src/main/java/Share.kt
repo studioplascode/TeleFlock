@@ -118,13 +118,15 @@ internal object Share {
     }
 
     /** A `content://` URI served by another app: `file://` and this app's own providers are refused. */
-    internal fun isForeignContentUri(uri: Uri, ownPackage: String): Boolean {
-        if (!"content".equals(uri.scheme, ignoreCase = true)) return false
-        val authority = uri.authority?.lowercase() ?: return false
-        val host = uri.host?.lowercase()
+    internal fun isForeignContentUri(uri: Uri, ownPackage: String): Boolean = isForeignContent(uri.scheme, uri.authority, uri.host, ownPackage)
+
+    /** [isForeignContentUri] on a URI's scheme, authority and host (testable without Android's `Uri`). */
+    internal fun isForeignContent(scheme: String?, authority: String?, host: String?, ownPackage: String): Boolean {
+        if (!"content".equals(scheme, ignoreCase = true)) return false
+        val auth = authority?.lowercase() ?: return false
         val own = ownPackage.lowercase()
         fun ours(a: String) = a == own || a.startsWith("$own.")
-        return '@' !in authority && !ours(authority) && (host == null || !ours(host))
+        return '@' !in auth && !ours(auth) && (host == null || !ours(host.lowercase()))
     }
 
     @Suppress("DEPRECATION")
