@@ -9,6 +9,7 @@ Webview access to haptics, the notification permission flow, battery-optimisatio
 - `allow-request-notification-permission`
 - `allow-battery-status`
 - `allow-request-ignore-battery-optimizations`
+- `allow-microphone-permission`
 - `allow-request-microphone-permission`
 - `allow-open-app-settings`
 - `allow-dictation-available`
@@ -128,6 +129,32 @@ Enables the haptic command without any pre-configured scope.
 <td>
 
 Denies the haptic command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:allow-microphone-permission`
+
+</td>
+<td>
+
+Enables the microphone_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-microphone-permission`
+
+</td>
+<td>
+
+Denies the microphone_permission command without any pre-configured scope.
 
 </td>
 </tr>
