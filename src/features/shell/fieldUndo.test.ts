@@ -127,3 +127,32 @@ test("secrets get no history: password inputs and show/hide secret fields; a val
   expect(f.value).toBe("");
   expect(f.changes).toEqual([""]);
 });
+
+test("the webview's own undo and redo never reach a secret: its historyUndo / historyRedo is cancelled, wherever it started", () => {
+  const doc = fakeDocument();
+  stop = installFieldUndo(doc.target);
+  // Chromium's undo stack is the frame's: a Ctrl+Z outside the field (or the Linux shell's Undo, a menu) targets the field it changes.
+  const history = (target: unknown, inputType: "historyUndo" | "historyRedo") => {
+    const e = { target, inputType, cancelable: true, defaultPrevented: false, isComposing: false, preventDefault: () => (e.defaultPrevented = true) };
+    doc.fire("beforeinput", e);
+    return e.defaultPrevented;
+  };
+  const password = { ...field(), type: "password" };
+  const privateKey = field("TEXTAREA", "secret");
+  for (const f of [password, privateKey]) {
+    type(doc, f, "hunter2", "insertFromPaste");
+    expect(history(f, "historyUndo")).toBe(true);
+    expect(history(f, "historyRedo")).toBe(true);
+    expect(f.value).toBe("hunter2");
+    expect(f.changes).toEqual([]);
+  }
+  // Other fields as before: a text field runs its own history, a composer keeps the webview's undo.
+  const f = field();
+  type(doc, f, "abc");
+  expect(history(f, "historyUndo")).toBe(true);
+  expect(f.value).toBe("");
+  const own = field("TEXTAREA", "own");
+  type(doc, own, "abc");
+  expect(history(own, "historyUndo")).toBe(false);
+  expect(own.value).toBe("abc");
+});

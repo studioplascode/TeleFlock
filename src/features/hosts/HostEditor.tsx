@@ -334,6 +334,8 @@ function SignInSection({
               ) : (
                 <Textarea
                   id={id}
+                  // a secret: Ctrl+Z never brings back what was typed (shell/fieldUndo)
+                  data-no-undo=""
                   value={secrets.privateKey}
                   onChange={(e) => setSecret({ privateKey: e.target.value })}
                   placeholder={stored?.privateKey ? "A key is saved. Paste or import another to replace it." : "Paste the private key (-----BEGIN OPENSSH PRIVATE KEY-----…)"}

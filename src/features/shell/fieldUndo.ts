@@ -12,20 +12,30 @@ import { emptyHistory, type FieldState, recordEdit, redoStep, type UndoHistory, 
  * Fields with an undo history of their own (the composers, `data-own-undo`) and the terminal's
  * input are left alone; a key a field's own handler already took (`defaultPrevented`) too. Secrets
  * never get a history: password inputs, and fields that show a secret as text on demand
- * (`data-no-undo`), so no earlier state of a typed secret can be brought back. A value the app sets
- * itself (a save clearing a form, a reset) starts the field's history over.
+ * (`data-no-undo`), so no earlier state of a typed secret can be brought back. The webview's own
+ * undo is refused on them too (their `historyUndo` / `historyRedo` is cancelled): Chromium's stack
+ * (WebView2, Android) is the frame's and undoes a field's last edit wherever Ctrl+Z is pressed, and
+ * the Linux shell runs WebKit's Undo for a key the page left alone (`src-tauri/src/edit_keys.rs`).
+ * A value the app sets itself (a save clearing a form, a reset) starts the field's history over.
  */
 
 type Field = HTMLInputElement | HTMLTextAreaElement;
+type MaybeField = Partial<Field> & { closest?(selector: string): unknown };
 
-/** `<input>` types that hold editable text with a caret (never `password`). */
+/** `<input>` types that hold editable text with a caret (never `password`: a secret). */
 const TEXT_INPUTS: Record<string, true> = { text: true, search: true, url: true, tel: true, email: true };
+
+/** A secret: a password input, or anything inside `data-no-undo` (a field showing a secret as text on demand). */
+function isSecret(target: EventTarget | null): boolean {
+  const el = target as MaybeField | null;
+  return !!el && ((el.tagName === "INPUT" && el.type === "password") || !!el.closest?.("[data-no-undo]"));
+}
 
 /** The text field an event is about, or null when it isn't one this covers. */
 function fieldOf(target: EventTarget | null): Field | null {
-  const el = target as Partial<Field> & { closest?(selector: string): unknown } | null;
+  const el = target as MaybeField | null;
   if (!el || (el.tagName !== "TEXTAREA" && !(el.tagName === "INPUT" && TEXT_INPUTS[(el as HTMLInputElement).type] === true))) return null;
-  if (el.readOnly || el.disabled || el.closest?.("[data-own-undo], [data-no-undo], .xterm")) return null;
+  if (el.readOnly || el.disabled || isSecret(target) || el.closest?.("[data-own-undo], .xterm")) return null;
   return el as Field;
 }
 
@@ -86,9 +96,15 @@ export function installFieldUndo(target: Pick<Document, "addEventListener" | "re
     step(el, which);
   };
   const onBeforeInput = (e: InputEvent) => {
+    const history = e.inputType === "historyUndo" || e.inputType === "historyRedo";
+    if (history && isSecret(e.target)) {
+      // The webview's own undo would put a typed secret back, wherever it was started (see above).
+      e.preventDefault();
+      return;
+    }
     const el = fieldOf(e.target);
     if (!el || e.defaultPrevented) return;
-    if (e.inputType === "historyUndo" || e.inputType === "historyRedo") {
+    if (history) {
       // The webview's own undo (its menu, a key it binds) would work on its own stack.
       if (!e.cancelable) return;
       e.preventDefault();
