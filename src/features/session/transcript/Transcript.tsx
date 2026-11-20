@@ -1,11 +1,13 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
-import { getTranscript, loadOlder, useAgent, useCore, useSession, useSessionItem } from "@/core";
+import { getSessionItem, getTranscript, loadOlder, useAgent, useCore, useSession, useSessionItem } from "@/core";
 import type { TranscriptItem } from "@/core/gen";
-import { cn, Elapsed, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
+import { cn, Elapsed, IconButton, Shimmer, Skeleton, Spinner, spring, StatusOrb, Tooltip, useIdleReady } from "@/design";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { ACTIONS } from "@/features/shell/vocab";
+import { inSessionScope } from "../context";
 import { useTranscriptFind } from "../find/hooks";
 import { type TranscriptFind, useFindPainter } from "../find/painter";
 import { FindScopeCtx } from "../find/reveal";
@@ -13,7 +15,7 @@ import { useSessionUi } from "../state";
 import { arrivedSince, type ListMark } from "./arrivals";
 import { estimateRowHeight, initialScrollOffset } from "./estimate";
 import { EmptyTranscript } from "./FreshStart";
-import { lastMessage, sameLastMessage } from "./lastMessage";
+import { lastMessage, type MessageKind, messageKind, nearestMessage, type ReadingRows, readingRows, sameMessage, type StepDir, stepMessage } from "./lastMessage";
 import { LimitRunRow } from "./LimitRunRow";
 import { foldLimitRuns, limitSignature } from "./limitRuns";
 import { Row } from "./rows";
@@ -35,6 +37,38 @@ const JUMP_NEAR_PX = 24;
 const JUMP_SETTLE_MS = 1000;
 /** Input on the list that hands a jump in progress back to the user. */
 const JUMP_ENDERS = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
+/** A page of earlier rows that brought nothing in by then ends the step waiting for it (rows that came are in by the next frame). */
+const PAGE_SETTLE_MS = 1000;
+
+/** The message steppers, left to right: the agent's (its rows sit left), then the prompts (theirs sit right). */
+const STEP_KINDS: readonly MessageKind[] = ["assistant", "user"];
+/**
+ * What each kind's stepper can do, as bits of one number (shifted by `NAV_SHIFT`): it has messages,
+ * a step back, a step on. One number, so a scroll that changes none of them renders nothing.
+ */
+const NAV_HAS = 1;
+const NAV_OLDER = 2;
+const NAV_NEWER = 4;
+const NAV_SHIFT: Record<MessageKind, number> = { assistant: 0, user: 3 };
+const navHas = (nav: number, kind: MessageKind, flag: number) => ((nav >> NAV_SHIFT[kind]) & flag) !== 0;
+
+/** Alt+↑ / Alt+↓ step through the agent's messages, with Shift through the prompts (the shortcuts `ACTIONS` names). */
+const STEP_KEYS: Record<MessageKind, Record<StepDir, string>> = {
+  assistant: { older: ACTIONS.olderAgentMessage.shortcut, newer: ACTIONS.newerAgentMessage.shortcut },
+  user: { older: ACTIONS.olderOwnMessage.shortcut, newer: ACTIONS.newerOwnMessage.shortcut },
+};
+
+function stepKeyOf(e: globalThis.KeyboardEvent): { dir: StepDir; kind: MessageKind } | null {
+  if (!e.altKey || e.ctrlKey || e.metaKey) return null;
+  const dir = e.key === "ArrowUp" ? "older" : e.key === "ArrowDown" ? "newer" : null;
+  return dir && { dir, kind: e.shiftKey ? "user" : "assistant" };
+}
+
+/** A text field with something in it keeps the step keys for its caret (macOS moves it by paragraph). */
+function holdsText(t: Element | null): boolean {
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return t.value !== "";
+  return t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable && t.textContent !== "");
+}
 
 /** Layout knobs shared by the session transcript and other transcript lists (subagents). */
 export interface TranscriptLayout {
@@ -56,13 +90,45 @@ export interface TranscriptLayout {
 
 export interface TranscriptProps extends TranscriptLayout {
   agentKey: string;
+  /** The route's session: the step keys also work while focus is on nothing (`inSessionScope`). */
+  pageKeys?: boolean;
 }
+
+/** One kind's message stepper: its word between the arrows, the group's name and its two steps' names. */
+export interface StepNames {
+  label: string;
+  group: string;
+  older: string;
+  newer: string;
+}
+
+/** What the message steppers of a transcript list step through (`TranscriptLogProps.steps`). */
+export interface MessageSteps {
+  /**
+   * Which kind of message row `id` is (`messageKind`). Read when a step is worked out, so a reply that
+   * starts streaming counts as soon as it has text.
+   */
+  kindOf: (id: string) => MessageKind | null;
+  names: Record<MessageKind, StepNames>;
+  /**
+   * Whether a key press belongs to this list (`target`: where it happened, `list`: the list itself):
+   * Alt+↑ / Alt+↓ then step through the agent's messages, Alt+Shift+↑ / ↓ through the prompts. A text
+   * field with text in it keeps them. Without it the keys don't step this list.
+   */
+  keys?: (target: Element | null, list: HTMLElement) => boolean;
+}
+
+/** A session's steppers: the agent's messages and the user's own. */
+export const SESSION_STEPS: Record<MessageKind, StepNames> = {
+  assistant: { label: "Agent", group: "Agent's messages", older: ACTIONS.olderAgentMessage.label, newer: ACTIONS.newerAgentMessage.label },
+  user: { label: "You", group: "Your messages", older: ACTIONS.olderOwnMessage.label, newer: ACTIONS.newerOwnMessage.label },
+};
 
 /**
  * Virtualised, append-only transcript of a session. Rows subscribe to their own item; this
  * component only re-renders when the id list (or which row is the last message) changes.
  */
-export function Transcript({ agentKey, ...layout }: TranscriptProps) {
+export function Transcript({ agentKey, pageKeys = false, ...layout }: TranscriptProps) {
   const session = useSession(agentKey);
   const focus = useSessionUi((s) => s.focus[agentKey]);
   const find = useTranscriptFind(agentKey);
@@ -90,7 +156,12 @@ export function Transcript({ agentKey, ...layout }: TranscriptProps) {
   const last = useCore((s) => {
     const e = s.sessions[agentKey];
     return e ? lastMessage(e.itemIds, (id) => e.items[id]) : null;
-  }, sameLastMessage);
+  }, sameMessage);
+  // Message steps read the store when they are worked out: a reply streaming in counts once it has text.
+  const steps = useMemo<MessageSteps>(
+    () => ({ kindOf: (id) => messageKind(getSessionItem(agentKey, id)), names: SESSION_STEPS, keys: (t) => inSessionScope(t, agentKey, pageKeys) }),
+    [agentKey, pageKeys],
+  );
   return (
     <FindScopeCtx.Provider value={agentKey}>
       <TranscriptLog
@@ -108,6 +179,7 @@ export function Transcript({ agentKey, ...layout }: TranscriptProps) {
         footer={<WorkingFooter agentKey={agentKey} lastId={ids[ids.length - 1]} />}
         jumpLabel={(unseen) => <JumpLabel agentKey={agentKey} unseen={unseen} />}
         jumpBack={last && (last.kind === "assistant" ? { id: last.id, label: "Agent's last message", short: "Agent's message" } : { id: last.id, label: "Your last message", short: "Your message" })}
+        steps={steps}
         focus={focus}
         find={find}
       />
@@ -141,6 +213,12 @@ export interface TranscriptLogProps extends TranscriptLayout {
    * row's top to the top of the list; the pill hides while it is there.
    */
   jumpBack?: { id: string; label: string; short?: string } | null;
+  /**
+   * Message steppers beside the pills while scrolled up: per kind, ⌃ back to the start of the
+   * previous message and ⌄ on to the next, from where the list is read (the row at its top), and the
+   * keys `keys` lets through. Without it, none.
+   */
+  steps?: MessageSteps | null;
   ariaLabel?: string;
   /** Scroll this row into view and flash it (a new `nonce` re-triggers). */
   focus?: { itemId: string; nonce: number };
@@ -155,7 +233,7 @@ export interface TranscriptLogProps extends TranscriptLayout {
 /**
  * The transcript list itself, independent of where rows come from. Sticks to the bottom while
  * streaming, offers a "jump to latest" pill when scrolled up (and beside it one to `jumpBack`'s
- * row), and pages older rows in at the top without a jump.
+ * row, and the `steps` steppers), and pages older rows in at the top without a jump.
  */
 export function TranscriptLog({
   ids,
@@ -169,6 +247,7 @@ export function TranscriptLog({
   onLoadOlder,
   jumpLabel,
   jumpBack,
+  steps,
   ariaLabel = "Transcript",
   focus,
   followSignal = 0,
@@ -187,6 +266,8 @@ export function TranscriptLog({
   const [stuck, setStuck] = useState(true);
   const [unseen, setUnseen] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // The same for handlers: a second page must not start before the first one's rows are in.
+  const loadingRef = useRef(false);
   const anchor = useRef<{ id: string; delta: number } | null>(null);
   // Count 0, not ids.length: a transcript mounting with rows already loaded lands at the bottom instantly.
   const lastShown = useRef<ListMark>({ count: 0, lastId: undefined, view });
@@ -201,6 +282,20 @@ export function TranscriptLog({
   const backIdRef = useRef(jumpBack?.id);
   backIdRef.current = jumpBack?.id;
   const jumpRaf = useRef(0);
+  // The row the jump in progress places (while `jumpRaf` runs): a step meanwhile walks on from it.
+  const placing = useRef<string | null>(null);
+  // Message steppers: what there is to step to from where the list is read (`NAV_*` bits per kind),
+  // and the kind whose step back waits for earlier rows to page in (its ⌃ spins meanwhile).
+  const [nav, setNav] = useState(0);
+  const [paging, setPaging] = useState<MessageKind | null>(null);
+  // That step: its kind, and the first row before the page it waits for came in.
+  const pendingStep = useRef<{ kind: MessageKind; first: string | undefined } | null>(null);
+  const stepsRef = useRef(steps);
+  stepsRef.current = steps;
+  const hasMoreRef = useRef(hasMore);
+  hasMoreRef.current = hasMore;
+  const loadOlderRef = useRef(onLoadOlder);
+  loadOlderRef.current = onLoadOlder;
 
   // Stable while the rows are: a new getItemKey makes the virtualizer re-measure every row (O(n))
   // on each render, which scrolling a long transcript does dozens of times a second.
@@ -228,7 +323,10 @@ export function TranscriptLog({
   const setStick = (v: boolean) => {
     stick.current = v;
     setStuck(v);
-    if (v) setUnseen(0);
+    if (!v) return;
+    setUnseen(0);
+    // Following the bottom again: a step still waiting for earlier rows is off.
+    if (pendingStep.current) dropStep();
   };
 
   useFindPainter({
@@ -278,7 +376,7 @@ export function TranscriptLog({
     if (!content || !viewport) return;
     const ro = new ResizeObserver(() => {
       if (stick.current) glide();
-      else aimBack();
+      else locate();
     });
     ro.observe(content);
     ro.observe(viewport);
@@ -348,29 +446,70 @@ export function TranscriptLog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new signal jumps
   }, [followSignal]);
 
-  // Where the jump-back row is from the view: "up" / "down", or null (no pill) while its top is at
-  // the top already, or when the list can't scroll it up there (the jump would end at the bottom,
-  // where "jump to latest" goes). Reads refs only: the resize observer calls it too.
-  const aimBack = () => {
+  // How far the list scrolls to bring row `index`'s top to its spot, and whether it scrolls that far
+  // (else a jump there ends at the bottom, where "jump to latest" goes). Its place in the list,
+  // measured or (not rendered) estimated. Not from the rendered range: a scroll event reaches React
+  // before the virtualiser has moved that range along.
+  const spotShift = (index: number): { shift: number; reaches: boolean } | null => {
     const el = scrollRef.current;
     const list = listRef.current;
-    const id = backIdRef.current;
-    const index = id == null ? -1 : idsRef.current.lastIndexOf(id);
-    // Its place in the list, measured or (not rendered) estimated. Not from the rendered range: a
-    // scroll event reaches React before the virtualiser has moved that range along.
     const row = index < 0 ? undefined : virtualizer.measurementsCache[index];
-    if (!el || !list || stick.current || id == null || !row) {
+    if (!el || !list || !row) return null;
+    const shift = list.getBoundingClientRect().top - el.getBoundingClientRect().top + row.start - JUMP_TOP_PX;
+    return { shift, reaches: el.scrollTop + shift < el.scrollHeight - el.clientHeight - STICK_PX };
+  };
+
+  // Where the jump-back row is from the view: "up" / "down", or null (no pill) while its top is at
+  // the top already, or when the list can't scroll it up there. Reads refs only: the resize
+  // observer calls it too.
+  const aimBack = () => {
+    const id = backIdRef.current;
+    const to = id == null || stick.current ? null : spotShift(idsRef.current.lastIndexOf(id));
+    if (id == null || !to) {
       setAim(null);
       return;
     }
-    // How far the list scrolls to bring the row's top to its spot.
-    const shift = list.getBoundingClientRect().top - el.getBoundingClientRect().top + row.start - JUMP_TOP_PX;
-    const reaches = el.scrollTop + shift < el.scrollHeight - el.clientHeight - STICK_PX;
-    const dir = Math.abs(shift) <= JUMP_NEAR_PX || (shift > 0 && !reaches) ? null : shift < 0 ? "up" : "down";
+    const dir = Math.abs(to.shift) <= JUMP_NEAR_PX || (to.shift > 0 && !to.reaches) ? null : to.shift < 0 ? "up" : "down";
     setAim((prev) => (dir == null ? null : prev?.id === id && prev.dir === dir ? prev : { id, dir }));
   };
+
+  // Where the list is read (`readingRows`): the rows above and below the spot a jump brings a row's
+  // top to, from the virtualiser's row places (measured, or estimated where not rendered) like the
+  // pill's aim. Reads refs only.
+  const readAt = (): ReadingRows | null => {
+    const el = scrollRef.current;
+    const list = listRef.current;
+    if (!el || !list) return null;
+    return readingRows(virtualizer.measurementsCache, el.getBoundingClientRect().top - list.getBoundingClientRect().top + JUMP_TOP_PX, JUMP_NEAR_PX);
+  };
+
+  // What the steppers can do from where the list is read (`NAV_*` bits per kind; 0 while following
+  // the bottom, where they don't show). A step back is there while earlier rows can page in.
+  const navAt = (): number => {
+    const s = stepsRef.current;
+    const at = s && !stick.current ? readAt() : null;
+    if (!s || !at) return 0;
+    const ids = idsRef.current;
+    const more = hasMoreRef.current && loadOlderRef.current != null;
+    let bits = 0;
+    for (const kind of STEP_KINDS) {
+      const older = more || stepMessage(ids, s.kindOf, at, "older", kind) != null;
+      const newer = stepMessage(ids, s.kindOf, at, "newer", kind) != null;
+      // A message at the spot is no step either way, but its stepper stays.
+      let has = older || newer;
+      for (let i = at.above + 1; !has && i < at.below && i < ids.length; i++) has = s.kindOf(ids[i] as string) === kind;
+      bits |= ((has ? NAV_HAS : 0) | (older ? NAV_OLDER : 0) | (newer ? NAV_NEWER : 0)) << NAV_SHIFT[kind];
+    }
+    return bits;
+  };
+
+  // The pill's aim and the steppers' steps, wherever the view or the rows moved.
+  const locate = () => {
+    aimBack();
+    setNav(navAt());
+  };
   // A new target (rows streaming in), rows paged in, or the list let go of the bottom / caught it.
-  useLayoutEffect(() => aimBack(), [ids, jumpBack?.id, stuck]);
+  useLayoutEffect(() => locate(), [ids, jumpBack?.id, stuck, hasMore]);
 
   // Brings a row's top to JUMP_TOP_PX and stops following the bottom, like scrolling up. A row not
   // rendered yet comes into view by the virtualiser's estimates first; then the row itself is placed,
@@ -382,6 +521,7 @@ export function TranscriptLog({
     if (!el || index < 0) return;
     setStick(false);
     cancelAnimationFrame(jumpRaf.current);
+    placing.current = id;
     const rowEl = () => el.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(id)}"]`);
     // Scrolls the row to its spot (as near as the list scrolls); false once it is there.
     const place = (row: HTMLElement) => {
@@ -403,13 +543,17 @@ export function TranscriptLog({
     jumpRaf.current = requestAnimationFrame(step);
   };
 
-  // Any input on the list ends a jump in progress: the user scrolls on from there.
+  // Any input on the list ends a jump in progress (the user scrolls on from there), and a step that
+  // waits for earlier rows. Not the step keys, which step on from the row being placed, nor the
+  // modifiers pressed before them.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const stop = () => {
+    const stop = (ev?: Event) => {
+      if (ev instanceof globalThis.KeyboardEvent && (stepKeyOf(ev) || ev.key === "Alt" || ev.key === "Shift")) return;
       cancelAnimationFrame(jumpRaf.current);
       jumpRaf.current = 0;
+      if (pendingStep.current) dropStep();
     };
     for (const ev of JUMP_ENDERS) el.addEventListener(ev, stop, { passive: true });
     return () => {
@@ -418,6 +562,104 @@ export function TranscriptLog({
     };
   }, []);
 
+  // Pages earlier rows in above without moving the view: the first row on screen keeps its place
+  // (the `[ids]` layout effect puts it back). One page at a time.
+  const pageOlder = () => {
+    const el = scrollRef.current;
+    const load = loadOlderRef.current;
+    const top = idsRef.current[0];
+    if (!el || !load || loadingRef.current || top == null) return;
+    const first = virtualizer.getVirtualItems().find((v) => v.end > el.scrollTop);
+    const id = first ? idsRef.current[first.index] : undefined;
+    if (first && id) anchor.current = { id, delta: el.scrollTop - first.start };
+    loadingRef.current = true;
+    setLoadingOlder(true);
+    void load()
+      .then(
+        () =>
+          // A page that brought nothing (rows that came are in by the next frame) ends a step waiting for it.
+          window.setTimeout(() => {
+            if (pendingStep.current?.first === top && idsRef.current[0] === top) dropStep();
+          }, PAGE_SETTLE_MS),
+        () => dropStep(),
+      )
+      .finally(() => {
+        loadingRef.current = false;
+        setLoadingOlder(false);
+      });
+  };
+
+  const dropStep = () => {
+    pendingStep.current = null;
+    setPaging(null);
+  };
+
+  // One step through `kind`'s messages from where the list is read, or from the row a jump still
+  // places (so key repeat walks one message a press). A step on to a message the list can't scroll to
+  // the top (in its last screenful) goes to the bottom, as Jump to latest does. A step back past the
+  // loaded rows pages earlier ones in until it finds its message there or the host has none left.
+  const stepTo = (dir: StepDir, kind: MessageKind) => {
+    const s = stepsRef.current;
+    const ids = idsRef.current;
+    const placed = jumpRaf.current !== 0 && placing.current != null ? ids.lastIndexOf(placing.current) : -1;
+    const at = placed >= 0 ? { above: placed - 1, below: placed + 1 } : readAt();
+    if (!s || !at) return;
+    const to = stepMessage(ids, s.kindOf, at, dir, kind);
+    if (to) {
+      dropStep();
+      if (dir === "newer" && !spotShift(ids.lastIndexOf(to.id))?.reaches) {
+        setStick(true);
+        toBottom(true);
+      } else jumpToStart(to.id);
+    } else if (dir === "older" && hasMoreRef.current && loadOlderRef.current) {
+      pendingStep.current = { kind, first: ids[0] };
+      setPaging(kind);
+      pageOlder();
+    }
+  };
+
+  // A step back waiting for earlier rows goes on once some came in: to its message among them, or
+  // another page while the host has more. A page that brought none ends it once the host has no more.
+  const resumeStep = () => {
+    const p = pendingStep.current;
+    const s = stepsRef.current;
+    if (!p || !s) return;
+    const ids = idsRef.current;
+    const at = p.first == null ? -1 : ids.indexOf(p.first);
+    if (at === 0) {
+      if (!hasMoreRef.current) dropStep();
+      return;
+    }
+    const to = at > 0 ? nearestMessage(ids, s.kindOf, at, "older", p.kind) : null;
+    if (to) {
+      dropStep();
+      jumpToStart(to.id);
+    } else if (at > 0 && hasMoreRef.current) {
+      p.first = ids[0];
+      pageOlder();
+    } else dropStep();
+  };
+  // After the prepend above has put the view back.
+  useLayoutEffect(() => resumeStep(), [ids, hasMore]);
+
+  // Alt+↑ / Alt+↓ (Shift: the prompts) wherever `steps.keys` says a key press is this list's.
+  const stepKeys = steps?.keys != null;
+  useEffect(() => {
+    if (!stepKeys) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      const step = stepKeyOf(e);
+      const keys = stepsRef.current?.keys;
+      const list = scrollRef.current;
+      const t = e.target instanceof Element ? e.target : null;
+      if (!step || e.defaultPrevented || e.isComposing || !keys || !list || holdsText(t) || !keys(t, list)) return;
+      e.preventDefault();
+      stepTo(step.dir, step.kind);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads refs only
+  }, [stepKeys]);
+
   // Unsticking is driven by user input (wheel, touch, keys, scrollbar) only: the virtualizer moves
   // scrollTop on its own while rows measure, which would read as the user scrolling up.
   const onScroll = () => {
@@ -425,15 +667,8 @@ export function TranscriptLog({
     if (!el) return;
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (fromBottom <= STICK_PX && !stick.current) setStick(true);
-
-    if (el.scrollTop < LOAD_OLDER_PX && hasMore && onLoadOlder && !loadingOlder && ids.length > 0) {
-      const first = virtualizer.getVirtualItems().find((v) => v.end > el.scrollTop);
-      const id = first ? ids[first.index] : undefined;
-      if (first && id) anchor.current = { id, delta: el.scrollTop - first.start };
-      setLoadingOlder(true);
-      void onLoadOlder().finally(() => setLoadingOlder(false));
-    }
-    aimBack();
+    if (el.scrollTop < LOAD_OLDER_PX && hasMore) pageOlder();
+    locate();
   };
 
   // Wheel/touch/keys up while stuck: release immediately so the user wins against streaming.
@@ -447,8 +682,11 @@ export function TranscriptLog({
   const visible = virtualizer.getVirtualItems();
   // The pill once it has been aimed at the current target.
   const back = aim != null && aim.id === jumpBack?.id ? aim.dir : null;
-  // Both pills show: a layout change slides them (else no layout work while scrolling re-renders the list).
-  const pair = !stuck && back != null;
+  // A stepper for each kind the list has messages of, while scrolled up.
+  const stepKinds = steps && !stuck ? STEP_KINDS.filter((k) => navHas(nav, k, NAV_HAS)) : [];
+  // What shows over the bottom edge: a change slides the rest over (else no layout work while
+  // scrolling re-renders the list).
+  const arrangement = `${!stuck && back != null}/${stepKinds.join()}`;
 
   return (
     <div className={cn("relative flex min-h-0 flex-1 flex-col", className)}>
@@ -509,47 +747,114 @@ export function TranscriptLog({
           {footer}
         </div>
       </div>
-      {/* Over the bottom edge, centred as a pair: one coming or going slides the other over. */}
-      <div className="pointer-events-none absolute inset-x-3 bottom-4 z-raised flex justify-center gap-2 @container">
+      {/*
+        Over the bottom edge, centred: the message steppers, the pill to the last message and Jump to
+        latest, one coming or going sliding the others over. Below 34rem (phones, narrow panes) the
+        steppers take a row of their own above the pills.
+      */}
+      <div className="pointer-events-none absolute inset-x-3 bottom-4 z-raised flex flex-wrap items-end justify-center gap-2 @container">
         <AnimatePresence mode="popLayout">
-          {!stuck && back && jumpBack && (
-            <motion.button
-              key="back"
-              type="button"
+          {steps && stepKinds.length > 0 && (
+            <motion.div
+              key="steps"
               layout="position"
-              layoutDependency={pair}
+              layoutDependency={arrangement}
               initial={{ opacity: 0, y: 16, scale: 0.9 }}
               animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
               exit={{ opacity: 0, y: 10, scale: 0.92 }}
-              onClick={() => jumpToStart(jumpBack.id)}
-              className="focus-ring pointer-events-auto flex min-w-0 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink-2 transition-colors hover:text-ink"
+              className={cn("flex basis-full justify-center @min-[34rem]:basis-auto", dense ? "gap-4" : "gap-2")}
             >
-              {back === "up" ? <ArrowUp className="size-3.5 shrink-0" /> : <ArrowDown className="size-3.5 shrink-0" />}
-              <span className={cn("min-w-0 truncate", jumpBack.short && "hidden @min-[26rem]:block")}>{jumpBack.label}</span>
-              {jumpBack.short && <span className="min-w-0 truncate @min-[26rem]:hidden">{jumpBack.short}</span>}
-            </motion.button>
-          )}
-          {!stuck && ids.length > 0 && (
-            <motion.button
-              key="latest"
-              type="button"
-              layout="position"
-              layoutDependency={pair}
-              initial={{ opacity: 0, y: 16, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
-              exit={{ opacity: 0, y: 10, scale: 0.92 }}
-              onClick={() => {
-                setStick(true);
-                toBottom(true);
-              }}
-              className="focus-ring pointer-events-auto flex shrink-0 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink shadow-glow-accent"
-            >
-              {jumpLabel(unseen)}
-              <ArrowDown className="size-3.5" />
-            </motion.button>
+              {stepKinds.map((kind) => (
+                <MessageStepper
+                  key={kind}
+                  names={steps.names[kind]}
+                  shortcuts={steps.keys && !dense ? STEP_KEYS[kind] : undefined}
+                  older={navHas(nav, kind, NAV_OLDER)}
+                  newer={navHas(nav, kind, NAV_NEWER)}
+                  paging={paging === kind}
+                  dense={dense}
+                  onStep={(dir) => stepTo(dir, kind)}
+                />
+              ))}
+            </motion.div>
           )}
         </AnimatePresence>
+        {/* The pills share a row of their own: the one to the last message shrinks rather than wraps. */}
+        <div className="flex max-w-full min-w-0 justify-center gap-2">
+          <AnimatePresence mode="popLayout">
+            {!stuck && back && jumpBack && (
+              <motion.button
+                key="back"
+                type="button"
+                layout="position"
+                layoutDependency={arrangement}
+                initial={{ opacity: 0, y: 16, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
+                exit={{ opacity: 0, y: 10, scale: 0.92 }}
+                onClick={() => jumpToStart(jumpBack.id)}
+                className="focus-ring pointer-events-auto flex min-w-0 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink-2 transition-colors hover:text-ink"
+              >
+                {back === "up" ? <ArrowUp className="size-3.5 shrink-0" /> : <ArrowDown className="size-3.5 shrink-0" />}
+                <span className={cn("min-w-0 truncate", jumpBack.short && "hidden @min-[26rem]:block")}>{jumpBack.label}</span>
+                {jumpBack.short && <span className="min-w-0 truncate @min-[26rem]:hidden">{jumpBack.short}</span>}
+              </motion.button>
+            )}
+            {!stuck && ids.length > 0 && (
+              <motion.button
+                key="latest"
+                type="button"
+                layout="position"
+                layoutDependency={arrangement}
+                initial={{ opacity: 0, y: 16, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
+                exit={{ opacity: 0, y: 10, scale: 0.92 }}
+                onClick={() => {
+                  setStick(true);
+                  toBottom(true);
+                }}
+                className="focus-ring pointer-events-auto flex shrink-0 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink shadow-glow-accent"
+              >
+                {jumpLabel(unseen)}
+                <ArrowDown className="size-3.5" />
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
+    </div>
+  );
+}
+
+interface MessageStepperProps {
+  names: StepNames;
+  /** The step keys, for the buttons' tooltips (desktop). */
+  shortcuts?: Record<StepDir, string>;
+  older: boolean;
+  newer: boolean;
+  /** Its step back waits for earlier rows to page in. */
+  paging: boolean;
+  /** Phone: larger buttons (they grow to 48 px targets on touch screens). */
+  dense: boolean;
+  onStep: (dir: StepDir) => void;
+}
+
+/** One kind's stepper over the list's bottom edge, a glass pill like the others: ⌃ label ⌄. */
+function MessageStepper({ names, shortcuts, older, newer, paging, dense, onStep }: MessageStepperProps) {
+  const size = dense ? "md" : "sm";
+  const back = paging ? "Loading earlier messages…" : names.older;
+  return (
+    <div role="group" aria-label={names.group} className="pointer-events-auto flex items-center rounded-full glass-blur p-0.5 text-xs font-bold text-ink-2">
+      <Tooltip content={back} shortcut={shortcuts?.older}>
+        <IconButton label={back} size={size} className="rounded-full" disabled={!older} aria-busy={paging || undefined} onClick={() => onStep("older")}>
+          {paging ? <Spinner size={14} label={back} /> : <ChevronUp />}
+        </IconButton>
+      </Tooltip>
+      <span className="px-1 select-none">{names.label}</span>
+      <Tooltip content={names.newer} shortcut={shortcuts?.newer}>
+        <IconButton label={names.newer} size={size} className="rounded-full" disabled={!newer} onClick={() => onStep("newer")}>
+          <ChevronDown />
+        </IconButton>
+      </Tooltip>
     </div>
   );
 }

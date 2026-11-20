@@ -155,7 +155,7 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, c
       {/* desktop: a short window keeps a strip of transcript beside an ask card (the card scrolls instead) */}
       <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && !focus && "rounded-tile glass", !mobile && "min-h-24")}>
         {ready ? (
-          <Transcript agentKey={agentKey} padX={mobile ? 10 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} overscan={mobile ? 3 : 8} dense={mobile} />
+          <Transcript agentKey={agentKey} pageKeys={hotkeys} padX={mobile ? 10 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} overscan={mobile ? 3 : 8} dense={mobile} />
         ) : (
           <div className="px-3" aria-busy>
             <TranscriptSkeleton />

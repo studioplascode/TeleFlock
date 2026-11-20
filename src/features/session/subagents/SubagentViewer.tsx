@@ -29,9 +29,9 @@ import { errorText, hostCall, usePending } from "../api";
 import { SessionCtx } from "../context";
 import { IrcSelfCtx } from "../irc/IrcBubble";
 import { useSessionUi } from "../state";
-import { lastMessage } from "../transcript/lastMessage";
+import { lastMessage, type MessageKind, messageKind } from "../transcript/lastMessage";
 import { ircThreadKey, isRailTool, ItemRow } from "../transcript/rows";
-import { TRANSCRIPT_MAX_WIDTH, TranscriptLog } from "../transcript/Transcript";
+import { type MessageSteps, SESSION_STEPS, type StepNames, TRANSCRIPT_MAX_WIDTH, TranscriptLog } from "../transcript/Transcript";
 import { SubagentMeters } from "./SubagentMeters";
 import { mergeSnapshot, type Snapshot } from "./snapshot";
 import { groupSubagents, type SubagentNode, treeOrder } from "./grouping";
@@ -460,6 +460,12 @@ function useSubagentTranscript(hostId: string, agentId: string, subagentId: stri
 
 const EMPTY_SNAPSHOT: Snapshot = { ids: [], byId: new Map() };
 
+/** A subagent's steppers: its own messages, and the prompts it works on (the parent's task, steers). */
+const SUBAGENT_STEPS: Record<MessageKind, StepNames> = {
+  assistant: SESSION_STEPS.assistant,
+  user: { label: "Prompts", group: "Prompts", older: "Previous prompt", newer: "Next prompt" },
+};
+
 function SubTranscript({ sub, snap, mobile, followSignal }: { sub: Subagent; snap: Snapshot | null; mobile: boolean; followSignal: number }) {
   const running = sub.status === "running";
   const { ids, byId } = snap ?? EMPTY_SNAPSHOT;
@@ -468,6 +474,11 @@ function SubTranscript({ sub, snap, mobile, followSignal }: { sub: Subagent; sna
   const lastLive = last != null && ((last.kind === "assistant" && last.streaming) || (last.kind === "thinking" && last.streaming) || (last.kind === "tool" && (last.status === "running" || last.status === "pending")));
   // Its newest message (its text, or the prompt it works on: the parent's task or a later one).
   const message = useMemo(() => lastMessage(ids, (id) => byId.get(id)), [ids, byId]);
+  // The whole transcript is fetched, so a step never pages; the step keys work while focus is in this viewer.
+  const steps = useMemo<MessageSteps>(
+    () => ({ kindOf: (id) => messageKind(byId.get(id)), names: SUBAGENT_STEPS, keys: (t, list) => t != null && list.closest('[role="dialog"]')?.contains(t) === true }),
+    [byId],
+  );
   return (
     <TranscriptLog
       ids={ids}
@@ -512,6 +523,7 @@ function SubTranscript({ sub, snap, mobile, followSignal }: { sub: Subagent; sna
         </>
       )}
       jumpBack={message && (message.kind === "assistant" ? { id: message.id, label: "Agent's last message", short: "Agent's message" } : { id: message.id, label: "Last prompt" })}
+      steps={steps}
     />
   );
 }

@@ -43,6 +43,7 @@ export {
   loadOlderActivity,
   markAgentNotificationsRead,
   markNotificationsRead,
+  getSessionItem,
   getTranscript,
   selectAgentKeys,
   useActivity,

@@ -163,6 +163,12 @@ export const ACTIONS = {
   rename: { label: "Rename…", slash: "/rename", description: "Give the session a name" },
   renameAgain: { label: "Name it again", description: "Let omp's tiny model rename it from what it's doing now (Undo restores both names)" },
 
+  // ── reading the transcript (steps to the start of a message, from where it is read) ──
+  olderAgentMessage: { label: "Agent's previous message", shortcut: "Alt ↑" },
+  newerAgentMessage: { label: "Agent's next message", shortcut: "Alt ↓" },
+  olderOwnMessage: { label: "Your previous message", shortcut: "Alt Shift ↑" },
+  newerOwnMessage: { label: "Your next message", shortcut: "Alt Shift ↓" },
+
   // ── session commands (omp) ──
   compact: { label: "Compact…", slash: "/compact", description: "Summarise older turns to free context" },
   handoff: { label: "Hand off…", slash: "/handoff", description: "Continue in a fresh session from a summary" },

@@ -94,4 +94,5 @@ Global: `Ctrl+K` palette · `Ctrl+J` answer next · `Ctrl+1…6` board/inbox/act
 leave focus mode → stop turn. Message boxes: `Enter` send/steer · `Shift+Enter` newline · `Alt+Enter`
 follow-up while the agent works; multi-field forms submit with `Ctrl+Enter`.
 Board-local keys (`J/K`, `H/L`, `Enter`, `A`, `T`, `X`) belong to the board; session keys (`Esc` stop turn,
-`1…9`, Other = N+1) to the session. Global single-key shortcuts are ignored while typing in inputs.
+`1…9`, Other = N+1, `Alt+↑/↓` the agent's previous / next message, `Alt+Shift+↑/↓` the user's) to the session. Global
+single-key shortcuts are ignored while typing in inputs.

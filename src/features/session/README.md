@@ -296,6 +296,22 @@ scroll it up that far (the jump would end at the bottom, where Jump to latest go
 the view. The subagent viewer has it too ("Last prompt" for its task or a later prompt); the message board and Past sessions
 don't. Demo: `?demo&long=2000`, the pool agent, scroll up. Tests: `bun test src/features/session/transcript`.
 
+Message by message (`TranscriptLog` `steps`, `transcript/lastMessage.ts` `readingRows` / `stepMessage`, tested): beside
+those pills, scrolled up, one stepper per kind of message, "⌃ Agent ⌄" and "⌃ You ⌄" (the subagent viewer: "⌃ Prompts ⌄"
+for its task and steers), the same messages as the pill (`messageKind`). Steps go from where the list is read, the row
+at its top: ⌃ brings the start of the previous message of that kind there (from inside a message, its own start first),
+⌄ the next one, each the same jump as the pill, so a message a step put at the top is passed over by the next step either
+way and the steps walk the conversation one message at a time. A next message in the last screenful, which can't come up
+to the top, takes the list to the bottom as Jump to latest does. A step back past the loaded rows pages earlier ones in
+(⌃ spins, "Loading earlier messages…") until their message is among them or the host has none left; scrolling, or the
+list catching the bottom, ends that. A button is disabled when there is nothing that way; a stepper shows once its kind
+has a message (a session with earlier rows to page in shows both). Keys (`ACTIONS` `olderAgentMessage` …, the `?` sheet):
+Alt+↑ / Alt+↓ the agent's messages, Alt+Shift+↑ / ↓ the user's (the subagent viewer: its prompts), wherever the session
+view has focus (`inSessionScope`, as F5) or on nothing for the route's session, in the subagent viewer while it has focus;
+not in a text field holding text (its caret's), and key repeat walks on from the row being placed. Phones: below 34rem the
+steppers take a row above the pills, with 34 px buttons that grow to 48 px targets on touch. Demo: any session scrolled
+up; `?demo&long=2000` (pool) pages from the first 200 rows.
+
 Provider limits in the transcript (`transcript/limitRuns.ts`, tested): consecutive failed attempts that said only a provider
 limit (an error row with no text, HTTP 429/503/529 or a rate / usage / overload text) fold into one row, "Rate limited ×4 ·
 16:54–16:59" (`LimitRunRow`; tap to expand each failure and the system turns omp's background deliveries started between

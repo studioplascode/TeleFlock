@@ -70,6 +70,10 @@ export const SHORTCUTS: readonly ShortcutGroup[] = [
       { keys: ["1", "…", "9"], label: "Pick an answer" },
       { keys: ["N+1"], label: "Other… (the number after the last option)" },
       { keys: caps(ACTIONS.focusMode.shortcut), label: ACTIONS.focusMode.label },
+      { keys: caps(ACTIONS.olderAgentMessage.shortcut), label: ACTIONS.olderAgentMessage.label },
+      { keys: caps(ACTIONS.newerAgentMessage.shortcut), label: ACTIONS.newerAgentMessage.label },
+      { keys: caps(ACTIONS.olderOwnMessage.shortcut), label: ACTIONS.olderOwnMessage.label },
+      { keys: caps(ACTIONS.newerOwnMessage.shortcut), label: ACTIONS.newerOwnMessage.label },
     ],
   },
   {

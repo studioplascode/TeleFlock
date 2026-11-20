@@ -1,9 +1,7 @@
 import { useEffect } from "react";
+import { inSessionScope } from "../context";
 import { retryTurn } from "./actions";
 import { isResumeKey } from "./words";
-
-/** Where focus counts as "in this session" for F5 / Alt+R: the element carrying the agent key. */
-const ROOT = "data-session-root";
 
 /**
  * omp's retry keys in a session view: F5 and Alt+R while focus is inside an element whose
@@ -15,10 +13,7 @@ export function useResumeKeys(agentKey: string, fallback: boolean): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing || !isResumeKey(e)) return;
-      const t = e.target instanceof Element ? e.target : null;
-      const root = t?.closest(`[${ROOT}]`);
-      const mine = root ? root.getAttribute(ROOT) === agentKey : fallback && (t === null || t === document.body || t === document.documentElement);
-      if (!mine) return;
+      if (!inSessionScope(e.target instanceof Element ? e.target : null, agentKey, fallback)) return;
       e.preventDefault();
       if (!e.repeat) void retryTurn(agentKey);
     };

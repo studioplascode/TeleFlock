@@ -128,7 +128,7 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
 - **Transcript.** Virtualized and append-only, with streaming markdown and syntax highlighting.
   - Collapsible thinking blocks ("Thought for 12s").
   - Rich tool cards: read, edit/write (inline diff), bash (ANSI output, exit code, duration; a long or multi-line command whole in a code card), grep/glob/find (match counts, expandable), lsp, web_search (sources), browser (screenshot), eval (the code of each cell in a highlighted code card, then its output and screenshot), task (subagent cards with live progress and time left), todo (phase checklist), ask (resolved answer), github, and a generic JSON fallback.
-  - Scrolled up, **Jump to latest** and a pill to the start of the agent's last message or the user's last prompt, whichever is newer.
+  - Scrolled up, **Jump to latest** and a pill to the start of the agent's last message or the user's last prompt, whichever is newer, with steppers to the previous / next message of the agent and of the user from wherever the transcript is read (earlier history pages in as they step back).
 - **Ask card.** Single or multi select (options numbered 1…N, Other = N+1, recommended marked with ★), Other with free text, editor requests, approvals, Skip (answer nothing). It stays sticky until answered. The same option control renders on cards, the Inbox, the HUD and the phone.
 - **Composer**
   - `Enter` sends while idle and **steers** while running; `Alt+Enter` queues a **follow-up**; `Shift+Enter` is a newline. A steer or follow-up shows as a queued chip the moment it is sent and stays until it lands in the transcript; queued chips can be edited and removed.
@@ -259,6 +259,7 @@ A single-agent zen view: just the stream and the composer.
 - Typing: `Enter` send / steer, `Shift+Enter` newline, `Alt+Enter` queue a follow-up (while the agent works); `Ctrl+Enter` submits multi-field forms (wizards, commit, PR)
 - `Esc`: close the overlay, else leave focus mode, else stop the turn (in a session)
 - `F5` / `Alt+R`: Resume the stopped or failed agent in the session (no new prompt); `Ctrl+F` find in the transcript
+- `Alt+↑` / `Alt+↓`: the agent's previous / next message in the transcript; with `Shift`, the user's own (also in the subagent viewer, for its prompts)
 - A global shortcut you set in Settings (suggested `Ctrl+Alt+Space`; off until set): Quick capture from any app
 - `Ctrl+\` split
 - `Ctrl+B` sidebar

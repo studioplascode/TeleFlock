@@ -314,6 +314,11 @@ export function useSessionItem(key: string, itemId: string): TranscriptItem | un
   return useCore((s) => s.sessions[key]?.items[itemId]);
 }
 
+/** One transcript row as the store has it now, for event handlers (no subscription). */
+export function getSessionItem(key: string, itemId: string): TranscriptItem | undefined {
+  return coreStore.getState().sessions[key]?.items[itemId];
+}
+
 /** The loaded IRC messages of a session, oldest first. Re-renders only when an IRC row changes. */
 export function useIrcEntries(key: string): IrcEntry[] {
   const items = useCore(
