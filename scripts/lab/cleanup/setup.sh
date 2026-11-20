@@ -7,7 +7,7 @@
 # host does by itself.
 #
 # Usage: scripts/lab/cleanup/setup.sh [--hostd BIN] [--fresh]
-#   --hostd BIN   the tf-hostd to run (default /root/TeleFlock/target/main-check/debug/tf-hostd)
+#   --hostd BIN   the tf-hostd to run (default $CARGO_TARGET_DIR/debug/tf-hostd, else target/debug/tf-hostd)
 #   --fresh       stop the lab and delete /tmp/tf-lab-cleanup first
 # Then: scripts/lab/run cleanup -- env TF_HOSTD_CLEANUP_PACE=30 bun scripts/lab/cleanup/drive.ts
 # Stop: scripts/lab/stop cleanup --purge
@@ -16,8 +16,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 run="$repo/scripts/lab/run"
-hostd="/root/TeleFlock/target/main-check/debug/tf-hostd"
-fresh=0
+hostd="${CARGO_TARGET_DIR:-$repo/target}/debug/tf-hostd"
 while [ $# -gt 0 ]; do
   case "$1" in
     --hostd) hostd="$2"; shift 2 ;;

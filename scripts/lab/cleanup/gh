@@ -7,8 +7,9 @@
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 log="$here/../logs/gh.log"
-printf '%s pid=%s nice=%s sid=%s cgroup=%s cwd=%s args=%s\n' "$(date -u +%FT%T.%3NZ)" "$$" "$(ps -o ni= -p $$ | tr -d ' ')" \
-  "$(ps -o sid= -p $$ | tr -d ' ')" "$(cut -d: -f3 /proc/self/cgroup 2>/dev/null | head -1)" "$PWD" "$*" >>"$log"
+cg="$(cut -d: -f3 /proc/self/cgroup 2>/dev/null | head -1)"
+printf '%s pid=%s nice=%s io=%s sid=%s cgroup=%s cpu.weight=%s cwd=%s args=%s\n' "$(date -u +%FT%T.%3NZ)" "$$" "$(ps -o ni= -p $$ | tr -d ' ')" \
+  "$(ionice -p $$ 2>/dev/null | tr -d ' ' | cut -d: -f1)" "$(ps -o sid= -p $$ | tr -d ' ')" "$cg" "$(cat "/sys/fs/cgroup$cg/cpu.weight" 2>/dev/null || echo -)" "$PWD" "$*" >>"$log"
 [ "${1:-} ${2:-}" = "pr view" ] || { echo "lab gh: only \`gh pr view\` is played here" >&2; exit 1; }
 shift 2
 branch=""

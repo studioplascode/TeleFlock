@@ -5,16 +5,17 @@
 //! * no agent on the board works or waits for the user in it (`busy`, retryable);
 //! * it is not locked (`worktree_locked`, even with `force`: unlock it first);
 //! * a detached HEAD holds no commit only it knows (`orphan_commits`, unless `force`);
-//! * (0.9.6, `expect`) it is still what the page showed: its HEAD and branch, no more unpushed
-//!   commits, no live agent or herdr workspace in it that the page did not show
-//!   (`worktree_changed`; its row in the report is refreshed, so the page asks again with the
-//!   worktree as it is now);
+//! * (0.9.6, `expect`) it is still what the page showed: there (not missing, prunable or no
+//!   folder: a disk unplugged since keeps git's registration, only Forget drops one), its HEAD
+//!   and branch, no more unpushed commits, no live agent or herdr workspace in it that the page
+//!   did not show (`worktree_changed`; its row in the report is refreshed, so the page asks again
+//!   with the worktree as it is now);
 //!
 //! then it goes exactly like `worktree.remove {path}`: through herdr when a workspace shows it
 //! (which closes that workspace), else `git worktree remove [--force]` from the main worktree;
 //! uncommitted changes need `force` (`dirty_worktree`: git checks them itself, at that moment), a
-//! repository owned by another user `trust` (`untrusted_repo`). The branch is always kept. A
-//! folder already gone drops only its own registration.
+//! repository owned by another user `trust` (`untrusted_repo`). The branch is always kept.
+//! Without `expect` (older apps), a folder already gone drops only its own registration.
 //!
 //! **Forget** (`forget`, 0.9.6) only drops git's record of a worktree whose folder is gone, and
 //! never deletes a checkout: anything at the path (a disk mounted again, a restored folder, an
@@ -63,10 +64,9 @@ pub async fn remove(ctx: &Ctx, p: &CleanupRemoveParams) -> Result<Empty, ApiErro
         return Ok(Empty {});
     };
     precheck(&reg, p.force)?;
-    if let Some(expect) = &p.expect
-        && !reg.record.prunable
-        && path.is_dir()
-    {
+    // The page showed it there (it never offers Delete on a missing row): checked as it is now, gone
+    // included (a disk unplugged since). Only Forget, asked for as such, drops a registration.
+    if let Some(expect) = &p.expect {
         let now = scan::recheck(ctx, &root, &reg.record).await;
         verdict(&path, expect, &now)?;
     }
@@ -100,7 +100,12 @@ pub(crate) fn busy_agent(
 /// What changed in a worktree since the page showed it (`expect`) that its removal was not
 /// confirmed on; empty when it is what the page showed. Uncommitted changes are not among them:
 /// git refuses those without `force` itself, which asks for the force confirm as it always did.
+/// Gone now (missing, prunable or not a folder) is: Delete would drop git's registration of a
+/// checkout on a disk that comes back.
 pub(crate) fn changes(expect: &CleanupExpect, now: &CleanupWorktree) -> Vec<String> {
+    if now.missing {
+        return vec!["its folder is gone (a disk unplugged, or the folder moved away)".to_string()];
+    }
     let mut out = Vec::new();
     if expect.branch != now.branch {
         out.push(match &now.branch {
@@ -128,8 +133,12 @@ pub(crate) fn verdict(path: &Path, expect: &CleanupExpect, now: &CleanupWorktree
     if what.is_empty() {
         return Ok(());
     }
-    Err(ApiError::new("worktree_changed", format!("{} changed since the report: {}", path.display(), what.join("; ")))
-        .with_hint("Look at it as it is now before deleting it: the page shows it again."))
+    let hint = if now.missing {
+        "Nothing was deleted and git still knows it: it is whole again once its folder is back. Forget it only if it is gone for good."
+    } else {
+        "Look at it as it is now before deleting it: the page shows it again."
+    };
+    Err(ApiError::new("worktree_changed", format!("{} changed since the report: {}", path.display(), what.join("; "))).with_hint(hint))
 }
 
 /// Forget: drops git's record of a worktree whose folder is gone, never a checkout (module doc).
@@ -533,6 +542,51 @@ mod tests {
         let pushed_less = CleanupWorktree { unpushed: Some(3), ..committed.clone() };
         assert_eq!(changes(&CleanupExpect { unpushed: Some(1), ..expect_of(&committed) }, &pushed_less).len(), 1, "more commits not pushed");
         assert!(changes(&CleanupExpect { unpushed: Some(5), ..expect_of(&committed) }, &pushed_less).is_empty(), "fewer is no reason to ask again");
+    }
+
+    /// Delete never forgets: a worktree the report showed there whose folder is gone now (a disk
+    /// unplugged after the scan) is refused with `worktree_changed`, git keeps its registration,
+    /// and once the folder is back the checkout is whole again and goes as confirmed.
+    #[tokio::test]
+    async fn delete_keeps_a_checkout_gone_since_the_report() {
+        let td = fixture();
+        let root = td.path();
+        sh(root, &["checkout", "-q", "-f", "main"]);
+        let wt = root.parent().unwrap().join(format!("{}-disk", root.file_name().unwrap().to_string_lossy()));
+        sh(root, &["worktree", "add", "-q", "-b", "disk", wt.to_str().unwrap(), "main"]);
+        let common = root.join(".git");
+        let now = || {
+            let (root, wt, common) = (root.to_path_buf(), wt.clone(), common.clone());
+            async move {
+                let reg = registration(&root, &wt, false).await.unwrap().unwrap();
+                (reg.record.prunable, scan::git_facts_now(&root, &common, reg.record).await)
+            }
+        };
+        let listed = || {
+            let out = std::process::Command::new("git").args(["worktree", "list", "--porcelain"]).current_dir(root).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().any(|l| l.strip_prefix("worktree ").is_some_and(|p| same_path(Path::new(p), &wt)))
+        };
+        let (_, seen) = now().await;
+        assert!(!seen.missing);
+        let expect = expect_of(&seen);
+
+        // The disk goes: the row the page confirmed on said "there".
+        let away = wt.with_extension("unplugged");
+        std::fs::rename(&wt, &away).unwrap();
+        let (prunable, gone) = now().await;
+        assert!(prunable && gone.missing);
+        let err = verdict(&wt, &expect, &gone).unwrap_err();
+        assert_eq!(err.code, "worktree_changed");
+        assert!(err.message.contains("folder is gone"), "{}", err.message);
+        assert!(err.hint.as_deref().is_some_and(|h| h.contains("git still knows it")), "{:?}", err.hint);
+        assert!(listed(), "git still lists the worktree");
+
+        // The disk comes back: whole again, and Delete goes as confirmed.
+        std::fs::rename(&away, &wt).unwrap();
+        let (prunable, back) = now().await;
+        assert!(!prunable && !back.missing && back.dirty == Some(0));
+        assert!(verdict(&wt, &expect, &back).is_ok());
+        assert!(listed());
     }
 
     /// Forget never deletes a checkout. A worktree the report saw gone whose folder came back
