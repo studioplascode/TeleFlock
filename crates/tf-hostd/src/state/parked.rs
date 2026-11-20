@@ -751,30 +751,29 @@ pub fn check_file(path: &Path) -> FileCheck {
 ///   folder above it that is there holds something, and `repo_root` is a folder.
 ///
 /// An unmounted disk leaves an empty mount point with nothing below it: an empty nearest folder
-/// gives no verdict (`Unknown`), and so do a symlink to a folder that isn't there and an entry that
-/// can't be read. A folder that can't be opened counts as empty.
+/// gives no verdict (`Unknown`), and neither does a folder that can't be opened (permissions, a
+/// symlink to a folder that isn't there) or an entry that can't be read.
 pub fn check_folder(path: &Path, repo_root: Option<&Path>) -> FileCheck {
     match std::fs::metadata(path) {
         Ok(_) => FileCheck::Present,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // The nearest folder above it that is there. A symlink to a folder that isn't there (on
-            // an unmounted disk) is no evidence either way: no verdict.
+            // The nearest folder above it that is there (a symlink counts: whether its folder is
+            // there is for opening it to say).
             for (level, dir) in path.ancestors().skip(1).enumerate() {
                 match std::fs::symlink_metadata(dir) {
-                    Ok(m) if m.file_type().is_symlink() && std::fs::metadata(dir).is_err() => {
-                        return FileCheck::Unknown(format!("{} points to a folder that isn't there (unmounted?)", dir.display()));
-                    }
                     Ok(_) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(e) => return FileCheck::Unknown(format!("{}: {e}", dir.display())),
                 }
                 let main_there = repo_root.is_some_and(Path::is_dir);
-                return match std::fs::read_dir(dir).map_or(Occupancy::Empty, occupancy) {
-                    Occupancy::Unreadable(e) => FileCheck::Unknown(format!("{}: {e}", dir.display())),
-                    Occupancy::Filled if level == 0 || main_there => FileCheck::Missing,
-                    Occupancy::Empty if level == 0 && main_there => FileCheck::Missing,
-                    Occupancy::Filled => FileCheck::Unknown(format!("{}: the folder above it is gone too, and no main worktree is there", path.display())),
-                    Occupancy::Empty => FileCheck::Unknown(format!("{} is empty (unmounted?)", dir.display())),
+                // An execute-only folder still answers NotFound for its child but can't be listed,
+                // so it may be an empty mount point: opening it must succeed to count.
+                return match std::fs::read_dir(dir).map(occupancy) {
+                    Err(e) | Ok(Occupancy::Unreadable(e)) => FileCheck::Unknown(format!("{}: {e}", dir.display())),
+                    Ok(Occupancy::Filled) if level == 0 || main_there => FileCheck::Missing,
+                    Ok(Occupancy::Empty) if level == 0 && main_there => FileCheck::Missing,
+                    Ok(Occupancy::Filled) => FileCheck::Unknown(format!("{}: the folder above it is gone too, and no main worktree is there", path.display())),
+                    Ok(Occupancy::Empty) => FileCheck::Unknown(format!("{} is empty (unmounted?)", dir.display())),
                 };
             }
             FileCheck::Unknown(format!("{}: no folder above it is there", path.display()))
